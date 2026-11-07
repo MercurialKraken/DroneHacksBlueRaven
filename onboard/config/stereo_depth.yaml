@@ -1,0 +1,23 @@
+# onboard/depth/stereo_depth_node.py (Task C). Defaults are for the real drone (skybeta v0.3.2):
+# the organizers' OAK driver publishes raw 1024x640 bgr8 pairs at 30 Hz and no depth.
+/**:
+  ros__parameters:
+    left_topic: /oak/left/image_raw
+    right_topic: /oak/right/image_raw
+    left_info_topic: /oak/left/camera_info
+    right_info_topic: /oak/right/camera_info
+    depth_topic: /camera/depth/image_raw          # what refnav, map_align and live_map subscribe to
+    depth_info_topic: /camera/depth/camera_info
+    status_topic: /stereo_depth/status
+    rate_hz: 5.0          # a few Hz is enough for the follower and the map fit; the Jetson is shared with VIO
+    scale: 0.5            # 512x320 on the drone
+    min_m: 0.35
+    max_m: 6.0
+    encoding: 16UC1
+    sync_tol_s: 0.003
+    out_frame: ""         # default: the left camera frame, or <left>_rect when rectification rotates it
+
+# In the T4 sim, to compare against the sim's own depth without replacing it:
+#   -p left_topic:=/stereo/left/image -p right_topic:=/stereo/right/image
+#   -p left_info_topic:=/stereo/left/camera_info -p right_info_topic:=/stereo/right/camera_info
+#   -p depth_topic:=/blueraven/depth/image_raw -p depth_info_topic:=/blueraven/depth/camera_info -p use_sim_time:=true

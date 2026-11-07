@@ -1,7 +1,7 @@
 """Map-based drift correction (todos.md Task 2). Pure: numpy + nav.course_map.
 
 Each depth frame's points are placed in the course map with the current pose estimate and aligned
-to the map's 'localization' distance field (walls; no floor, no net) by a robust Gauss-Newton fit
+to the map's 'localization' distance field (walls; see AlignParams.field) by a robust Gauss-Newton fit
 over (dx, dy, dyaw). Only directions the walls constrain are corrected: in a straight corridor the
 walls say nothing about position along it, so that component is left alone.
 
@@ -38,6 +38,11 @@ def level_to_map(pts_level: np.ndarray, pose: tuple[float, float, float, float])
 
 @dataclass
 class AlignParams:
+    # 'localization' (walls only, no nets). Depth DOES see the nets, so with this field net-heavy views (the
+    # first corridor, the north side) are rejected and get no correction. 'planning' (walls + nets) accepts
+    # them but was compared on 4 T4 truth bags (2026-11-07): position error the same (rms 0.039-0.074 vs
+    # 0.041-0.073 m), heading worse (follow_110923Z max 9.5 vs 5.1 deg), likely because the map's nets sit a
+    # few cm from the sim's. Revisit if the net geometry in the SDF is confirmed.
     field: str = "localization"
     band_m: float = 0.5           # points within this of flight height (walls, not floor or ceiling)
     max_points: int = 800         # subsample for speed
@@ -48,6 +53,14 @@ class AlignParams:
     min_eig_xy: float = 40.0      # information (sum of weighted gradient^2) below which a direction is unobservable
     min_eig_yaw: float = 20.0
     max_rms_m: float = 0.08       # a fit worse than this is rejected
+    # A yaw step is kept only if it lowers the residual by this fraction versus the same fit without yaw
+    # (T4, 13 bags: before the maze 5->6 turn, unproven +2.0-2.5 deg steps about a far origin turned 2-4 cm
+    # into 10-11 cm along-track and stopped 4 runs at the real wall).
+    yaw_min_gain: float = 0.10
+    # Weight points near the aircraft more (Hinson, devsim perturbed suite: a whole-view fit at the M2 tip used
+    # objects that had moved differently from the wall being passed). w *= 1 / (1 + (r / near_m)^2), r the
+    # horizontal range from the body. 0 = off.
+    near_m: float = 0.0
 
 
 @dataclass
@@ -60,6 +73,7 @@ class AlignResult:
     rms_after: float
     observable: np.ndarray        # bool (3,): which of x, y, yaw were corrected
     why: str = ""
+    theta: np.ndarray | None = None   # the full solution (in H's well-conditioned eigen-space), before per-axis gating
 
 
 def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, float],
@@ -86,6 +100,8 @@ def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, f
         ex, ey = P[m, 0] - pose[0], P[m, 1] - pose[1]
         J = np.stack([gx, gy, gx * (-ey) + gy * ex], axis=1)          # d(distance)/d(dx, dy, dyaw)
         w = np.where(np.abs(d) <= p.huber_m, 1.0, p.huber_m / np.maximum(np.abs(d), 1e-9))
+        if p.near_m > 0:
+            w = w / (1.0 + (ex * ex + ey * ey) / (p.near_m * p.near_m))
         H = (J * w[:, None]).T @ J
         b = (J * w[:, None]).T @ d
         if rms0 is None:
@@ -108,9 +124,18 @@ def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, f
     obs[:2] &= np.diag(H)[:2] > p.min_eig_xy
     obs[2] &= H[2, 2] > p.min_eig_yaw
     delta = np.where(obs, th, 0.0)
+    if obs[2] and abs(delta[2]) > 1e-6:
+        # is the yaw part earning its keep? compare against the same translation with no rotation
+        pose_ny = (x0 + delta[0], y0 + delta[1], z0, yaw0)
+        d_ny = course_map.distance(level_to_map(pts, pose_ny), p.field)
+        m_ny = np.isfinite(d_ny) & (np.abs(d_ny) < p.inlier_m)
+        rms_ny = float(np.sqrt(np.mean(d_ny[m_ny] ** 2))) if m_ny.any() else math.inf
+        if not (rms1 <= (1.0 - p.yaw_min_gain) * rms_ny):
+            delta[2] = 0.0
+            obs = obs.copy(); obs[2] = False
     if not (rms1 <= p.max_rms_m):
-        return AlignResult(False, zero, H, int(m.sum()), rms0, rms1, obs, f"rms {rms1:.3f} > {p.max_rms_m}")
-    return AlignResult(True, delta, H, int(m.sum()), rms0, rms1, obs)
+        return AlignResult(False, zero, H, int(m.sum()), rms0, rms1, obs, f"rms {rms1:.3f} > {p.max_rms_m}", th.copy())
+    return AlignResult(True, delta, H, int(m.sum()), rms0, rms1, obs, "", th.copy())
 
 
 @dataclass
@@ -156,6 +181,16 @@ class CorrectorParams:
     max_rate_yaw: float = math.radians(3.0)
     max_jump_xy: float = 0.5      # a single measurement further than this is ignored (likely a wrong match)
     max_jump_yaw: float = math.radians(10.0)
+    max_total_yaw: float = math.radians(20.0)   # the correction's yaw never exceeds this (raw drift seen: 11.9 deg on speedprof_154800Z)
+    # The fits' heading accuracy floor is ~1.2-1.5 deg rms (T4, 10 truth bags), worse than a good raw heading
+    # (0.3-0.7 deg). So yaw follows only a sustained innovation beyond yaw_deadband, and slowly.
+    tau_yaw_s: float = 8.0
+    yaw_deadband: float = math.radians(1.0)
+    # ...but a large innovation is real drift (raw heading drifted 9 deg on follow_115005Z) and must be followed
+    # fast: above yaw_fast the yaw uses tau_yaw_fast_s. With a single slow tau the corrected heading on that bag
+    # went 1.6 -> 3.1 deg rms.
+    yaw_fast: float = math.radians(2.5)
+    tau_yaw_fast_s: float = 2.0
     align: AlignParams = field(default_factory=AlignParams)
 
 
@@ -164,6 +199,7 @@ class DriftCorrector:
 
     def __init__(self, course_map, start: SE2, params: CorrectorParams | None = None) -> None:
         self.cm, self.T, self.p = course_map, start, params or CorrectorParams()
+        self.start = start
         self.t_last: float | None = None
         self.n = {"frames": 0, "used": 0, "rejected_fit": 0, "rejected_jump": 0}
         self.last: AlignResult | None = None
@@ -183,12 +219,18 @@ class DriftCorrector:
             self.n["rejected_jump"] += 1
             return self.T
         k = 1.0 - math.exp(-dt / self.p.tau_s) if dt > 0 else 0.0
-        sx, sy, syaw = k * dx, k * dy, k * dyaw
+        tau_y = self.p.tau_yaw_fast_s if abs(dyaw) > self.p.yaw_fast else self.p.tau_yaw_s
+        k_yaw = 1.0 - math.exp(-dt / tau_y) if dt > 0 else 0.0
+        dyaw_eff = math.copysign(max(0.0, abs(dyaw) - self.p.yaw_deadband), dyaw)
+        sx, sy, syaw = k * dx, k * dy, k_yaw * dyaw_eff
         lim = self.p.max_rate_xy * dt
         n_xy = math.hypot(sx, sy)
         if n_xy > lim > 0:
             sx, sy = sx * lim / n_xy, sy * lim / n_xy
         syaw = max(-self.p.max_rate_yaw * dt, min(self.p.max_rate_yaw * dt, syaw))
+        tot = wrap(self.T.yaw + syaw - self.start.yaw)                 # keep the total yaw correction bounded
+        if abs(tot) > self.p.max_total_yaw:
+            syaw -= tot - math.copysign(self.p.max_total_yaw, tot)
         # compose: rotate about the body by syaw, then translate; T' = D . T
         bx, by = prior[0], prior[1]
         c, s = math.cos(syaw), math.sin(syaw)

@@ -17,7 +17,8 @@ CELL = 0.05
 def grid_map(dist_fn, lo, hi):
     xs, ys, zs = (np.arange(lo[i], hi[i] + 1e-9, CELL) for i in range(3))
     X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
-    return CourseMap({"localization": dist_fn(X, Y, Z).astype(np.float32)}, (xs[0], ys[0], zs[0]), CELL)
+    f = dist_fn(X, Y, Z).astype(np.float32)
+    return CourseMap({"localization": f, "planning": f}, (xs[0], ys[0], zs[0]), CELL)
 
 
 def room():
@@ -93,7 +94,8 @@ def test_corrector_converges_smoothly_and_ignores_a_jump():
     c, s = math.cos(-true_T.yaw), math.sin(-true_T.yaw)
     ox, oy = truth[0] - true_T.x, truth[1] - true_T.y
     odom = (c * ox - s * oy, s * ox + c * oy, 0.8, truth[3] - true_T.yaw)
-    dc = DriftCorrector(cm, SE2(), CorrectorParams(tau_s=1.0, max_rate_xy=0.2, max_rate_yaw=math.radians(5)))
+    dc = DriftCorrector(cm, SE2(), CorrectorParams(tau_s=1.0, max_rate_xy=0.2, max_rate_yaw=math.radians(5),
+                                                   tau_yaw_s=1.0, yaw_deadband=0.0))
     steps = []
     for k in range(60):                                         # 12 s at 5 Hz
         before = dc.T.pose(odom)
@@ -109,6 +111,25 @@ def test_corrector_converges_smoothly_and_ignores_a_jump():
         dc.update(12.2 + 0.2 * k, jumped, pts)
     moved = dc.T.pose(odom)
     assert math.hypot(moved[0] - est[0], moved[1] - est[1]) < 0.1
+
+
+def test_a_small_heading_error_is_left_alone_but_a_large_one_is_corrected():
+    # fits are only good to ~1.2-1.5 deg; chasing a 0.7 deg raw error made heading worse on the T4
+    cm = room()
+    truth = (1.4, 1.2, 0.8, math.radians(20))
+    pts = wall_points(ROOM_WALLS, truth)
+
+    def run(err_deg, seconds=30):
+        true_T = SE2(0.0, 0.0, math.radians(err_deg))
+        c, s = math.cos(-true_T.yaw), math.sin(-true_T.yaw)
+        odom = (c * truth[0] - s * truth[1], s * truth[0] + c * truth[1], 0.8, truth[3] - true_T.yaw)
+        dc = DriftCorrector(cm, SE2())
+        for k in range(int(seconds * 5)):
+            dc.update(k * 0.2, odom, pts)
+        return math.degrees(dc.T.yaw)
+
+    assert abs(run(0.7)) < 0.05                           # inside the dead band: no yaw correction
+    assert 3.0 < run(5.0) < 4.2                           # outside: corrected to within the dead band
 
 
 def test_correction_ned_maps_raw_px4_onto_the_corrected_pose():
