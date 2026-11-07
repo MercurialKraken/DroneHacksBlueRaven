@@ -1,5 +1,5 @@
-"""Replay a bag's IMU and stereo stamps through the old and the new IMU/frame pairing, with an injected
-executor stall, and count lost IMU. No ROS, no cuVSLAM; needs numpy (and zstandard for zstd bags).
+"""Replay a bag's IMU and stereo stamps through onboard.slam.imu_sync with an injected executor stall,
+and count lost IMU. No ROS, no cuVSLAM (zstandard for zstd bags).
 
     python3 tools/replay_imu_sync.py BAG.mcap --stall-at 80 --stall 1.2 [--images-first]
 
