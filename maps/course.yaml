@@ -4,8 +4,9 @@
 # Frame `map`: the published course file's own frame. Metres, z up; for this OBJ x = east,
 # y = north, origin = centre of the floor. Every coordinate below is in `map`.
 #
-# Values marked `confirmed: false` were derived from the OBJ's geometry (named pieces, floor
-# lines, wall ends) and still need checking against the event page's checkpoint diagram.
+# Checkpoint lines are checked against the event page's "Checkpoints from above" diagram
+# (20 x 20 ft; map metres = feet * 0.3048 - 3.048 on both axes, north up). `confirmed: false`
+# marks values still derived only from the OBJ's geometry.
 
 course:
   name: dronehacks-2026-v3
@@ -30,37 +31,40 @@ limits:
 # (its centre at least drone_radius past the line), moving along `direction`.
 checkpoints:
   - id: CP1
-    name: end of the first corridor
-    line: [[-3.048, 2.121], [-1.981, 2.121]]    # across the west corridor at the north end of maze divider M1
+    name: end of the first corridor, where the floor line turns east
+    line: [[-3.048, 2.585], [-1.930, 2.585]]    # across the west corridor at the floor line's turn (diagram)
     direction: [0.0, 1.0]
     points: 4
-    confirmed: false
+    confirmed: true
+    # Whole drone across means its centre at y >= 2.585 + drone_radius = 2.865, which leaves
+    # 0.18 m to the north net: less than the radius. As drawn, CP1 can't be fully crossed without
+    # touching the net, so ask the organizers how it is judged.
   - id: CP2
     name: Gate A, leaving the maze where the floor line ends
-    line: [[0.305, 2.121], [0.305, 3.048]]      # the gap between maze divider M3's north end and the north net
+    line: [[0.305, 2.121], [0.305, 3.048]]      # from maze divider M3's north end to the north net
     direction: [1.0, 0.0]
     points: 7
-    confirmed: false
+    confirmed: true
   - id: CP3
     name: tunnel south exit
     line: [[1.581, -0.305], [3.042, -0.305]]    # the tube's open south end, inner width
     direction: [0.0, -1.0]
     points: 10
-    confirmed: false
+    confirmed: true
   - id: CP4
     name: enter the landing area through Gate B or the window, without landing
     points: 7
     options:
       - name: Gate B
-        line: [[-0.925, -0.622], [0.109, -0.530]]   # from wall A1's south end to wall C2b's north end
-        direction: [0.089, -0.996]
-        confirmed: false
+        line: [[0.157, -0.548], [0.157, 0.406]]     # from wall C2b's north end straight north to the barrier
+        direction: [-1.0, 0.0]                      # westward, into the landing area
+        confirmed: true
       - name: window
         line: [[-0.628, -2.702], [-0.315, -1.843]]  # window in wall C2a, along the wall's centre line
         direction: [-0.940, 0.343]
         z: [0.305, 1.219]                           # the opening's bottom and top edges
         bonus_points: 5
-        confirmed: false
+        confirmed: true
   - id: CP5
     name: land and disarm with the whole drone inside the pad's outer ring
     centre: [-2.042, -0.792]                    # "Landing pad" rings r9 / r20 / r30 share this centre
@@ -101,7 +105,8 @@ sanity:
   - {name: "maze corridor M1-M2",           at: [-1.372, 2.0, 1.0],      min: 0.47, max: 0.52}  # 1.02 m wide
   - {name: "Gate A opening",                at: [0.305, 2.6, 1.0],       min: 0.42}
   - {name: "tunnel centre",                 at: [2.3115, 0.457, 0.94],   min: 0.68, max: 0.75}  # 1.46 m inner width
-  - {name: "Gate B opening",                at: [-0.408, -0.576, 1.0],   min: 0.45}
+  - {name: "Gate B opening",                at: [0.157, -0.07, 1.0],     min: 0.42}   # 0.95 m wide
+  - {name: "gap between A1 and C2b",        at: [-0.408, -0.576, 1.0],   min: 0.45}
   - {name: "window centre",                 at: [-0.471, -2.272, 0.762], min: 0.42, max: 0.47}  # 0.914 m square
   - {name: "inside maze divider M1",        at: [-1.9305, 1.3, 1.0],     max: 0.0}
   - {name: "inside barrier 2",              at: [-0.6, 0.457, 1.0],      max: 0.0}

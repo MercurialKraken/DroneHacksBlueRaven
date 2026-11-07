@@ -61,7 +61,7 @@ All at 1.0 m height unless noted. These are planning-field values from the build
 | Maze corridor M1–M2 (1.02 m) | 0.48 | 0.38 |
 | Gate A | 0.45 | 0.38 |
 | Tunnel centre (1.46 m inner width) | 0.71 | 0.38 |
-| Gate B | 0.46 | 0.38 |
+| Gate B (0.95 m, from C2b's north end to the barrier) | 0.44 | 0.38 |
 | **Window centre** (0.914 m square, z 0.305–1.219) | **0.42** | 0.38 |
 
 **Window: hand-off note for Task 3.** The window leaves about **4 cm of slack** in this field (about 7.7 cm in reality). Vertically, the drone's centre must be within z 0.685–0.839 m. A 10 cm A* grid can easily miss that gap, so plan the window approach on the exact centre line, or on a finer grid locally. Get Gate B (CP4) working first; the window is worth +5 only on a finished run.
@@ -69,7 +69,8 @@ All at 1.0 m height unless noted. These are planning-field values from the build
 ## Open issues
 
 - **Launch vs sim spawn.** The launch mark's centre is (−2.515, 0.914), but `todos.md` gives the sim spawn as (−2.515, 1.114), 0.2 m further north. It could be how the sim places `base_link`, or a layout difference between the sim's CAD and v3. `tools/sim_eval/compare_course_voxels.py` measures both the spawn offset and the best-fit x/y shift between this map and the sim's own voxels. Run it in the companion once the VM is up, then write the result here.
-- **Checkpoint lines are derived, not official.** They were measured from wall ends, the floor guideline, the tube's ends and the pad rings (`confirmed: false` in `course.yaml`). Check them against the event page's diagram.
+- **Checkpoint lines match the event page's "Checkpoints from above" diagram** (checked 2026-11-07; map metres = feet × 0.3048 − 3.048). CP1 sits at the floor line's turn (y 2.585). Gate B is the line from C2b's north end straight up to the barrier (x 0.157), crossed heading west.
+- **CP1 can't be fully crossed as drawn.** Whole drone across needs the centre at y ≥ 2.865, but the net at 3.048 leaves only 0.18 m, less than the 0.28 m radius. The drone's centre can safely reach about y 2.67. Ask the organizers how CP1 is judged.
 - **"Barrier 3 (cut to 55 in)"** is still 1.727 m tall in the mesh. It only matters for the return over the barrier, which `issues.md` says is probably impossible.
 - **Launch yaw (90°, facing north) and `base_link` height (0.07 m)** are sim values. Confirm them at the net.
 
