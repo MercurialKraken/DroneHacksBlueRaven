@@ -44,12 +44,16 @@ class PX4:
             elif c == "land":
                 self.nav = C.NAV_AUTO_LAND
 
-    def physics(self, sp, dt):
+    def physics(self, sp, dt, vff=None):
         want = np.zeros(3)
         if self.armed and self.nav == C.NAV_OFFBOARD and sp is not None:
             err = np.array(sp[:3]) - self.est()
             dist = math.hypot(err[0], err[1])
-            if dist > 1e-6:
+            if vff is not None:                  # PX4 adds a velocity feed-forward to the position loop's output
+                want[:2] = np.array(vff) + XY_P * err[:2]
+                sp_n = np.linalg.norm(want[:2])
+                want[:2] *= min(1.0, VXY_MAX / sp_n) if sp_n > 1e-9 else 1.0
+            elif dist > 1e-6:
                 want[:2] = err[:2] / dist * min(VXY_MAX, XY_P * dist, math.sqrt(2 * ACC_XY * dist))
             want[2] = np.clip(1.0 * err[2], -VZ_UP, VZ_DN)
             yerr = (sp[3] - self.yaw + math.pi) % (2 * math.pi) - math.pi
@@ -122,7 +126,7 @@ def simulate(world, prm, noise=False, drift=0.0, seed=0, seconds=600.0, quiet=Fa
             log["t"].append(t)
             log["true"].append(px4.pos.copy())
             log["est"].append(px4.est())
-        px4.physics(out.setpoint if out.stream else None, DT)
+        px4.physics(out.setpoint if out.stream else None, DT, out.velocity if out.stream else None)
         hit = world.collision(px4.pos, RADIUS)
         if hit:
             crash = f"CRASH into {hit} at true n={px4.pos[0]:.2f} e={px4.pos[1]:.2f} up={-px4.pos[2]:.2f}"

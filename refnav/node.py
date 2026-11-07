@@ -263,9 +263,10 @@ class RefNav(Node):
             s = self._TSP()
             s.timestamp = o.timestamp
             s.position = [float(c) for c in out.setpoint[:3]]
-            s.velocity = [math.nan] * 3
-            s.acceleration = [math.nan] * 3
+            s.velocity = [float(out.velocity[0]), float(out.velocity[1]), math.nan] if out.velocity else [math.nan] * 3
+            s.acceleration = [float(out.accel[0]), float(out.accel[1]), math.nan] if out.accel else [math.nan] * 3
             s.yaw = float(out.setpoint[3])
+            s.yawspeed = float(out.yawspeed) if out.yawspeed is not None else math.nan
             self.pub_sp.publish(s)
         for c in out.commands:
             if c == "offboard":

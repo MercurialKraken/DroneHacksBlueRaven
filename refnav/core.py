@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from . import depth as D
+from . import follow as F
 from . import planner as P
 
 if TYPE_CHECKING:
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
 
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
-AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold")
+AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold", "follow")
 LEG_PHASES = ("turn", "check", "go")
 
 
@@ -114,6 +115,16 @@ class Params:
     gap_view_deg: float = 34.0                  # half view inside which live depth replaces remembered points
     look_step_deg: float = 30.0                 # yaw this far when no bearing is clear, then look again
     look_tries: int = 3
+    follow: bool = False                        # True: fly one smooth path through the route instead of stop-turn-go legs
+    fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
+    a_lat_mps2: float = 0.5
+    look_min_m: float = 0.3                     # the nose faces a point this far ahead, more at speed
+    look_s: float = 1.5
+    look_max_m: float = 1.2
+    ref_lead_max_m: float = 0.4                 # the reference never leads the aircraft by more
+    xtrack_slow_m: float = 0.12                 # off the path by more than this: slow down...
+    xtrack_stop_m: float = 0.35                 # ...and stop at this
+    yaw_slow_deg: float = 35.0                  # heading error at which forward speed reaches zero
 
 
 @dataclass
@@ -132,6 +143,9 @@ class Vehicle:
 class Output:
     phase: str
     setpoint: tuple[float, float, float, float] | None = None     # (n, e, d, yaw) for the trajectory setpoint
+    velocity: tuple[float, float] | None = None   # (vn, ve) feed-forward with the setpoint, follow mode only
+    accel: tuple[float, float] | None = None      # (an, ae) feed-forward, follow mode only
+    yawspeed: float | None = None                 # rad/s feed-forward: the slew this tick, follow mode only
     stream: bool = False              # publish offboard_control_mode + the setpoint this tick
     commands: list[str] = field(default_factory=list)   # "offboard" | "arm" | "land" | "disarm" (checked)
     events: list[str] = field(default_factory=list)
@@ -233,6 +247,10 @@ class Mission:
         self.looks: int = 0
         self.t_settled: float | None = None         # since when the turn has held heading and position
         self.memory: P.PointMemory = P.PointMemory(params.gap_memory_s)
+        self.follower: F.Follower | None = None
+        self.cmd: F.Command | None = None
+        self.target_s: list[float] = []             # path distance of each route point
+        self.yawspeed: float = 0.0
 
     def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
@@ -441,10 +459,12 @@ class Mission:
                 if p.hover_s > 0:
                     self._set("hover", now, out, f"holding {p.hover_s:.0f} s at {p.height_m:.1f} m")
                 else:
-                    self._next_leg(now, out, v)
+                    self._start(now, out, v)
         elif ph == "hover":
             if now - self.t_phase >= p.hover_s:
-                self._next_leg(now, out, v)
+                self._start(now, out, v)
+        elif ph == "follow":
+            self._follow(now, dt, out, v)
         elif ph == "turn":
             err = self._slew_yaw(self.leg_yaw, dt)
             if self._turn_settled(now, err, v):
@@ -486,9 +506,66 @@ class Mission:
 
         out.phase = self.phase
         out.setpoint = tuple(self.sp) if self.sp is not None else None
+        if self.phase == "follow" and self.cmd is not None:
+            out.velocity, out.accel, out.yawspeed = self.cmd.vel, self.cmd.acc, self.yawspeed
         # PX4 owns the landing once AUTO_LAND is seen: nothing streams from then on
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
+
+    def _start(self, now: float, out: Output, v: Vehicle) -> None:
+        if not self.p.follow:
+            self._next_leg(now, out, v)
+            return
+        p = self.p
+        path = F.fillet_path([(self.sp[0], self.sp[1])] + self.targets, p.fillet_m)
+        prof = F.speed_profile(path, p.speed_mps, math.radians(min(p.yaw_rate_dps, 45.0)), p.a_lat_mps2,
+                               0.5, p.brake_mps2 if p.brake_mps2 > 0 else 0.5)
+        self.follower = F.Follower(path, prof, ref_lead_max_m=p.ref_lead_max_m, look_min_m=p.look_min_m, look_s=p.look_s,
+                                   look_max_m=p.look_max_m, face_tol_rad=math.radians(p.face_tol_deg),
+                                   xtrack_slow_m=p.xtrack_slow_m, xtrack_stop_m=p.xtrack_stop_m,
+                                   yaw_slow_rad=math.radians(p.yaw_slow_deg), end_tol_m=p.arrive_m)
+        lo, self.target_s = 0.0, []
+        for t in self.targets:                       # in route order, so a U-turn's far corridor is never matched
+            lo = path.project(t, lo, path.length)[0]
+            self.target_s.append(lo)
+        self.best_dist, self.t_best = 0.0, now
+        self.clr_hist, self.corr_t = [], None
+        self._set("follow", now, out, f"path {path.length:.1f} m through {len(self.targets)} points")
+
+    def _follow(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
+        """One tick on the path: depth must show the way clear along the current heading, else the reference waits."""
+        p, fol = self.p, self.follower
+        path = fol.path
+        self.leg_heading = float(path.psi[path.index(fol.s_ref)])
+        clr = self._clearance(v) if self.depth_fresh(now) else None
+        if clr is not None and not self.corridor_fresh(now):
+            clr = None                                       # the latest evidence of this corridor is too old
+        scale = 1.0
+        if clr is None:
+            self.counts["depth_holds"] += 1
+            scale = 0.0
+        else:
+            self.last_clearance = clr
+            ahead = min(fol._next_sharp(fol.s_ref), path.length) - fol.s_hat
+            if clr < min(p.stop_m, max(ahead, 0.0) + p.end_clear_m):
+                self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
+                self.counts["obstacle_stops"] += 1
+                self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead at {fol.s_hat:.1f} m along the path")
+                return
+        self.cmd = fol.step((v.pos[0], v.pos[1]), v.heading, dt, scale)
+        before = self.sp[3]
+        self._slew_yaw(self.cmd.yaw, dt)
+        self.yawspeed = _wrap(self.sp[3] - before) / dt if dt > 0 else 0.0
+        self.sp[0], self.sp[1] = self.cmd.pos
+        self.leg = sum(1 for ts in self.target_s if ts <= fol.s_hat + 0.05)
+        self.legs_done = self.leg
+        if fol.s_hat > self.best_dist + 0.1:
+            self.best_dist, self.t_best = fol.s_hat, now
+        if now - self.t_best > p.stall_s:
+            self.counts["stalls"] += 1
+            self._land(now, out, f"no progress along the path for {p.stall_s:.0f} s at {fol.s_hat:.1f} m")
+        elif self.cmd.done:
+            self._land(now, out, "route complete")
 
     def _next_leg(self, now: float, out: Output, v: Vehicle) -> None:
         if self.leg >= len(self.targets):
@@ -665,4 +742,15 @@ class Mission:
                 "depth_valid_frac": None if self.last_valid_frac is None else round(self.last_valid_frac, 3),
                 "depth_reject": None if self.depth_reject is None else self.depth_reject[1],
                 "health_bad_s": (None if math.isinf(self.health.bad_for(now)) else round(self.health.bad_for(now), 2)),
-                **self.counts}
+                **self._follow_status(), **self.counts}
+
+    def _follow_status(self) -> dict[str, Any]:
+        if self.follower is None:
+            return {}
+        path, c = self.follower.path, self.cmd
+        every = max(1, round(0.1 / F.STEP_M))
+        return {"path": [[round(float(a), 3), round(float(b), 3)] for a, b in zip(path.x[::every], path.y[::every])],
+                "path_len": round(path.length, 2),
+                **({} if c is None else {"s_ref": round(c.s_ref, 2), "s_hat": round(c.s_hat, 2), "xtrack": round(c.xtrack, 3),
+                                         "scale": round(c.scale, 2), "look": [round(c.look[0], 3), round(c.look[1], 3)],
+                                         "yaw_cmd": round(c.yaw, 3)})}

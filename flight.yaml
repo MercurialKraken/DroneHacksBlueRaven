@@ -10,4 +10,4 @@
     status_topic: /refnav/status
     settle_s: 0.5   # a turn ends only once heading and position have held this long
     yaw_rate_dps: 45.0   # 90 deg/s turns broke cuVSLAM tracking (0.6 m estimate jump on the leg 2 turn)
-    hold_s: 0.5
+    follow: true    # one smooth path through the route, see refnav/follow.py
