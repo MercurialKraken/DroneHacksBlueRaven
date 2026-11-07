@@ -1,14 +1,20 @@
 """Read native PX4 GPS before a GPS-only example. Never publishes any message."""
+from __future__ import annotations
+
 import math
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from px4_msgs.msg import SensorGps
 
 
-def usable_fix(msg):
+def usable_fix(msg: SensorGps) -> bool:
     return (msg.timestamp > 0 and msg.fix_type >= 3 and msg.satellites_used >= 4
             and math.isfinite(msg.eph) and 0 <= msg.eph <= 10.)
 
 
-def wait_for_gps(timeout_s=30.):
+def wait_for_gps(timeout_s: float = 30.) -> bool:
     import rclpy
     from rclpy.node import Node
     from px4_msgs.msg import SensorGps
@@ -17,8 +23,8 @@ def wait_for_gps(timeout_s=30.):
         raise ValueError("GPS absence checks require at least 25 seconds of discovery")
     rclpy.init(args=[])
     node = Node("gps_lesson_readiness")
-    samples = []
-    def on(msg):
+    samples: list[int] = []
+    def on(msg: SensorGps) -> None:
         if usable_fix(msg):
             if not samples or msg.timestamp > samples[-1]:
                 samples.append(msg.timestamp)

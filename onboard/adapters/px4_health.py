@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import json
 import time
+from typing import TYPE_CHECKING
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from px4_msgs.msg import VehicleLocalPosition
 
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -24,14 +30,15 @@ FLAGS = ("xy_valid", "z_valid", "v_xy_valid", "v_z_valid")
 VERTICAL_FLAGS = ("z_valid", "v_z_valid")
 
 
-def estimate_ok(flags, age_s, stale_s=0.5, vertical_only=False):
+def estimate_ok(flags: Mapping[str, bool] | None, age_s: float | None, stale_s: float = 0.5,
+                vertical_only: bool = False) -> bool:
     """PURE: all validity flags set and the sample younger than stale_s."""
     required = VERTICAL_FLAGS if vertical_only else FLAGS
     return flags is not None and age_s is not None and age_s <= stale_s and all(bool(flags.get(f)) for f in required)
 
 
 class Px4Health(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("refnav_px4_health")
         from px4_msgs.msg import VehicleLocalPosition
         self.stale_s = float(self.declare_parameter("stale_s", 0.5).value)
@@ -44,16 +51,16 @@ class Px4Health(Node):
         self.create_subscription(VehicleLocalPosition, topic, self._on, PX4_QOS)
         self.create_timer(0.2, self._tick)
 
-    def _now(self):
+    def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
-    def _on(self, m):
+    def _on(self, m: VehicleLocalPosition) -> None:
         self.flags = {f: getattr(m, f) for f in FLAGS}
         self.t = self._now()
         self.received += 1
         self.sample_stamp, self.sample_wall = int(m.timestamp), time.monotonic()
 
-    def _tick(self):
+    def _tick(self) -> None:
         now = self._now()
         age = None if self.t is None else now - self.t
         healthy = bool(estimate_ok(self.flags, age, self.stale_s, self.vertical_only))
@@ -69,7 +76,7 @@ class Px4Health(Node):
             self.reported = healthy
 
 
-def main():
+def main() -> None:
     rclpy.init()
     rclpy.spin(Px4Health())
 

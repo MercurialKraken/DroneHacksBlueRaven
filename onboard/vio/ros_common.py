@@ -4,9 +4,20 @@ NOT here — see frames.py / validation.py."""
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Any
+
+    from px4_msgs.msg import VehicleOdometry
+    from rclpy.node import Node
+    from std_msgs.msg import Header
+
+    from .frames import PX4Odometry
 
 # QoS compatible with the pinned native PX4 interface. Validate compatibility
 # against the installed endpoints when changing firmware or middleware.
@@ -19,21 +30,21 @@ PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
 SENSOR_QOS = qos_profile_sensor_data
 
 
-def now_us(node):
+def now_us(node: Node) -> int:
     """Node clock in integer microseconds (honours use_sim_time)."""
     return node.get_clock().now().nanoseconds // 1000
 
 
-def stamp_of(header):
+def stamp_of(header: Header) -> int:
     from .frames import stamp_us
     return stamp_us(header.stamp.sec, header.stamp.nanosec)
 
 
-def _f3(v):
+def _f3(v: Iterable[float]) -> list[float]:
     return [float(c) for c in v]
 
 
-def fill_vehicle_odometry(msg, odo):
+def fill_vehicle_odometry(msg: VehicleOdometry, odo: PX4Odometry) -> VehicleOdometry:
     """Copy a frames.PX4Odometry into a px4_msgs/VehicleOdometry message."""
     msg.timestamp = int(odo.timestamp)
     msg.timestamp_sample = int(odo.timestamp_sample)
@@ -51,7 +62,7 @@ def fill_vehicle_odometry(msg, odo):
     return msg
 
 
-def declare(node, name, default):
+def declare(node: Node, name: str, default: Any) -> Any:
     """Declare + read a parameter. Numeric parameters are dynamically typed so
     `-p duration_s:=150` and `:=150.0` both work (rclpy otherwise refuses an
     INTEGER for a DOUBLE default and the node dies at startup)."""
@@ -64,7 +75,7 @@ def declare(node, name, default):
     return v
 
 
-def finite_or_nan(x):
+def finite_or_nan(x: object) -> float:
     try:
         x = float(x)
     except (TypeError, ValueError):

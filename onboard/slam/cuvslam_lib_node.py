@@ -5,10 +5,13 @@ Consumes images, camera calibration, IMU and static TF. Publishes estimated
 odometry, tracking status and per-frame processing diagnostics. Configuration
 and code are shared across physical and simulated ROS sensor drivers.
 """
+from __future__ import annotations
+
 import base64
 import json
 import struct
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rclpy
@@ -26,64 +29,71 @@ from .pose_cov import transform_pose_covariance
 from .stereo_pairing import add_half
 from .vio_evidence import visually_tracked
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from typing import Any
+
+    from geometry_msgs.msg import TransformStamped
+    from std_msgs.msg import Header
+
 try:
     from isaac_ros_visual_slam_interfaces.msg import VisualSlamStatus
 except ImportError:                                    # status is optional
     VisualSlamStatus = None
 
 
-def _T(rot_xyzw, t):
+def _T(rot_xyzw: Sequence[float], t: Sequence[float]) -> np.ndarray:
     M = np.eye(4)
     M[:3, :3] = R.from_quat(rot_xyzw).as_matrix()
     M[:3, 3] = t
     return M
 
 
-def _tf_matrix(tf):
+def _tf_matrix(tf: TransformStamped) -> np.ndarray:
     q, p = tf.transform.rotation, tf.transform.translation
     return _T([q.x, q.y, q.z, q.w], [p.x, p.y, p.z])
 
 
-def _pose(M):
+def _pose(M: np.ndarray) -> cuvslam.Pose:
     q = R.from_matrix(M[:3, :3]).as_quat()
     return cuvslam.Pose(rotation=list(q), translation=list(M[:3, 3]))
 
 
-def _stamp_ns(h):
+def _stamp_ns(h: Header) -> int:
     return h.stamp.sec * 1_000_000_000 + h.stamp.nanosec
 
 
 class CuvslamLibNode(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("visual_slam_node")
         from rcl_interfaces.msg import ParameterDescriptor
         loose = ParameterDescriptor(dynamic_typing=True)    # "500" and "500.0" both accepted
-        dp = lambda n, v: self.declare_parameter(n, v, loose).value
-        self.left_frame = dp("left_frame", "oak_left")
-        self.right_frame = dp("right_frame", "oak_right")
-        self.imu_frame = dp("imu_frame", "oak_imu")
-        self.base_frame = dp("base_frame", "base_link")
-        self.odom_frame = dp("odom_frame", "odom")
-        self.use_imu = str(dp("imu", False)).lower() in ("1", "true", "yes")
-        self.noise = dict(gyroscope_noise_density=float(dp("gyro_noise_density", 0.000244)),
+        dp: Callable[[str, Any], Any] = lambda n, v: self.declare_parameter(n, v, loose).value
+        self.left_frame: str = dp("left_frame", "oak_left")
+        self.right_frame: str = dp("right_frame", "oak_right")
+        self.imu_frame: str = dp("imu_frame", "oak_imu")
+        self.base_frame: str = dp("base_frame", "base_link")
+        self.odom_frame: str = dp("odom_frame", "odom")
+        self.use_imu: bool = str(dp("imu", False)).lower() in ("1", "true", "yes")
+        self.noise: dict[str, float] = dict(gyroscope_noise_density=float(dp("gyro_noise_density", 0.000244)),
                           gyroscope_random_walk=float(dp("gyro_random_walk", 0.000005)),
                           accelerometer_noise_density=float(dp("accel_noise_density", 0.001862)),
                           accelerometer_random_walk=float(dp("accel_random_walk", 0.0001)),
                           frequency=float(dp("imu_frequency", 500.0)))
-        topics = dict(l=dp("left_image", "/stereo/left/image"), r=dp("right_image", "/stereo/right/image"),
+        topics: dict[str, str] = dict(l=dp("left_image", "/stereo/left/image"), r=dp("right_image", "/stereo/right/image"),
                       li=dp("left_info", "/stereo/left/camera_info"), ri=dp("right_info", "/stereo/right/camera_info"),
                       imu=dp("imu_topic", "/stereo/imu"))
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
-        self.info = {"l": None, "r": None}
-        self.half = {}                      # stamp ns -> {"l": img, "r": img}
-        self.imu_q = []                     # (t_ns, accel, gyro), unregistered
-        self.last_imu_ns = -1
-        self.last_frame_ns = -1
-        self.tracker = None
-        self.T_base_left = None
-        self.prev = None                    # (t_ns, odom_from_base)
-        self.n = {"pairs": 0, "ok": 0, "lost": 0, "imu_only": 0, "imu": 0, "imu_dropped": 0, "unpaired": 0,
+        self.info: dict[str, CameraInfo | None] = {"l": None, "r": None}
+        self.half: dict[int, dict[str, np.ndarray]] = {}                      # stamp ns -> {"l": img, "r": img}
+        self.imu_q: list[tuple[int, list[float], list[float]]] = []                     # (t_ns, accel, gyro), unregistered
+        self.last_imu_ns: int = -1
+        self.last_frame_ns: int = -1
+        self.tracker: cuvslam.Tracker | None = None
+        self.T_base_left: np.ndarray | None = None
+        self.prev: tuple[int, np.ndarray] | None = None                    # (t_ns, odom_from_base)
+        self.n: dict[str, int] = {"pairs": 0, "ok": 0, "lost": 0, "imu_only": 0, "imu": 0, "imu_dropped": 0, "unpaired": 0,
                   "errors": 0, "cov_bad": 0}
         # VISUAL vs AVAILABLE (external review 2026-10-16): in Inertial mode the library returns an
         # IMU-propagated pose when visual tracking fails, with no flag. A frame counts as visually
@@ -91,14 +101,14 @@ class CuvslamLibNode(Node):
         # (Failed) even though a pose exists. imu_only_policy: publish (the library's behaviour,
         # what the aircraft's Isaac ROS node does) | withhold (no odometry for such frames).
         from rcl_interfaces.msg import ParameterDescriptor as _PD
-        self.min_visual_obs = int(self.declare_parameter("min_visual_obs", 10, _PD(dynamic_typing=True)).value)
-        self.imu_only_policy = str(self.declare_parameter("imu_only_policy", "publish").value)
+        self.min_visual_obs: int = int(self.declare_parameter("min_visual_obs", 10, _PD(dynamic_typing=True)).value)
+        self.imu_only_policy: str = str(self.declare_parameter("imu_only_policy", "publish").value)
         if self.imu_only_policy not in ("publish", "withhold"):
             raise SystemExit("imu_only_policy: publish | withhold")
         # Per-frame processing diagnostics also describe frames that produced no pose.
         self.pub_processing = self.create_publisher(DiagnosticArray,
             dp("processing_status_topic", "/visual_slam/processing_status"), 10)
-        self.track_ms = []
+        self.track_ms: list[float] = []
         self.pub_odom = self.create_publisher(Odometry, "/visual_slam/tracking/odometry", 10)
         self.pub_status = (self.create_publisher(VisualSlamStatus, "/visual_slam/status", 10)
                            if VisualSlamStatus else None)
@@ -109,7 +119,7 @@ class CuvslamLibNode(Node):
         from std_msgs.msg import Int32MultiArray
         self._IntArr = Int32MultiArray
         self.pub_obs = self.create_publisher(Int32MultiArray, "/visual_slam/vis/observations_count", 10)
-        self.obs_hist = []
+        self.obs_hist: list[int] = []
         self.create_subscription(CameraInfo, topics["li"], lambda m: self._info("l", m), qos_profile_sensor_data)
         self.create_subscription(CameraInfo, topics["ri"], lambda m: self._info("r", m), qos_profile_sensor_data)
         self.create_subscription(Image, topics["l"], lambda m: self._image("l", m), qos_profile_sensor_data)
@@ -126,14 +136,14 @@ class CuvslamLibNode(Node):
                                f"left={self.left_frame} right={self.right_frame} imu={self.imu_frame} | {topics}")
 
     # ------------------------------------------------------------------ setup
-    def _info(self, side, m):
+    def _info(self, side: str, m: CameraInfo) -> None:
         if self.info[side] is None and m.width:
             self.info[side] = m
 
-    def _lookup(self, target, source):
+    def _lookup(self, target: str, source: str) -> np.ndarray:
         return _tf_matrix(self.tf_buf.lookup_transform(target, source, rclpy.time.Time()))
 
-    def _try_init(self):
+    def _try_init(self) -> bool:
         if self.tracker is not None or None in self.info.values():
             return self.tracker is not None
         try:
@@ -145,7 +155,7 @@ class CuvslamLibNode(Node):
             return False
         # SDK rig/world coordinates are user-defined. Use the aircraft body
         # frame so an ordinary yaw does not become camera Euler pitch90deg.
-        self.T_base_rig = np.eye(4)
+        self.T_base_rig: np.ndarray = np.eye(4)
         T_rig_imu = self.T_base_left @ T_left_imu if self.use_imu else None
         cams = []
         for side, M in (("l", self.T_base_left), ("r", self.T_base_left @ T_left_right)):
@@ -181,14 +191,14 @@ class CuvslamLibNode(Node):
         return True
 
     # ---------------------------------------------------------------- inputs
-    def _imu(self, m):
+    def _imu(self, m: Imu) -> None:
         t = _stamp_ns(m.header)
         self.imu_q.append((t, [m.linear_acceleration.x, m.linear_acceleration.y, m.linear_acceleration.z],
                            [m.angular_velocity.x, m.angular_velocity.y, m.angular_velocity.z]))
         if len(self.imu_q) > 5000:
             del self.imu_q[:1000]
 
-    def _image(self, side, m):
+    def _image(self, side: str, m: Image) -> None:
         if m.encoding.lower() not in ("mono8", "8uc1"):
             return
         t = _stamp_ns(m.header)
@@ -199,10 +209,10 @@ class CuvslamLibNode(Node):
             self._track(t, h["l"], h["r"])
 
     # -------------------------------------------------------------- tracking
-    def _track(self, t, left, right):
+    def _track(self, t: int, left: np.ndarray, right: np.ndarray) -> None:
         started = time.perf_counter()
-        self._processing_result = "skipped"
-        self._processing_details = {}
+        self._processing_result: str = "skipped"
+        self._processing_details: dict[str, str] = {}
         try:
             self._track_frame(t, left, right)
         except BaseException:
@@ -211,7 +221,7 @@ class CuvslamLibNode(Node):
         finally:
             self._complete(t, self._processing_result, (time.perf_counter()-started)*1000.)
 
-    def _track_frame(self, t, left, right):
+    def _track_frame(self, t: int, left: np.ndarray, right: np.ndarray) -> None:
         if not self._try_init() or t <= self.last_frame_ns:
             return
         if self.use_imu:                                   # IMU up to this frame, in order
@@ -297,7 +307,7 @@ class CuvslamLibNode(Node):
                 v.vector.x, v.vector.y, v.vector.z = (float(x) for x in g)
                 self.pub_grav.publish(v)
 
-    def _complete(self, t, result, duration_ms):
+    def _complete(self, t: int, result: str, duration_ms: float) -> None:
         report = DiagnosticArray()
         report.header.stamp.sec, report.header.stamp.nanosec = divmod(int(t), 1_000_000_000)
         report.header.frame_id = self.odom_frame
@@ -316,7 +326,7 @@ class CuvslamLibNode(Node):
         report.status = [status]
         self.pub_processing.publish(report)
 
-    def _publish(self, t, O, pwc, W_rig):
+    def _publish(self, t: int, O: np.ndarray, pwc: cuvslam.PoseWithCovariance, W_rig: np.ndarray) -> bool:
         m = Odometry()
         m.header.stamp.sec, m.header.stamp.nanosec = int(t // 1_000_000_000), int(t % 1_000_000_000)
         m.header.frame_id, m.child_frame_id = self.odom_frame, self.base_frame
@@ -358,7 +368,7 @@ class CuvslamLibNode(Node):
         self.pub_odom.publish(m)
         return True
 
-    def _status(self, t, ok, ms):
+    def _status(self, t: int, ok: bool, ms: float) -> None:
         if self.pub_status is None:
             return
         s = VisualSlamStatus()
@@ -372,7 +382,7 @@ class CuvslamLibNode(Node):
         s.node_callback_execution_time = ms * 1e-3
         self.pub_status.publish(s)
 
-    def _log(self):
+    def _log(self) -> None:
         a = sorted(self.track_ms[-500:])
         tm = f"track ms p50 {a[len(a) // 2]:.1f} max {a[-1]:.1f}" if a else "no frames yet"
         g = self.tracker.get_last_gravity() if (self.tracker is not None and self.use_imu) else None
@@ -381,7 +391,7 @@ class CuvslamLibNode(Node):
         self.get_logger().info(f"{self.n} | {tm} | {obs} | gravity {'none yet' if g is None else np.round(list(g), 2)}")
 
 
-def main():
+def main() -> None:
     rclpy.init()
     node = CuvslamLibNode()
     try:

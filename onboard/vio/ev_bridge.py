@@ -4,6 +4,8 @@
 The capture timestamp stays the measurement timestamp. Middleware owns clock
 transport; this node owns frame conversion, validity, source resets and health.
 """
+from __future__ import annotations
+
 import math
 
 import rclpy
@@ -20,16 +22,16 @@ from .vio_health import VioHealth
 
 
 class EvBridge(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('px4_vision_bridge')
-        self.world=str(declare(self,'world','flu'))
+        self.world: str = str(declare(self,'world','flu'))
         if self.world not in WORLDS:raise ValueError('world must be enu or flu')
         heading=float(declare(self,'heading_enu_rad',math.nan))
         reference=str(declare(self,'heading_reference',''))
-        self.heading=None if math.isnan(heading) else heading
+        self.heading: float | None = None if math.isnan(heading) else heading
         if self.heading is not None and (not math.isfinite(heading) or not reference.strip() or self.world!='flu'):
             raise ValueError('heading alignment needs a finite surveyed FLU-to-ENU reference and its description')
-        self.required=set(declare(self,'required_fields',['position','orientation']))
+        self.required: set[str] = set(declare(self,'required_fields',['position','orientation']))
         if not self.required or not self.required<={'position','orientation','velocity'}:
             raise ValueError('required_fields must name the position/orientation/velocity fields consumed by PX4')
         self.in_topic=str(declare(self,'odom_topic','/visual_slam/tracking/odometry'))
@@ -42,41 +44,46 @@ class EvBridge(Node):
         self.quiet_s=float(declare(self,'health_quiet_s',5.))
         if not all(math.isfinite(v) and v>0 for v in (self.jump_m,self.health_stale_s,self.max_speed,self.quiet_s)):
             raise ValueError('health limits must be positive finite numbers')
-        self.gate=CaptureGate(float(declare(self,'max_sample_age_s',.3)),float(declare(self,'future_tol_s',.005)))
-        self.health=self._health()
-        self.floors={name:[float(v) for v in declare(self,name,[0.,0.,0.])]
+        self.gate: CaptureGate = CaptureGate(float(declare(self,'max_sample_age_s',.3)),float(declare(self,'future_tol_s',.005)))
+        self.health: VioHealth = self._health()
+        self.floors: dict[str, list[float]] = {name:[float(v) for v in declare(self,name,[0.,0.,0.])]
                      for name in ('position_floor','orientation_floor','velocity_floor')}
         if any(len(v)!=3 or not all(math.isfinite(x) and x>=0 for x in v) for v in self.floors.values()):
             raise ValueError('variance floors need three finite nonnegative values')
         self.pub=self.create_publisher(VehicleOdometry,self.out_topic,PX4_QOS)
         self.ok_pub=self.create_publisher(Bool,str(declare(self,'health_topic','/estimator/healthy')),10)
-        self.guard=PublisherGuard(self,self.out_topic) if self.out_topic.startswith('/fmu/in/') else None
+        self.guard: PublisherGuard | None = PublisherGuard(self,self.out_topic) if self.out_topic.startswith('/fmu/in/') else None
         self.sub=self.create_subscription(Odometry,self.in_topic,self._on_odom,SENSOR_QOS)
-        self.reset_counter=initial_reset_counter();self.last_pos=None;self.frame_id=None
-        self.last_now=None;self.last_good=None;self.ok=False;self.reason='no samples'
-        self.counts={'input':0,'published':0,'invalid':0,'withheld':0,'unowned':0,'clock_resets':0}
+        self.reset_counter: int = initial_reset_counter()
+        self.last_pos: tuple[float, float, float] | None = None
+        self.frame_id: str | None = None
+        self.last_now: int | None = None      # node clock, us
+        self.last_good: int | None = None     # node clock of the last published sample, us
+        self.ok: bool = False
+        self.reason: str = 'no samples'
+        self.counts: dict[str, int] = {'input':0,'published':0,'invalid':0,'withheld':0,'unowned':0,'clock_resets':0}
         self.create_timer(.2,self._publish_health)
         self.create_timer(5.,self._log)
         self.get_logger().info(f'{self.in_topic} -> {self.out_topic}; frame={self.world}; heading reference={reference or "unreferenced (FRD)"}')
 
-    def _health(self):
+    def _health(self) -> VioHealth:
         return VioHealth(max_speed_mps=self.max_speed,jump_m=self.jump_m,quiet_s=self.quiet_s)
 
-    def _observe_clock(self,now):
+    def _observe_clock(self, now: int) -> None:
         if self.last_now is not None and now<self.last_now:
             self.gate.reset();self.health=self._health();self.last_pos=None;self.frame_id=None
             self.reset_counter=(self.reset_counter+1)&255;self.last_good=None;self.ok=False
             self.reason='ROS clock restarted';self.counts['clock_resets']+=1
         self.last_now=now
 
-    def _healthy_now(self):
+    def _healthy_now(self) -> bool:
         now=now_us(self);self._observe_clock(now)
         return bool(self.ok and self.last_good is not None and 0<=now-self.last_good<self.health_stale_s*1e6)
 
-    def _publish_health(self):
+    def _publish_health(self) -> None:
         self.ok_pub.publish(Bool(data=self._healthy_now()))
 
-    def _on_odom(self,msg):
+    def _on_odom(self, msg: Odometry) -> None:
         self.counts['input']+=1
         now=now_us(self);self._observe_clock(now);capture=stamp_of(msg.header)
         accepted,reason,_=self.gate.check(capture,now)
@@ -107,16 +114,16 @@ class EvBridge(Node):
         self.pub.publish(fill_vehicle_odometry(VehicleOdometry(),value))
         self.last_good=now;self.counts['published']+=1
 
-    def _log(self):
+    def _log(self) -> None:
         self.get_logger().info(f'counts={self.counts} captures={self.gate.counts} healthy={self._healthy_now()} reason={self.reason}')
 
-    def destroy_node(self):
+    def destroy_node(self) -> None:
         guard=getattr(self,'guard',None)
         if guard is not None:guard.close()
         return super().destroy_node()
 
 
-def main(args=None):
+def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args);node=None
     try:
         node=EvBridge();rclpy.spin(node)

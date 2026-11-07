@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rclpy
@@ -39,6 +40,13 @@ from std_msgs.msg import Bool, String
 from . import core as C
 from . import depth as D
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Any, NoReturn
+
+    from px4_msgs.msg import (EstimatorStatusFlags, VehicleAttitude, VehicleLandDetected,
+                              VehicleLocalPosition, VehicleStatus)
+
 # PX4's uXRCE-DDS endpoints are BEST_EFFORT + TRANSIENT_LOCAL; a different durability never matches
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -46,7 +54,7 @@ CMD_SET_MODE, CMD_ARM, CMD_LAND = 176, 400, 21
 PX4_MAIN_MODE_OFFBOARD = 6
 
 
-def load_route(node):
+def load_route(node: Node) -> tuple[list[tuple[float, float]], dict[str, Any]]:
     path = node.declare_parameter("route_file", "").value
     flat = list(node.declare_parameter("route", [0.0]).value)
     if path:
@@ -60,7 +68,7 @@ def load_route(node):
 
 
 class RefNav(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("refnav")
         route, doc = load_route(self)
         prm = C.Params(route=route)
@@ -70,15 +78,15 @@ class RefNav(Node):
             default = doc.get("params", {}).get(k, v)
             val = self.declare_parameter(k, default).value
             setattr(prm, k, type(v)(val))
-        self.mission = C.Mission(prm)
-        self.depth_topic = self.declare_parameter("depth_topic", "/camera/depth/image_raw").value
+        self.mission: C.Mission = C.Mission(prm)
+        self.depth_topic: str = self.declare_parameter("depth_topic", "/camera/depth/image_raw").value
         info = self.declare_parameter("depth_info_topic", "").value
-        self.info_topic = info or self.depth_topic.rsplit("/", 1)[0] + "/camera_info"
-        self.health_topic = self.declare_parameter("health_topic", "/estimator/healthy").value
-        self.base_frame = self.declare_parameter("base_frame", "base_link").value
-        self.exit_when_done = bool(self.declare_parameter("exit_when_done", True).value)
+        self.info_topic: str = info or self.depth_topic.rsplit("/", 1)[0] + "/camera_info"
+        self.health_topic: str = self.declare_parameter("health_topic", "/estimator/healthy").value
+        self.base_frame: str = self.declare_parameter("base_frame", "base_link").value
+        self.exit_when_done: bool = bool(self.declare_parameter("exit_when_done", True).value)
         control = self.declare_parameter("control_topic", "").value
-        self.run_id = self.declare_parameter("run_id", "").value
+        self.run_id: str = self.declare_parameter("run_id", "").value
         # PX4-bound stamps use the SYSTEM clock in every setting: on the aircraft PX4's DDS client
         # converts agent (system) time with its timesync; the simulator's PX4 boots with
         # UXRCE_DDS_SYNCT=0 and clamps a future stamp to its own "now". Simulation time would
@@ -98,12 +106,12 @@ class RefNav(Node):
         status_topic = self.declare_parameter("status_topic", "/refnav/status").value
         self.pub_status = self.create_publisher(String, status_topic, 10)
 
-        self.v = C.Vehicle()
+        self.v: C.Vehicle = C.Vehicle()
         self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1", self._on_lpos, PX4_QOS)
         self.create_subscription(VehicleAttitude, "/fmu/out/vehicle_attitude", self._on_att, PX4_QOS)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self._on_status, PX4_QOS)
         self.create_subscription(VehicleLandDetected, "/fmu/out/vehicle_land_detected", self._on_land, PX4_QOS)
-        self._yaw_align = (False, None)
+        self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
         self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
         self.create_subscription(Bool, self.health_topic, self._on_health, 10)
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
@@ -114,24 +122,24 @@ class RefNav(Node):
                                  history=HistoryPolicy.KEEP_LAST, depth=1)
             self.create_subscription(String, control, self._on_control, ctl_qos)
 
-        self.K = None
-        self.extrinsic = None           # (frame_id, R_body_cam, t_body_cam)
-        self.rejects = {}
-        self.done_at = None
-        self._wait_log_t = None
+        self.K: tuple[float, float, float, float] | None = None   # (fx, fy, cx, cy)
+        self.extrinsic: tuple[str, np.ndarray, np.ndarray] | None = None           # (frame_id, R_body_cam, t_body_cam)
+        self.rejects: dict[str, int] = {}
+        self.done_at: float | None = None
+        self._wait_log_t: float | None = None
         self.create_timer(0.05, self._tick)            # node clock: pauses with a paused simulator
         self.create_timer(0.5, self._publish_status)
         self.get_logger().info(f"route {len(route)} legs; depth {self.depth_topic}; health {self.health_topic}; "
                                f"sim time {self.get_parameter('use_sim_time').value}")
 
     # ------------------------------------------------------------------ inputs
-    def _now(self):
+    def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
-    def _on_est_flags(self, m):
+    def _on_est_flags(self, m: EstimatorStatusFlags) -> None:
         self._yaw_align = (bool(m.cs_yaw_align), self._now())
 
-    def _on_lpos(self, m):
+    def _on_lpos(self, m: VehicleLocalPosition) -> None:
         self.v.pos = (m.x, m.y, m.z)
         self.v.heading = m.heading
         # heading: PX4's heading_good_for_control, OR its own yaw alignment. With a COMPASS, PX4 sets
@@ -144,24 +152,24 @@ class RefNav(Node):
         self.v.pos_ok = bool(m.xy_valid and m.z_valid and heading_ok
                              and all(math.isfinite(c) for c in (m.x, m.y, m.z, m.heading)))
 
-    def _on_att(self, m):
+    def _on_att(self, m: VehicleAttitude) -> None:
         self.v.q = tuple(float(c) for c in m.q)
 
-    def _on_status(self, m):
+    def _on_status(self, m: VehicleStatus) -> None:
         self.v.armed = m.arming_state == 2
         self.v.nav_state = int(m.nav_state)
 
-    def _on_land(self, m):
+    def _on_land(self, m: VehicleLandDetected) -> None:
         self.v.landed = bool(m.landed)
 
-    def _on_health(self, m):
+    def _on_health(self, m: Bool) -> None:
         self.mission.on_health(self._now(), m.data)
 
-    def _on_info(self, m):
+    def _on_info(self, m: CameraInfo) -> None:
         if m.k[0] > 0 and m.k[4] > 0:
             self.K = (m.k[0], m.k[4], m.k[2], m.k[5])
 
-    def _on_control(self, m):
+    def _on_control(self, m: String) -> None:
         try:
             req = json.loads(m.data)
         except ValueError:
@@ -170,7 +178,7 @@ class RefNav(Node):
             self.get_logger().info(f"landing requested by the runtime ({req.get('why', 'operator')})")
             self.mission.request_land(req.get("why") or "operator")
 
-    def _reject(self, key, detail=None, record=True):
+    def _reject(self, key: str, detail: str | None = None, record: bool = True) -> None:
         """Count a refused depth frame by its reason; log the reason WITH its numbers at the 1st, 10th,
         100th and 1000th time; tell the mission (which reports it while it waits)."""
         detail = detail or key
@@ -180,7 +188,7 @@ class RefNav(Node):
         if self.rejects[key] in (1, 10, 100, 1000):
             self.get_logger().warning(f"depth frame not used ({self.rejects[key]}x): {detail}")
 
-    def _calibration(self, frame_id):
+    def _calibration(self, frame_id: str) -> tuple[str, np.ndarray, np.ndarray] | None:
         if self.extrinsic is not None and self.extrinsic[0] == frame_id:
             return self.extrinsic
         from rclpy.time import Time
@@ -202,7 +210,7 @@ class RefNav(Node):
                                f"optical axis {ang:.1f} deg off forward")
         return self.extrinsic
 
-    def _on_depth(self, m):
+    def _on_depth(self, m: Image) -> None:
         if self.K is None:
             return self._reject("no_camera_info", f"no camera_info yet on {self.info_topic}")
         cal = self._calibration(m.header.frame_id)
@@ -221,10 +229,10 @@ class RefNav(Node):
         return None
 
     # ------------------------------------------------------------------ outputs
-    def _sys_us(self):
+    def _sys_us(self) -> int:
         return self.sys_clock.now().nanoseconds // 1000
 
-    def _command(self, cmd, p1=0.0, p2=0.0):
+    def _command(self, cmd: int, p1: float = 0.0, p2: float = 0.0) -> None:
         c = self._CMD()
         c.timestamp = self._sys_us()
         c.command, c.param1, c.param2 = cmd, float(p1), float(p2)
@@ -232,7 +240,7 @@ class RefNav(Node):
         c.from_external = True
         self.pub_cmd.publish(c)
 
-    def _tick(self):
+    def _tick(self) -> None:
         now = self._now()
         if now <= 0.0:
             return                                   # sim time before the first /clock
@@ -272,7 +280,7 @@ class RefNav(Node):
             self.done_at = now
             self.get_logger().info(f"mission done: {self.mission.result}")
 
-    def _publish_status(self):
+    def _publish_status(self) -> None:
         st = self.mission.status(self._now())
         st["rejects"] = dict(self.rejects)
         self.pub_status.publish(String(data=json.dumps(st)))
@@ -280,7 +288,7 @@ class RefNav(Node):
             raise SystemExit(0 if self.mission.result == "complete" else 1)
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> NoReturn:
     """argv: a full command line (argv[0] then --ros-args ...), default sys.argv - so a program can run
     the node with its own settings (examples/takeoff_land, runtime/program.refnav_args)."""
     rclpy.init(args=list(argv) if argv is not None else sys.argv)

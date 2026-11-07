@@ -2,9 +2,12 @@
 ray-cast depth camera in a world of walls. Each safety behaviour in core.py's docstring is pinned
 here, and the same flight on two different clocks (simulation seconds, Unix seconds) must make
 the same decisions."""
+from __future__ import annotations
+
 import math
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -13,6 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from refnav import core as C  # noqa: E402
 from refnav import depth as D  # noqa: E402
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+
+    Wall = tuple[int, float, float, float]      # (axis, value, lo, hi): see render_depth
+    LogRow = tuple[float, str, bool, tuple[str, ...], np.ndarray]   # (t, phase, stream, commands, pos)
+
 W, H, FX = 160, 100, 106.0                  # a small 74 deg HFOV camera
 FLOOR_D = 0.18                              # the floor below the body origin of a landed aircraft (as in the simulator)
 K = (FX, FX, W / 2, H / 2)
@@ -20,11 +29,11 @@ R_BODY_CAM = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])   #
 T_BODY_CAM = np.array([0.16, 0.0, 0.0])
 
 
-def q_yaw(yaw):
+def q_yaw(yaw: float) -> tuple[float, float, float, float]:
     return (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
 
 
-def render_depth(pos_ned, yaw, walls):
+def render_depth(pos_ned: Sequence[float] | np.ndarray, yaw: float, walls: Iterable[Wall]) -> np.ndarray:
     """Depth (m, NaN = no return) seen by the forward camera of a level aircraft at pos_ned/yaw.
     walls: [(axis, value, lo, hi)] vertical planes, axis 0 = n = value, axis 1 = e = value,
     extending lo..hi along the other horizontal axis and from the floor (d = 0) up to d = -2.5."""
@@ -55,13 +64,13 @@ class FakePX4:
     have been streaming, arm, track the setpoint at <= 1 m/s and 60 deg/s, AUTO_LAND descends
     and disarms on the floor."""
 
-    def __init__(self, pos=(0.0, 0.0, 0.0), yaw=0.0):
-        self.pos = np.array(pos, float)
-        self.yaw = yaw
+    def __init__(self, pos: Sequence[float] = (0.0, 0.0, 0.0), yaw: float = 0.0) -> None:
+        self.pos: np.ndarray = np.array(pos, float)
+        self.yaw: float = yaw
         self.armed, self.nav, self.landed = False, 4, True
-        self.stream_since = None
+        self.stream_since: float | None = None
 
-    def apply(self, t, out, dt):
+    def apply(self, t: float, out: C.Output, dt: float) -> None:
         if out.stream:
             self.stream_since = t if self.stream_since is None else self.stream_since
         else:
@@ -86,7 +95,7 @@ class FakePX4:
             if self.pos[2] >= 0.0:
                 self.landed, self.armed = True, False
 
-    def vehicle(self):
+    def vehicle(self) -> C.Vehicle:
         return C.Vehicle(pos=tuple(self.pos), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw),
                          armed=self.armed, nav_state=self.nav, landed=self.landed)
 
@@ -94,8 +103,14 @@ class FakePX4:
 ROOM = [(0, 15.0, -15.0, 15.0), (0, -15.0, -15.0, 15.0), (1, 15.0, -15.0, 15.0), (1, -15.0, -15.0, 15.0)]
 
 
-def fly(params, walls=(), t0=0.0, seconds=120.0, dt=0.05, health=lambda t: True, depth_on=lambda t: True,
-        nav_override=None, yaw0=0.0, phantom=lambda t: False, depth_fn=None, on_tick=None):
+def fly(params: C.Params, walls: Iterable[Wall] = (), t0: float = 0.0, seconds: float = 120.0, dt: float = 0.05,
+        health: Callable[[float], bool | None] = lambda t: True,
+        depth_on: Callable[[float], bool] = lambda t: True,
+        nav_override: Callable[[float], int | None] | None = None, yaw0: float = 0.0,
+        phantom: Callable[[float], bool] = lambda t: False,
+        depth_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
+        on_tick: Callable[[float, C.Mission], object] | None = None
+        ) -> tuple[C.Mission, FakePX4, list[LogRow]]:
     """depth_fn(t, img) -> img replaces what the camera delivers (blank, sparse, ...);
     on_tick(t, mission) runs before each step (outside requests)."""
     walls = list(walls) + ROOM                         # indoors: a 30 x 30 m room around everything
@@ -103,7 +118,7 @@ def fly(params, walls=(), t0=0.0, seconds=120.0, dt=0.05, health=lambda t: True,
         params.depth_border_px = 3                     # the real camera's 24 px border, scaled to this 160 x 100 one
     m = C.Mission(params)
     px4 = FakePX4(yaw=yaw0)
-    log = []
+    log: list[LogRow] = []
     t = 0.0
     next_depth = 0.0
     while t < seconds and m.phase != "done":
@@ -134,7 +149,7 @@ def fly(params, walls=(), t0=0.0, seconds=120.0, dt=0.05, health=lambda t: True,
 ROUTE = [(3.0, 0.0), (3.0, 3.0)]            # forward 3 m, then 3 m to the left
 
 
-def test_nominal_route_completes_and_stops_streaming_once_px4_lands():
+def test_nominal_route_completes_and_stops_streaming_once_px4_lands() -> None:
     m, px4, log = fly(C.Params(route=ROUTE))
     assert m.result == "complete", (m.result, m.why)
     assert m.legs_done == 2
@@ -148,25 +163,25 @@ def test_nominal_route_completes_and_stops_streaming_once_px4_lands():
     assert not px4.armed and px4.landed
 
 
-def test_route_is_in_the_takeoff_frame():
+def test_route_is_in_the_takeoff_frame() -> None:
     m, px4, log = fly(C.Params(route=[(2.0, 0.0)]), yaw0=math.radians(90))
     assert m.result == "complete"
     assert np.allclose(m.targets[0], (0.0, 2.0), atol=1e-9)          # facing east: forward = +e
 
 
-def test_no_health_never_arms():
+def test_no_health_never_arms() -> None:
     m, px4, log = fly(C.Params(route=ROUTE, wait_s=20.0), health=lambda t: None)
     assert m.result.startswith("refused") and not px4.armed
     assert all("arm" not in c for *_x, c, _p in log)
 
 
-def test_unhealthy_estimator_in_the_air_lands():
+def test_unhealthy_estimator_in_the_air_lands() -> None:
     m, px4, log = fly(C.Params(route=ROUTE), health=lambda t: t < 12.0)
     assert m.result.startswith("landed: estimator"), m.result
     assert m.legs_done < 2 and not px4.armed
 
 
-def test_health_gap_restarts_the_quiet_window():
+def test_health_gap_restarts_the_quiet_window() -> None:
     h = C.Health(quiet_s=3.0, stale_s=1.0)
     for k in range(40):
         h.on_msg(k * 0.1, True)
@@ -175,7 +190,7 @@ def test_health_gap_restarts_the_quiet_window():
     assert not h.arm_ok(6.05)[0]
 
 
-def test_no_translation_without_live_depth_and_landing_when_it_stays_silent():
+def test_no_translation_without_live_depth_and_landing_when_it_stays_silent() -> None:
     # depth stops at t = 14 s (mid-route): the carrot freezes, then the aircraft lands
     m, px4, log = fly(C.Params(route=[(6.0, 0.0)], speed_mps=0.5), depth_on=lambda t: t < 14.0)
     assert m.result.startswith("landed: depth silent"), m.result
@@ -185,7 +200,7 @@ def test_no_translation_without_live_depth_and_landing_when_it_stays_silent():
     assert m.counts["depth_holds"] > 0
 
 
-def test_obstacle_ahead_stops_and_lands_where_it_is():
+def test_obstacle_ahead_stops_and_lands_where_it_is() -> None:
     wall = [(0, 4.5, -5.0, 5.0)]                          # a wall across the route at n = 4.5
     m, px4, log = fly(C.Params(route=[(8.0, 0.0)]), walls=wall)
     assert m.result.startswith("landed: route blocked"), m.result
@@ -193,13 +208,13 @@ def test_obstacle_ahead_stops_and_lands_where_it_is():
     assert m.counts["obstacle_stops"] == 1
 
 
-def test_a_wall_beside_the_route_is_not_an_obstacle():
+def test_a_wall_beside_the_route_is_not_an_obstacle() -> None:
     walls = [(1, 1.0, -5.0, 10.0), (1, -1.0, -5.0, 10.0)]   # a 2 m wide corridor along the route
     m, px4, log = fly(C.Params(route=[(5.0, 0.0)]), walls=walls)
     assert m.result == "complete", m.result
 
 
-def test_pilot_takeover_is_never_fought():
+def test_pilot_takeover_is_never_fought() -> None:
     # 13 s in, someone switches PX4 to Position mode (nav_state 2)
     m, px4, log = fly(C.Params(route=ROUTE), nav_override=lambda t: 2 if t >= 13.0 else None)
     assert m.result.startswith("yielded"), m.result
@@ -207,7 +222,7 @@ def test_pilot_takeover_is_never_fought():
     assert all(not s and not c for s, c in after)
 
 
-def test_same_decisions_on_any_clock():
+def test_same_decisions_on_any_clock() -> None:
     # a tick that is exact in binary (1/32 s) and thresholds off its grid: at Unix-time magnitudes
     # a 50 ms tick is not representable, and a decision that lands EXACTLY on a threshold may
     # round either way - float rounding of the inputs, not a dependence on the clock
@@ -220,7 +235,7 @@ def test_same_decisions_on_any_clock():
 
 
 # ------------------------------------------------------------------ depth.py
-def test_clearance_levels_a_tilted_aircraft_and_ignores_the_floor():
+def test_clearance_levels_a_tilted_aircraft_and_ignores_the_floor() -> None:
     walls = [(0, 3.0, -5.0, 5.0)]
     pos = (0.0, 0.0, -1.2)
     img = render_depth(pos, 0.0, walls)
@@ -235,13 +250,13 @@ def test_clearance_levels_a_tilted_aircraft_and_ignores_the_floor():
     assert math.isinf(D.clearance(pts, 0.0, 0.6, 0.4))
 
 
-def test_bearing_selects_the_corridor():
+def test_bearing_selects_the_corridor() -> None:
     pts = np.array([[2.0, 1.5, 0.0]] * 5)                 # 2 m ahead, 1.5 m to the right
     assert math.isinf(D.clearance(pts, 0.0, 0.6, 0.4))
     assert D.clearance(pts, math.atan2(1.5, 2.0), 0.6, 0.4) == pytest.approx(2.5)
 
 
-def test_decode_depth_encodings():
+def test_decode_depth_encodings() -> None:
     mm = np.array([[0, 1000], [2500, 65535]], np.uint16)
     a = D.decode_depth("16UC1", 2, 2, 4, mm.tobytes())
     assert np.isnan(a[0, 0]) and a[0, 1] == pytest.approx(1.0) and a[1, 0] == pytest.approx(2.5)
@@ -252,10 +267,10 @@ def test_decode_depth_encodings():
         D.decode_depth("rgb8", 1, 1, 3, b"\0\0\0")
 
 
-def test_a_one_frame_false_match_does_not_stop_the_route():
-    hits = []
+def test_a_one_frame_false_match_does_not_stop_the_route() -> None:
+    hits: list[float] = []
 
-    def phantom(t):                                   # one frame every ~2 s while flying
+    def phantom(t: float) -> bool:                                   # one frame every ~2 s while flying
         on = 12.0 < t and int(t * 7.5) % 15 == 0
         if on:
             hits.append(t)
@@ -268,7 +283,7 @@ def test_a_one_frame_false_match_does_not_stop_the_route():
     assert one.result.startswith("landed: route blocked")   # without confirmation the same flight stops
 
 
-def test_border_crop_removes_edge_rows():
+def test_border_crop_removes_edge_rows() -> None:
     img = np.full((H, W), np.nan, np.float32)
     img[0:3, 60:100] = 0.6
     q = (1.0, 0.0, 0.0, 0.0)
@@ -277,7 +292,7 @@ def test_border_crop_removes_edge_rows():
     assert len(keep) == 120 and len(crop) == 0
 
 
-def test_sparse_points_are_not_an_obstacle_but_a_pole_is():
+def test_sparse_points_are_not_an_obstacle_but_a_pole_is() -> None:
     """min_obstacle_px: a few scattered depth returns do not stop the aircraft; a 5 cm pole does."""
     q = (1.0, 0.0, 0.0, 0.0)
     m = C.Mission(C.Params(route=[(3.0, 0.0)]))
@@ -299,7 +314,7 @@ def test_sparse_points_are_not_an_obstacle_but_a_pole_is():
     assert c == pytest.approx(3.16, abs=0.05)
 
 
-def test_a_px4_failsafe_landing_mid_route_is_never_streamed_over():
+def test_a_px4_failsafe_landing_mid_route_is_never_streamed_over() -> None:
     """PX4 switching itself to AUTO_LAND during the route (a failsafe) is a takeover like a pilot's:
     the mission stops streaming at once (PX4's land detector reads the setpoint topic)."""
     m, px4, log = fly(C.Params(route=ROUTE), nav_override=lambda t: C.NAV_AUTO_LAND if t >= 13.0 else None)
@@ -309,21 +324,21 @@ def test_a_px4_failsafe_landing_mid_route_is_never_streamed_over():
 
 
 # ------------------------------------------------- unusable depth is never permission to move
-def _advance(log, t_from):
+def _advance(log: Sequence[LogRow], t_from: float) -> float:
     """How far the aircraft moved forward (north) after t_from."""
     p = [pos for t, ph, st, c, pos in log if t >= t_from]
     return max(q[0] for q in p) - p[0][0] if p else 0.0
 
 
 @pytest.mark.parametrize("kind", ["blank", "sparse", "future", "stale"])
-def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind):
+def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind: str) -> None:
     """From t = 11 s (the route has just started) every depth frame is unusable: blank (no
     return anywhere), sparse (5 % of pixels return), stamped 1 s in the future, or stamped 1 s
     in the past. The aircraft must not move along the route, and must land when no usable depth
     has arrived for depth_lost_land_s."""
     rng = np.random.default_rng(0)
 
-    def bad(t, img):
+    def bad(t: float, img: np.ndarray) -> np.ndarray:
         if t < 11.0:
             return img
         if kind == "blank":
@@ -363,7 +378,7 @@ def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind):
     assert m.counts[key] > 0
 
 
-def test_a_blank_frame_does_not_refresh_depth_and_says_why():
+def test_a_blank_frame_does_not_refresh_depth_and_says_why() -> None:
     m = C.Mission(C.Params(route=[(3.0, 0.0)], depth_border_px=3))
     ok = m.on_depth(1.0, render_depth(np.array([0, 0, -1.2]), 0.0, ROOM), K, R_BODY_CAM, T_BODY_CAM, q_yaw(0.0), now=1.0)
     assert ok and m.depth_t == 1.0
@@ -371,7 +386,7 @@ def test_a_blank_frame_does_not_refresh_depth_and_says_why():
     assert m.depth_t == 1.0 and m.counts["depth_unusable"] == 1
 
 
-def test_a_corridor_out_of_view_is_unknown_not_free():
+def test_a_corridor_out_of_view_is_unknown_not_free() -> None:
     """A good frame looking AWAY from the leg keeps the camera alive but is no evidence for the leg."""
     m = C.Mission(C.Params(route=[(3.0, 0.0)], depth_border_px=3))
     m.leg_heading = math.radians(90)                      # the leg is to the right; the camera looks ahead
@@ -384,7 +399,7 @@ def test_a_corridor_out_of_view_is_unknown_not_free():
     assert m.counts["corridor_unobserved"] == 3
 
 
-def test_coverage_counts_far_returns_and_ignores_missing_ones():
+def test_coverage_counts_far_returns_and_ignores_missing_ones() -> None:
     q = q_yaw(0.0)
     near_wall = np.full((H, W), 9.0, np.float32)          # everything 9 m away: beyond 6 m, still a return
     f = D.DepthFrame(near_wall, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=4, border_px=3)
@@ -399,7 +414,7 @@ def test_coverage_counts_far_returns_and_ignores_missing_ones():
 
 
 # ---- the interactive runtime's takeoff/land example and landing requests (2026-10-17) ----------------
-def test_takeoff_hover_land_with_an_empty_route():
+def test_takeoff_hover_land_with_an_empty_route() -> None:
     m, px4, log = fly(C.Params(route=[], height_m=1.2, hover_s=4.0))
     assert m.result == "complete", (m.result, m.why)
     hover = [t for t, p, *_ in log if p == "hover"]
@@ -408,15 +423,15 @@ def test_takeoff_hover_land_with_an_empty_route():
     assert not px4.armed and px4.landed
 
 
-def test_hover_zero_is_the_old_behaviour():
+def test_hover_zero_is_the_old_behaviour() -> None:
     m, px4, log = fly(C.Params(route=ROUTE))
     assert "hover" not in {p for _, p, *_ in log} and m.result == "complete"
 
 
-def test_a_landing_request_in_the_air_lands_through_the_mission():
-    asked = []
+def test_a_landing_request_in_the_air_lands_through_the_mission() -> None:
+    asked: list[float] = []
 
-    def ask(t, m):
+    def ask(t: float, m: C.Mission) -> None:
         if m.phase == "hover" and not asked:
             asked.append(t)
             m.request_land("operator")
@@ -427,22 +442,22 @@ def test_a_landing_request_in_the_air_lands_through_the_mission():
     assert not px4.armed and px4.landed
 
 
-def test_a_landing_request_before_arming_never_arms():
+def test_a_landing_request_before_arming_never_arms() -> None:
     m, px4, log = fly(C.Params(route=[(3.0, 0.0)]), on_tick=lambda t, m: m.request_land("stop") if t > 0.5 else None)
     assert m.result.startswith("refused: landing requested: stop"), m.result
     assert not any("arm" in c for *_, c, _ in log) and not px4.armed
 
 
-def _sky(t, img):
+def _sky(t: float, img: np.ndarray) -> np.ndarray:
     """The field case (acc2 run_001): the camera works but sees mostly sky - depth on ~15 % of the pixels."""
     img = img.copy()
     img[: int(H * 0.85)] = np.nan
     return img
 
 
-def test_too_little_depth_never_arms_and_says_how_much_there_was():
+def test_too_little_depth_never_arms_and_says_how_much_there_was() -> None:
     """The wait names the measured fraction and the floor - from the start, and in the final refusal."""
-    seen = []
+    seen: list[str] = []
     m, px4, log = fly(C.Params(route=[], wait_s=20.0), depth_fn=_sky, seconds=30.0,
                       on_tick=lambda t, m: seen.append(m.why) if 5.0 < t < 5.1 else None)
     assert not px4.armed
@@ -454,6 +469,6 @@ def test_too_little_depth_never_arms_and_says_how_much_there_was():
     assert m2.result == "complete" and m2.depth_reject is None, (m2.result, m2.why)
 
 
-def test_no_depth_at_all_is_said_as_such():
+def test_no_depth_at_all_is_said_as_such() -> None:
     m, px4, log = fly(C.Params(route=[], wait_s=5.0), depth_on=lambda t: False, seconds=10.0)
     assert m.result == "refused: waiting for live depth: no depth frame has arrived after 5 s", m.result

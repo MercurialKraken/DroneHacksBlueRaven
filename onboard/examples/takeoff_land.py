@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import math
 import os
 from pathlib import Path
@@ -7,7 +9,7 @@ import sys
 
 # This is ordinary ROS/PX4 code: no runtime, cloud API or mission wrapper.
 # Use the topic versions exported by the installed px4_msgs generation.
-def px4_topic(name, message_type):
+def px4_topic(name: str, message_type: type) -> str:
     version = int(getattr(message_type, "MESSAGE_VERSION", 0))
     return "/fmu/out/" + name + (f"_v{version}" if version else "")
 
@@ -33,7 +35,7 @@ HOVER_TIME = 2.0   # Seconds to hover before landing
 
 
 class TakeoffLand(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("takeoff_land")
 
         qos = QoSProfile(
@@ -70,23 +72,23 @@ class TakeoffLand(Node):
             self.on_estimator_flags, qos
         )
 
-        self.pos = None
-        self.status = None
+        self.pos: VehicleLocalPosition | None = None
+        self.status: VehicleStatus | None = None
         self.pos_time = 0.0
         self.status_time = 0.0
-        self.landed = None
+        self.landed: bool | None = None
         self.landed_time = 0.0
         self.yaw_aligned = False
-        self.yaw_alignment_time = None
+        self.yaw_alignment_time: float | None = None
         self.yaw_alignment_timestamp = 0
         self.last_wait_log = 0.0
-        self.ground_confirmation_started = None
-        self.auto_land_observed = False
+        self.ground_confirmation_started: float | None = None
+        self.auto_land_observed: bool = False
 
-        self.phase = "WAIT"
+        self.phase: str = "WAIT"
         self.phase_start = self.clock_seconds()
-        self.last_tick_time = None
-        self.wait_started = None
+        self.last_tick_time: float | None = None
+        self.wait_started: float | None = None
         self.preflight_timeout_s = float(self.declare_parameter("preflight_timeout_s", 45.0).value)
         if not math.isfinite(self.preflight_timeout_s) or self.preflight_timeout_s <= 0:
             raise ValueError("preflight_timeout_s must be finite and positive")
@@ -98,24 +100,24 @@ class TakeoffLand(Node):
         # Control loop at 10 Hz
         self.create_timer(0.1, self.tick)
 
-    def on_position(self, msg):
+    def on_position(self, msg: VehicleLocalPosition) -> None:
         self.pos = msg
         self.pos_time = self.clock_seconds()
 
-    def on_status(self, msg):
+    def on_status(self, msg: VehicleStatus) -> None:
         self.status = msg
         self.status_time = self.clock_seconds()
 
-    def on_landed(self, msg):
+    def on_landed(self, msg: VehicleLandDetected) -> None:
         self.landed = bool(msg.landed)
         self.landed_time = self.clock_seconds()
 
-    def on_estimator_flags(self, msg):
+    def on_estimator_flags(self, msg: EstimatorStatusFlags) -> None:
         self.yaw_aligned = bool(msg.cs_yaw_align)
         self.yaw_alignment_time = self.clock_seconds()
         self.yaw_alignment_timestamp = int(msg.timestamp)
 
-    def position_ready(self, now):
+    def position_ready(self, now: float) -> bool:
         if self.pos is None:
             return False
         # PX4's compass final-heading flag waits for an in-flight alignment.
@@ -132,15 +134,15 @@ class TakeoffLand(Node):
                     and all(math.isfinite(value) for value in
                             (self.pos.x, self.pos.y, self.pos.z, self.pos.heading)))
 
-    def clock_seconds(self):
+    def clock_seconds(self) -> float:
         # Standard ROS time: hardware uses system time; deployment selects
         # use_sim_time for simulation. No simulator or lab API is imported.
         return self.get_clock().now().nanoseconds * 1e-9
 
-    def timestamp(self):
+    def timestamp(self) -> int:
         return self.get_clock().now().nanoseconds // 1000
 
-    def command(self, cmd, p1=0.0, p2=0.0):
+    def command(self, cmd: int, p1: float = 0.0, p2: float = 0.0) -> None:
         msg = VehicleCommand()
         msg.timestamp = self.timestamp()
         msg.command = cmd
@@ -153,7 +155,7 @@ class TakeoffLand(Node):
         msg.from_external = True
         self.command_pub.publish(msg)
 
-    def publish_setpoint(self):
+    def publish_setpoint(self) -> None:
         # Tell PX4 we're controlling position
         mode = OffboardControlMode()
         mode.timestamp = self.timestamp()
@@ -169,14 +171,14 @@ class TakeoffLand(Node):
         sp.yaw = self.yaw
         self.setpoint_pub.publish(sp)
 
-    def begin_landing(self):
+    def begin_landing(self) -> None:
         self.get_logger().info("Landing")
         self.phase = "LAND"
         self.last_command = 0.0
         self.ground_confirmation_started = None
         self.auto_land_observed = False
 
-    def tick(self):
+    def tick(self) -> None:
         now = self.clock_seconds()
 
         if self.phase in ("DONE", "ABORT"):
@@ -346,7 +348,7 @@ class TakeoffLand(Node):
                 self.begin_landing()
 
 
-def ros_arguments():
+def ros_arguments() -> list[str]:
     # Ordinary ROS deployment data, used on both the Jetson and the simulator.
     # No file means standard ROS system time. An explicitly configured missing
     # file is an installation error, not permission to silently select a clock.
@@ -360,7 +362,7 @@ def ros_arguments():
     return args
 
 
-def main():
+def main() -> int:
     rclpy.init(args=ros_arguments())
     node = TakeoffLand()
     try:

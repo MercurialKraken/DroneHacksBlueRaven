@@ -1,9 +1,16 @@
 """Ordinary ROS launch arguments shared by hardware and simulation projects."""
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
-def arguments(project, *, height_m, hover_s, ros_args=()):
+def arguments(project: str | os.PathLike[str], *, height_m: float, hover_s: float,
+              ros_args: Sequence[str] = ()) -> list[str]:
     project = Path(project).resolve()
     args = ["refnav", "--ros-args", "--params-file", str(project / "flight.yaml")]
     deployment = Path(os.environ.get("DRONE_PARAMS_FILE", "/etc/flyx/mission.yaml"))

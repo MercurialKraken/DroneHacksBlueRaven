@@ -10,15 +10,20 @@ rotation-vector assumption; see the October27 IMU investigation for evidence.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
 
-def skew(v):
+
+def skew(v: ArrayLike) -> np.ndarray:
     x, y, z = (float(c) for c in v)
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
 
 
-def _euler_axes(rotation, *, sdk_input=False):
+def _euler_axes(rotation: ArrayLike, *, sdk_input: bool = False) -> np.ndarray:
     """World rotation-vector differential per xyz Euler coordinate increment."""
     R = np.asarray(rotation, float)
     if (R.shape != (3, 3) or not np.all(np.isfinite(R)) or
@@ -36,7 +41,7 @@ def _euler_axes(rotation, *, sdk_input=False):
     return np.array([[cy * cp, -sy, 0.], [sy * cp, cy, 0.], [-sp, 0., 1.]])
 
 
-def pose_jacobian(A, W):
+def pose_jacobian(A: ArrayLike, W: ArrayLike) -> np.ndarray:
     """Derivative of output xyz/rpy w.r.t. SDK xyz/rpy, not rotation vectors."""
     A, W = np.asarray(A, float), np.asarray(W, float)
     if A.shape != (4, 4) or W.shape != (4, 4) or not np.isfinite(A).all() or not np.isfinite(W).all():
@@ -54,7 +59,7 @@ def pose_jacobian(A, W):
     return J
 
 
-def transform_pose_covariance(C, A, W, rel_tol=1e-9):
+def transform_pose_covariance(C: ArrayLike, A: ArrayLike, W: ArrayLike, rel_tol: float = 1e-9) -> np.ndarray:
     """Sigma_W (6x6, xyz-rpy) -> Sigma_O. Raises ValueError for a non-finite or
     clearly indefinite input (that is not a covariance; nothing should be published)."""
     C = np.asarray(C, float).reshape(6, 6)
@@ -75,7 +80,7 @@ def transform_pose_covariance(C, A, W, rel_tol=1e-9):
     return out
 
 
-def is_covariance(C, tol=1e-9):
+def is_covariance(C: ArrayLike, tol: float = 1e-9) -> bool:
     C = np.asarray(C, float)
     if C.shape != (6, 6) or not np.all(np.isfinite(C)) or not np.allclose(C, C.T, atol=tol):
         return False

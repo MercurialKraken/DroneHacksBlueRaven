@@ -32,8 +32,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from . import depth as D
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    import numpy as np
+
+    Intrinsics = tuple[float, float, float, float]      # pinhole (fx, fy, cx, cy) in pixels
+    QuatWXYZ = tuple[float, float, float, float]        # PX4 attitude, FRD body -> NED, w first
 
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
@@ -42,7 +51,7 @@ AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold")
 
 @dataclass
 class Params:
-    route: list = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
+    route: list[tuple[float, float]] = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
     height_m: float = 1.2
     speed_mps: float = 0.6
     lead_max_m: float = 1.0                     # the carrot never leads the aircraft by more
@@ -79,10 +88,10 @@ class Params:
 @dataclass
 class Vehicle:
     """The latest PX4 reports, updated by the adapter as messages arrive."""
-    pos: tuple | None = None          # NED metres (vehicle_local_position)
+    pos: tuple[float, float, float] | None = None          # NED metres (vehicle_local_position)
     heading: float | None = None      # rad
     pos_ok: bool = False              # xy_valid and z_valid and a heading (good for control, or PX4 yaw-aligned)
-    q: tuple | None = None            # attitude, FRD -> NED, (w, x, y, z)
+    q: QuatWXYZ | None = None            # attitude, FRD -> NED, (w, x, y, z)
     armed: bool | None = None
     nav_state: int | None = None
     landed: bool | None = None
@@ -91,21 +100,21 @@ class Vehicle:
 @dataclass
 class Output:
     phase: str
-    setpoint: tuple | None = None     # (n, e, d, yaw) for the trajectory setpoint
+    setpoint: tuple[float, float, float, float] | None = None     # (n, e, d, yaw) for the trajectory setpoint
     stream: bool = False              # publish offboard_control_mode + the setpoint this tick
-    commands: list = field(default_factory=list)   # "offboard" | "arm" | "land" | "disarm" (checked)
-    events: list = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)   # "offboard" | "arm" | "land" | "disarm" (checked)
+    events: list[str] = field(default_factory=list)
 
 
 class Health:
     """Estimator health from a boolean stream, failing closed: nothing heard, stale or unhealthy
     is never permission, and a gap restarts the quiet window."""
 
-    def __init__(self, quiet_s, stale_s):
+    def __init__(self, quiet_s: float, stale_s: float) -> None:
         self.quiet_s, self.stale_s = float(quiet_s), float(stale_s)
-        self.last_t = self.last_ok = self.ok_since = self.bad_since = None
+        self.last_t = self.last_ok = self.ok_since = self.bad_since = None  # times: float | None; last_ok: bool | None
 
-    def on_msg(self, t, ok):
+    def on_msg(self, t: float, ok: bool) -> None:
         ok = bool(ok)
         if ok:
             if not self.last_ok or self.ok_since is None or (self.last_t is not None and t - self.last_t > self.stale_s):
@@ -117,10 +126,10 @@ class Health:
                 self.bad_since = t
         self.last_t, self.last_ok = t, ok
 
-    def fresh(self, now):
+    def fresh(self, now: float) -> bool:
         return self.last_t is not None and now - self.last_t <= self.stale_s
 
-    def arm_ok(self, now):
+    def arm_ok(self, now: float) -> tuple[bool, str]:
         if self.last_t is None:
             return False, "no estimator health received"
         if not self.fresh(now):
@@ -131,7 +140,7 @@ class Health:
             return False, f"estimator healthy for only {now - self.ok_since:.1f}/{self.quiet_s:.0f} s"
         return True, "ok"
 
-    def bad_for(self, now):
+    def bad_for(self, now: float) -> float:
         if self.last_t is None:
             return math.inf
         if not self.fresh(now):
@@ -141,56 +150,56 @@ class Health:
         return 0.0
 
 
-def _wrap(a):
+def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 class Mission:
-    def __init__(self, params: Params):
-        self.p = params
-        self.health = Health(params.health_quiet_s, params.health_stale_s)
-        self.phase = "wait"
-        self.why = ""
-        self.sp = None
-        self.home = None              # (n, e, d, heading) at the arm request
-        self.targets = []             # NED (n, e) of each leg's end
-        self.leg = 0
-        self.legs_done = 0
-        self.t_phase = None
-        self.t_started = None         # the first time this mission saw (its clock): where a replay starts
-        self.t_last = None
-        self.t_cmd = None
-        self.offboard_seen = False
-        self.land_reason = None
-        self.land_auto_seen = False
-        self.result = None            # final: "complete" | "blocked" | "landed: <why>" | "refused: <why>" | "yielded: <why>"
-        self.depth_ready_since = None # start of continuously usable depth before control requests
-        self.depth_t = None           # capture stamp of the latest USABLE depth frame (depth alive)
-        self.frame = None             # that frame (refnav.depth.DepthFrame) and its obstacle points
-        self.depth_pts = None
-        self.corr_t = None            # stamp of the latest frame that OBSERVED the current corridor
-        self._judged_t = None         # the latest frame judged against the corridor (each frame once)
-        self.last_coverage = None
-        self.leg_start = None
-        self.leg_dir = None
-        self.leg_len = 0.0
-        self.leg_heading = 0.0
-        self.s = 0.0
-        self.counts = {"depth_frames": 0, "obstacle_stops": 0, "depth_holds": 0, "unconfirmed_obstacles": 0,
+    def __init__(self, params: Params) -> None:
+        self.p: Params = params
+        self.health: Health = Health(params.health_quiet_s, params.health_stale_s)
+        self.phase: str = "wait"
+        self.why: str = ""
+        self.sp: list[float] | None = None    # [n, e, d, yaw]
+        self.home: tuple[float, float, float, float] | None = None              # (n, e, d, heading) at the arm request
+        self.targets: list[tuple[float, float]] = []             # NED (n, e) of each leg's end
+        self.leg: int = 0
+        self.legs_done: int = 0
+        self.t_phase: float | None = None
+        self.t_started: float | None = None         # the first time this mission saw (its clock): where a replay starts
+        self.t_last: float | None = None
+        self.t_cmd: float | None = None
+        self.offboard_seen: bool = False
+        self.land_reason: str | None = None
+        self.land_auto_seen: bool = False
+        self.result: str | None = None            # final: "complete" | "blocked" | "landed: <why>" | "refused: <why>" | "yielded: <why>"
+        self.depth_ready_since: float | None = None # start of continuously usable depth before control requests
+        self.depth_t: float | None = None           # capture stamp of the latest USABLE depth frame (depth alive)
+        self.frame: D.DepthFrame | None = None             # that frame (refnav.depth.DepthFrame) and its obstacle points
+        self.depth_pts: np.ndarray | None = None
+        self.corr_t: float | None = None            # stamp of the latest frame that OBSERVED the current corridor
+        self._judged_t: float | None = None         # the latest frame judged against the corridor (each frame once)
+        self.last_coverage: float | None = None
+        self.leg_start: tuple[float, float] | None = None
+        self.leg_dir: tuple[float, float] | None = None
+        self.leg_len: float = 0.0
+        self.leg_heading: float = 0.0
+        self.s: float = 0.0
+        self.counts: dict[str, int] = {"depth_frames": 0, "obstacle_stops": 0, "depth_holds": 0, "unconfirmed_obstacles": 0,
                        "depth_unusable": 0, "depth_future": 0, "depth_stale": 0, "depth_out_of_order": 0,
                        "corridor_unobserved": 0}
-        self.clr_hist = []            # [(depth stamp, clearance)] along the current leg, newest last
-        self.last_clearance = None
-        self.land_request = None      # why an outside landing request was made (request_land), until acted on
-        self.depth_reject = None      # (key, detail): why the latest refused depth frame was refused
-        self.last_valid_frac = None   # fraction of pixels returning depth in the latest decoded frame
+        self.clr_hist: list[tuple[float, float]] = []            # [(depth stamp, clearance)] along the current leg, newest last
+        self.last_clearance: float | None = None
+        self.land_request: str | None = None      # why an outside landing request was made (request_land), until acted on
+        self.depth_reject: tuple[str, str] | None = None      # (key, detail): why the latest refused depth frame was refused
+        self.last_valid_frac: float | None = None   # fraction of pixels returning depth in the latest decoded frame
 
-    def request_land(self, why="requested"):
+    def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
         if self.land_request is None:
             self.land_request = str(why) or "requested"
 
-    def depth_refused(self, key, detail):
+    def depth_refused(self, key: str, detail: str) -> None:
         """A depth frame was refused (here, or before it reached the mission: no calibration, no
         attitude, an undecodable image). The reason is what the wait reports, with its numbers."""
         self.depth_reject = (str(key), str(detail))
@@ -200,10 +209,11 @@ class Mission:
             self.depth_ready_since = None
 
     # ------------------------------------------------------------------ inputs
-    def on_health(self, t, ok):
+    def on_health(self, t: float, ok: bool) -> None:
         self.health.on_msg(t, ok)
 
-    def on_depth(self, stamp, depth_m, K, R_body_cam, t_body_cam, q_wxyz, now=None):
+    def on_depth(self, stamp: float, depth_m: np.ndarray, K: Intrinsics, R_body_cam: np.ndarray,
+                 t_body_cam: np.ndarray, q_wxyz: QuatWXYZ | None, now: float | None = None) -> bool:
         """One depth frame with its own calibration; stamp = capture time on the mission clock, now =
         that clock at arrival (None: not judged for being from the future). -> True if it was usable."""
         if q_wxyz is None:
@@ -239,11 +249,11 @@ class Mission:
         self.counts["depth_frames"] += 1
         return True
 
-    def depth_fresh(self, now):
+    def depth_fresh(self, now: float) -> bool:
         """A usable depth frame is recent (the camera is alive), whatever it looked at."""
         return self.depth_t is not None and now - self.depth_t <= self.p.depth_stale_s
 
-    def depth_ready_for_arm(self, now):
+    def depth_ready_for_arm(self, now: float) -> bool:
         """Same quiet interval as estimator health, measured in usable capture history.
 
         A rare good snapshot among unusable frames cannot authorize motors. This
@@ -253,38 +263,38 @@ class Mission:
                 and math.isfinite(self.p.health_quiet_s) and self.p.health_quiet_s >= 0
                 and self.depth_t - self.depth_ready_since >= self.p.health_quiet_s)
 
-    def corridor_fresh(self, now):
+    def corridor_fresh(self, now: float) -> bool:
         """A recent frame OBSERVED the corridor of the current leg."""
         return self.corr_t is not None and now - self.corr_t <= self.p.depth_stale_s
 
     # ------------------------------------------------------------------ step
-    def _set(self, phase, now, out, why=""):
+    def _set(self, phase: str, now: float, out: Output, why: str = "") -> None:
         out.events.append(f"{self.phase} -> {phase}" + (f": {why}" if why else ""))
         self.phase, self.t_phase = phase, now
         if why:
             self.why = why
 
-    def _end(self, now, out, result):
+    def _end(self, now: float, out: Output, result: str) -> None:
         self.result = result
         self._set("done", now, out, result)
 
-    def _land(self, now, out, why):
+    def _land(self, now: float, out: Output, why: str) -> None:
         self.land_reason = why
         self._set("land", now, out, why)
 
-    def _resend(self, now):
+    def _resend(self, now: float) -> bool:
         if self.t_cmd is None or now - self.t_cmd >= self.p.cmd_resend_s:
             self.t_cmd = now
             return True
         return False
 
-    def _requalify(self, now, out, why):
+    def _requalify(self, now: float, out: Output, why: str) -> None:
         # Cancel the old priming interval and its held position. The original
         # preflight deadline remains t_started; this cannot renew its budget.
         self.sp, self.home, self.targets = None, None, []
         self._set("wait", now, out, why)
 
-    def step(self, now, v: Vehicle) -> Output:
+    def step(self, now: float, v: Vehicle) -> Output:
         p = self.p
         out = Output(self.phase)
         dt = 0.0 if self.t_last is None else min(max(now - self.t_last, 0.0), 0.25)
@@ -436,7 +446,7 @@ class Mission:
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
 
-    def _next_leg(self, now, out, v):
+    def _next_leg(self, now: float, out: Output, v: Vehicle) -> None:
         if self.leg >= len(self.targets):
             self._land(now, out, "route complete")
             return
@@ -450,7 +460,7 @@ class Mission:
         self.clr_hist, self.corr_t = [], None
         self._set("turn", now, out, f"leg {self.leg + 1}/{len(self.targets)}")
 
-    def _clearance(self, v):
+    def _clearance(self, v: Vehicle) -> float | None:
         """Clearance along the leg CONFIRMED by the last confirm_frames frames that OBSERVED the
         corridor: the largest of their clearances, so an obstacle counts only when every one of
         those frames shows it (a stereo false match lasts a frame; a wall does not go away). A frame
@@ -476,7 +486,7 @@ class Mission:
             self.counts["unconfirmed_obstacles"] += 1
         return confirmed
 
-    def _go(self, now, dt, out, v):
+    def _go(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
         p = self.p
         n0, e0 = self.leg_start
         un, ue = self.leg_dir
@@ -500,7 +510,7 @@ class Mission:
         if self.s >= self.leg_len - 1e-6 and math.hypot(v.pos[0] - tn, v.pos[1] - te) < p.arrive_m:
             self._set("hold", now, out, f"arrived leg {self.leg + 1}")
 
-    def status(self, now):
+    def status(self, now: float) -> dict[str, Any]:
         return {"phase": self.phase, "why": self.why, "result": self.result, "started_t": self.t_started, "leg": self.leg,
                 "legs": len(self.targets), "legs_done": self.legs_done, "home": self.home,
                 "targets": [list(t) for t in self.targets], "setpoint": list(self.sp) if self.sp else None,

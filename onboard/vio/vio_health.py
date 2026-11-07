@@ -3,24 +3,29 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class VioHealth:
-    def __init__(self, *, max_speed_mps=5.0, jump_m=1.0, window_s=10.0, max_jumps=1, quiet_s=5.0):
+    def __init__(self, *, max_speed_mps: float = 5.0, jump_m: float = 1.0, window_s: float = 10.0,
+                 max_jumps: int = 1, quiet_s: float = 5.0) -> None:
         self.max_speed = float(max_speed_mps)
         self.jump_m = float(jump_m)
         self.window_s = float(window_s)
         self.max_jumps = int(max_jumps)
         self.quiet_s = float(quiet_s)
-        self._last = None               # (t, pos) of the last FINITE, advancing sample
-        self._events = deque()          # times of insane samples
-        self._last_bad_t = None
-        self.reason = "no samples"
-        self.n_bad = 0
+        self._last: tuple[float, tuple[float, ...]] | None = None               # (t, pos) of the last FINITE, advancing sample
+        self._events: deque[float] = deque()          # times of insane samples
+        self._last_bad_t: float | None = None
+        self.reason: str = "no samples"
+        self.n_bad: int = 0
 
-    def update(self, t, pos):
+    def update(self, t: float, pos: Sequence[float]) -> tuple[bool, str]:
         """-> (ok, reason). t in seconds (measurement time), pos a 3-tuple in any consistent frame."""
-        bad = None
+        bad: str | None = None
         finite = math.isfinite(t) and all(math.isfinite(float(c)) for c in pos)
         if not finite:
             bad = "non-finite sample"

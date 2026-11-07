@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from typing import Any
+
+    from numpy.typing import ArrayLike
 
 # optical (x right, y down, z forward) -> camera rig (x forward, y left, z up): the columns are
 # the optical axes expressed in the rig frame
@@ -12,28 +19,28 @@ R_ENU_NED = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 R_FRD_FLU = np.diag([1.0, -1.0, -1.0])
 
 
-def rot_x(a):
+def rot_x(a: float) -> np.ndarray:
     c, s = math.cos(a), math.sin(a)
     return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], float)
 
 
-def rot_y(a):
+def rot_y(a: float) -> np.ndarray:
     c, s = math.cos(a), math.sin(a)
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], float)
 
 
-def rot_z(a):
+def rot_z(a: float) -> np.ndarray:
     c, s = math.cos(a), math.sin(a)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], float)
 
 
-def mount_rotation(pitch_deg, yaw_deg, roll_deg):
+def mount_rotation(pitch_deg: float, yaw_deg: float, roll_deg: float) -> np.ndarray:
     """The simulator's camera mount (generator/sim_cameras.cam_mount_rotation): yaw about +Z,
     then pitch about +Y (positive = nose down), then roll about the look axis; body FLU."""
     return rot_z(math.radians(yaw_deg)) @ rot_y(math.radians(pitch_deg)) @ rot_x(math.radians(roll_deg))
 
 
-def camera_optical_pose(cam, eye="center"):
+def camera_optical_pose(cam: Mapping[str, Any], eye: str = "center") -> tuple[np.ndarray, np.ndarray]:
     """(R_body_optical, t_body) of a configured camera: eye = center | left | right. Mirrors
     generator/sim_cameras.stereo_offset (the eyes sit on the rig's local left axis)."""
     pitch, yaw, roll = (list(cam.get("orientation_deg", [0.0, 0.0, 0.0])) + [0.0, 0.0, 0.0])[:3]
@@ -47,7 +54,7 @@ def camera_optical_pose(cam, eye="center"):
     return Rm @ R_RIG_OPTICAL, t
 
 
-def mat_to_quat(R):
+def mat_to_quat(R: ArrayLike) -> tuple[float, float, float, float]:
     """Rotation matrix -> (x, y, z, w)."""
     R = np.asarray(R, float)
     tr = R[0, 0] + R[1, 1] + R[2, 2]
@@ -67,7 +74,7 @@ def mat_to_quat(R):
     return (x / n, y / n, z / n, w / n)
 
 
-def quat_to_mat(w, x, y, z):
+def quat_to_mat(w: float, x: float, y: float, z: float) -> np.ndarray:
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
@@ -75,7 +82,9 @@ def quat_to_mat(w, x, y, z):
     ])
 
 
-def px4_to_ros(pos_ned, q_wxyz_frd_to_ned, vel_ned=None):
+def px4_to_ros(pos_ned: Sequence[float], q_wxyz_frd_to_ned: Sequence[float],
+               vel_ned: Sequence[float] | None = None
+               ) -> tuple[np.ndarray, tuple[float, float, float, float], np.ndarray | None]:
     """PX4 local NED position + FRD->NED attitude -> ROS ENU position + FLU->ENU (x, y, z, w)."""
     p = R_ENU_NED @ np.asarray(pos_ned, float)
     R = R_ENU_NED @ quat_to_mat(*q_wxyz_frd_to_ned) @ R_FRD_FLU

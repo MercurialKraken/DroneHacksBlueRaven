@@ -1,12 +1,20 @@
 """Virtual downward range sensor. Simulation-only; never commands the drone."""
+from __future__ import annotations
+
 import argparse
 import math
 import time
+from typing import TYPE_CHECKING
+
 import numpy as np
 from dronehacks_sim import Simulation, Unavailable, OutsideMap, WorldChanged
 
+if TYPE_CHECKING:
+    from typing import Any
 
-def sample(sim, rng, *, sigma_m=.02, max_range_m=3.):
+
+def sample(sim: Simulation, rng: np.random.Generator, *, sigma_m: float = .02,
+           max_range_m: float = 3.) -> dict[str, Any]:
     if not math.isfinite(sigma_m) or sigma_m < 0:
         raise ValueError("sigma_m must be finite and nonnegative")
     pose = sim.pose()
@@ -21,7 +29,7 @@ def sample(sim, rng, *, sigma_m=.02, max_range_m=3.):
             "model": "voxel ray + Gaussian range error; no reflectance/dropout model"}
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", help="local rig sensor directory; cloud default otherwise")
     parser.add_argument("--seconds", type=float, default=10.)

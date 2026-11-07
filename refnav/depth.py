@@ -8,14 +8,22 @@ y down, z forward; body x forward, y left, z up). The vehicle attitude levels th
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from numpy.typing import ArrayLike
+
+    Intrinsics = tuple[float, float, float, float]      # pinhole (fx, fy, cx, cy) in pixels
 
 # body FLU -> body FRD (PX4's body frame)
 _FLU_TO_FRD = np.diag([1.0, -1.0, -1.0])
 
 
-def quat_to_mat(w, x, y, z):
+def quat_to_mat(w: float, x: float, y: float, z: float) -> np.ndarray:
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
@@ -23,7 +31,7 @@ def quat_to_mat(w, x, y, z):
     ])
 
 
-def level_rotation(q_wxyz):
+def level_rotation(q_wxyz: Sequence[float]) -> np.ndarray:
     """Rotation taking body-FLU vectors into the LEVEL heading frame (x forward horizontal,
     y right horizontal, z down), i.e. PX4's attitude with its yaw removed. q = PX4's
     vehicle_attitude quaternion (FRD body -> NED), w first."""
@@ -34,7 +42,7 @@ def level_rotation(q_wxyz):
     return Rz_inv @ R @ _FLU_TO_FRD
 
 
-def decode_depth(encoding, height, width, step, data):
+def decode_depth(encoding: str, height: int, width: int, step: int, data: bytes) -> np.ndarray:
     """sensor_msgs/Image depth -> float32 metres (NaN = no return). 32FC1 is metres,
     16UC1 is millimetres (0 = invalid); anything else raises ValueError."""
     enc = encoding.lower()
@@ -56,7 +64,8 @@ class DepthFrame:
     ray and whether the camera returned ANY depth for it - so the frame can say what it observed
     (a return, near or far) apart from what it did not (no return: unknown, never free space)."""
 
-    def __init__(self, depth_m, K, R_body_cam, t_body_cam, R_level_body, stride=8, border_px=0):
+    def __init__(self, depth_m: ArrayLike, K: Intrinsics, R_body_cam: ArrayLike, t_body_cam: ArrayLike,
+                 R_level_body: ArrayLike, stride: int = 8, border_px: int = 0) -> None:
         fx, fy, cx, cy = K
         d = np.asarray(depth_m, np.float32)
         h, w = d.shape
@@ -66,17 +75,18 @@ class DepthFrame:
         u, v = us.ravel().astype(np.float32), vs.ravel().astype(np.float32)
         rays_cam = np.stack([(u - cx) / fx, (v - cy) / fy, np.ones_like(u)], axis=1)    # optical z = 1
         R = np.asarray(R_level_body) @ np.asarray(R_body_cam)
-        self.dirs = rays_cam @ R.T                     # a point at optical depth z is origin + z * dir
-        self.origin = np.asarray(R_level_body) @ np.asarray(t_body_cam, float)
-        self.z = z
-        self.valid = np.isfinite(z) & (z > 0.0)
-        self.valid_frac = float(self.valid.mean()) if z.size else 0.0
+        self.dirs: np.ndarray = rays_cam @ R.T                     # a point at optical depth z is origin + z * dir
+        self.origin: np.ndarray = np.asarray(R_level_body) @ np.asarray(t_body_cam, float)
+        self.z: np.ndarray = z
+        self.valid: np.ndarray = np.isfinite(z) & (z > 0.0)
+        self.valid_frac: float = float(self.valid.mean()) if z.size else 0.0
 
-    def points(self, rmin=0.3, rmax=6.0):
+    def points(self, rmin: float = 0.3, rmax: float = 6.0) -> np.ndarray:
         sel = self.valid & (self.z > rmin) & (self.z < rmax)
         return self.origin + self.dirs[sel] * self.z[sel, None]
 
-    def corridor_coverage(self, bearing_rad, half_width_m, band_m, at_m):
+    def corridor_coverage(self, bearing_rad: float, half_width_m: float, band_m: float,
+                          at_m: float) -> tuple[float, int]:
         """Fraction of the rays that cross the corridor's cross-section at at_m ahead (along the
         bearing, within +-half_width_m and +-band_m of the body height) that returned depth.
         0.0 when no ray of this camera crosses it (the corridor is out of view)."""
@@ -91,7 +101,9 @@ class DepthFrame:
         return (float(self.valid[window].mean()) if n else 0.0), n
 
 
-def level_points(depth_m, K, R_body_cam, t_body_cam, R_level_body, stride=8, rmin=0.3, rmax=6.0, border_px=0):
+def level_points(depth_m: ArrayLike, K: Intrinsics, R_body_cam: ArrayLike, t_body_cam: ArrayLike,
+                 R_level_body: ArrayLike, stride: int = 8, rmin: float = 0.3, rmax: float = 6.0,
+                 border_px: int = 0) -> np.ndarray:
     """Depth image -> (N,3) points in the level heading frame relative to the body origin:
     columns (forward, right, down) in metres. K = (fx, fy, cx, cy). border_px: ignore that many
     pixels at every image edge, where a stereo matcher has the least support (a real OAK-D and
@@ -115,7 +127,8 @@ def level_points(depth_m, K, R_body_cam, t_body_cam, R_level_body, stride=8, rmi
     return p_body @ np.asarray(R_level_body).T
 
 
-def clearance(points, bearing_rad=0.0, half_width_m=0.6, band_m=0.4, min_hits=3):
+def clearance(points: np.ndarray | None, bearing_rad: float = 0.0, half_width_m: float = 0.6,
+              band_m: float = 0.4, min_hits: int = 3) -> float:
     """Distance to the nearest obstacle in a corridor of +-half_width_m around the bearing
     (relative to the body heading, positive to the right) and within +-band_m of the body's
     height: the min_hits-th nearest point along the bearing (single pixels are not walls).
@@ -130,7 +143,7 @@ def clearance(points, bearing_rad=0.0, half_width_m=0.6, band_m=0.4, min_hits=3)
     return float(hits[min_hits - 1]) if len(hits) >= min_hits else math.inf
 
 
-def in_view(bearing_rad, K, width, margin_deg=5.0):
+def in_view(bearing_rad: float, K: Intrinsics, width: int, margin_deg: float = 5.0) -> bool:
     """Is a horizontal bearing (relative to the camera's forward axis) inside the image?"""
     fx, _, cx, _ = K
     half = min(math.atan2(cx, fx), math.atan2(width - cx, fx))

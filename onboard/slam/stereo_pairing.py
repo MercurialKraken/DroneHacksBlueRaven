@@ -7,11 +7,18 @@ because unmatched halves were only discarded when a later pair completed.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any
+
 MAX_PENDING = 8                  # frames waiting for their partner (eyes normally arrive ms apart)
 MAX_AGE_NS = 500_000_000         # a half older than the newest capture by this never pairs
 
 
-def add_half(half, t_ns, side, item, max_pending=MAX_PENDING, max_age_ns=MAX_AGE_NS):
+def add_half(half: dict[int, dict[str, Any]], t_ns: int, side: str, item: Any,
+             max_pending: int = MAX_PENDING, max_age_ns: int = MAX_AGE_NS
+             ) -> tuple[dict[str, Any] | None, int]:
     """Add one eye's frame (side "l" or "r") captured at t_ns to `half` ({stamp: {side: item}}).
     -> (pair, dropped): pair = {"l": ..., "r": ...} when both eyes of t_ns are present (removed from
     `half`), else None; dropped = how many unmatched halves were discarded by this call."""

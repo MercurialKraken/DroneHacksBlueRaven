@@ -8,6 +8,8 @@
 The process list is ordinary editable JSON. PID identity, source receipts and
 logs are under .onboard/. No cloud API, Docker socket or simulator source is used.
 """
+from __future__ import annotations
+
 import argparse
 import contextlib
 import fcntl
@@ -22,18 +24,23 @@ import signal
 import subprocess
 import tempfile
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+    from typing import Any
 
 SCHEMA = "flyx-onboard-processes/1"
 
 
-def project_root(value=None):
+def project_root(value: str | os.PathLike[str] | None = None) -> Path:
     root = Path(value or Path(__file__).resolve().parent.parent).absolute()
     if root.is_symlink() or not (root / "onboard/config/services.json").is_file():
         raise ValueError("select a project containing onboard/config/services.json")
     return root.resolve()
 
 
-def source_hashes(root):
+def source_hashes(root: Path) -> dict[str, str]:
     result = {}
     for p in sorted((root / "onboard").rglob("*")):
         if "__pycache__" in p.parts:
@@ -47,7 +54,7 @@ def source_hashes(root):
     return result
 
 
-def starttime(pid):
+def starttime(pid: int | str) -> int | None:
     try:
         fields = Path(f"/proc/{int(pid)}/stat").read_text().split(") ", 1)[1].split()
         return None if fields[0] == "Z" else int(fields[19])
@@ -55,7 +62,7 @@ def starttime(pid):
         return None
 
 
-def atomic(path, value):
+def atomic(path: Path, value: Any) -> None:
     fd, name = tempfile.mkstemp(prefix=".onboard-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
@@ -73,7 +80,7 @@ def atomic(path, value):
 
 
 @contextlib.contextmanager
-def registry(root):
+def registry(root: Path) -> Iterator[tuple[Path, Path, dict[str, Any] | None]]:
     folder = root / ".onboard"
     if folder.is_symlink():
         raise ValueError("onboard state must not be a symlink")
@@ -93,7 +100,7 @@ def registry(root):
         yield folder, state, value
 
 
-def owned(record):
+def owned(record: Mapping[str, Any]) -> dict[int, int]:
     """All descendants carrying this launch's random token, never process names."""
     marker = ("FLYX_ONBOARD_TOKEN=" + record["token"]).encode()
     result = {}
@@ -113,7 +120,7 @@ def owned(record):
     return result
 
 
-def view(root, record):
+def view(root: Path, record: dict[str, Any] | None) -> dict[str, Any]:
     if record is None:
         return {"state": "stopped", "processes": [], "project": str(root)}
     alive = owned(record)
@@ -124,12 +131,12 @@ def view(root, record):
             "source_matches": source_hashes(root) == record["sources"]}
 
 
-def status(root):
+def status(root: Path) -> dict[str, Any]:
     with registry(root) as (_, _, record):
         return view(root, record)
 
 
-def stop_owned(record, grace_s=5.0):
+def stop_owned(record: Mapping[str, Any], grace_s: float = 5.0) -> None:
     for sig, wait in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 2.0)):
         for pid, stamp in owned(record).items():
             if starttime(pid) == stamp:
@@ -143,7 +150,7 @@ def stop_owned(record, grace_s=5.0):
     raise RuntimeError("onboard processes survived termination; ownership remains recorded")
 
 
-def stop(root, token=None):
+def stop(root: Path, token: str | None = None) -> dict[str, Any]:
     with registry(root) as (_, path, record):
         if record is None:
             return {"state": "stopped", "project": str(root), "processes": []}
@@ -155,7 +162,7 @@ def stop(root, token=None):
         return view(root, record)
 
 
-def plan(root, mode, deployment=None):
+def plan(root: Path, mode: str, deployment: Path | None = None) -> list[dict[str, Any]]:
     config = json.loads((root / "onboard/config/services.json").read_text())
     if config.get("schema") != "flyx-onboard-services/1" or mode not in config.get("profiles", {}):
         raise ValueError("select a declared onboard service profile")
@@ -174,7 +181,8 @@ def plan(root, mode, deployment=None):
     return rows
 
 
-def start(root, mode="vio", deployment=None, token=None, world_token=None):
+def start(root: Path, mode: str = "vio", deployment: str | os.PathLike[str] | None = None,
+          token: str | None = None, world_token: str | None = None) -> dict[str, Any]:
     if deployment is not None:
         deployment = Path(deployment).resolve(strict=True)
     rows = plan(root, mode, deployment)
@@ -224,7 +232,7 @@ def start(root, mode="vio", deployment=None, token=None, world_token=None):
             raise
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("start", "status", "stop"))
     parser.add_argument("--project", type=Path)

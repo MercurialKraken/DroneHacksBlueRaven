@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import TYPE_CHECKING
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
@@ -20,6 +21,9 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
+
+if TYPE_CHECKING:
+    from px4_msgs.msg import VehicleOdometry
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from adapters.geometry import px4_to_ros  # noqa: E402
@@ -29,7 +33,7 @@ PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=Durab
 
 
 class Px4Odom(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("refnav_px4_odom")
         from px4_msgs.msg import VehicleOdometry
         self.odom_frame = self.declare_parameter("odom_frame", "odom").value
@@ -40,7 +44,7 @@ class Px4Odom(Node):
         self.n = 0
         self.create_subscription(VehicleOdometry, topic, self._on, PX4_QOS)
 
-    def _on(self, m):
+    def _on(self, m: VehicleOdometry) -> None:
         if m.pose_frame != 1:                       # POSE_FRAME_NED only (an FRD-labelled frame has no heading)
             return
         vel = list(m.velocity) if m.velocity_frame == 1 else None      # VELOCITY_FRAME_NED
@@ -66,7 +70,7 @@ class Px4Odom(Node):
         self.n += 1
 
 
-def main():
+def main() -> None:
     rclpy.init(args=sys.argv)
     n = Px4Odom()
     try:
