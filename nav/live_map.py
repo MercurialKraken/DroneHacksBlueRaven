@@ -58,6 +58,12 @@ class LiveParams:
     misfit_band_m: float = 0.50
     max_misfit: float = 0.50
     misfit_min_points: int = 200
+    # Misfit is judged against WALLS only (wall_field, the course map's 'localization' field): floor
+    # returns stay "on the floor" whatever the xy error and would dilute it, and nets sag and move.
+    # A return whose nearest mapped surface is a vertical non-wall (a net) is explained within
+    # net_tol_m instead of explain_tol_m; the floor keeps the tight tolerance, so low objects show.
+    wall_field: str = "localization"
+    net_tol_m: float = 0.25
 
 
 @dataclass
@@ -80,6 +86,7 @@ class LiveObstacleLayer:
         self.course = course
         self.static_field = static_field
         self.p = params or LiveParams()
+        self.wall_field = self.p.wall_field if self.p.wall_field in course.fields else static_field
         if self.p.min_filter_px < 1 or self.p.min_filter_px % 2 == 0:
             raise ValueError("min_filter_px must be a positive odd integer")
         self.shape = course.shape
@@ -117,13 +124,26 @@ class LiveObstacleLayer:
             inside &= np.isfinite(d_all)                  # past the outermost voxel centres: off the map
             st.off_map = int(np.count_nonzero(~inside))
             d_static = d_all[inside]
-            explained = np.abs(d_static) <= self.p.explain_tol_m
+            pts_in = hit_pts[inside]
+            d_wall = (self.course.distance(pts_in, self.wall_field) if self.wall_field != self.static_field
+                      else d_static)
+            tol = np.full(len(d_static), self.p.explain_tol_m)
+            not_wall = np.abs(d_wall) > np.abs(d_static) + self.cell    # nearest surface: floor or net
+            # only returns between the two tolerances need the surface's orientation
+            maybe_net = not_wall & (np.abs(d_static) > self.p.explain_tol_m) & (np.abs(d_static) <= self.p.net_tol_m)
+            if maybe_net.any():
+                _, g = self.course.query(pts_in[maybe_net], self.static_field)
+                t = tol[maybe_net]
+                t[np.abs(g[:, 2]) < 0.7] = self.p.net_tol_m              # vertical, not a wall: a net
+                tol[maybe_net] = t
+            explained = np.abs(d_static) <= tol
             st.explained = int(np.count_nonzero(explained))
             st.unexplained = int(np.count_nonzero(~explained))
-            near = np.abs(d_static) <= self.p.misfit_band_m
+            # near a wall, and not already explained by the floor or a net (e.g. floor at a wall's foot)
+            near = (np.abs(d_wall) <= self.p.misfit_band_m) & ~(explained & not_wall)
             n_near = int(np.count_nonzero(near))
             if n_near >= self.p.misfit_min_points:
-                st.misfit = float(np.count_nonzero(near & ~explained)) / n_near
+                st.misfit = float(np.count_nonzero(near & (np.abs(d_wall) > self.p.explain_tol_m))) / n_near
                 if st.misfit > self.p.max_misfit:
                     st.rejected = True
                     st.obstacles = len(self.obstacle_voxels())

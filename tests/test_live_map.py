@@ -192,6 +192,61 @@ def test_pose_gate():
     assert g.check(9.0, [0.64, 0, 1])[0] is False                          # health went stale
 
 
+# ---- a two-field course: planning = wall + floor + a net; localization = the wall only ----------
+NET_Y = 1.2                                                # mapped net: free for y < NET_Y
+
+
+def course2() -> CourseMap:
+    axes = [ORIGIN[a] + CELL * np.arange(SHAPE[a]) for a in range(3)]
+    X, Y, Z = np.meshgrid(*axes, indexing="ij")
+    wall = WALL_X - X
+    return CourseMap({"planning": np.minimum.reduce([wall, Z, NET_Y - Y]), "localization": wall}, ORIGIN, CELL)
+
+
+def render2(net_y=NET_Y, boxes=()) -> np.ndarray:
+    """Wall, floor (z = 0) and a net plane at net_y, plus boxes, seen from CAM."""
+    v, u = np.mgrid[0:H, 0:W]
+    d = np.stack([(u - K[0, 2]) / F, (v - K[1, 2]) / F, np.ones_like(u, dtype=float)], axis=-1) @ R_MAP_OPT.T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cand = [np.where(d[..., 0] > 0, (WALL_X - CAM[0]) / d[..., 0], np.inf),
+                np.where(d[..., 2] < 0, (0.0 - CAM[2]) / d[..., 2], np.inf),
+                np.where(d[..., 1] > 0, (net_y - CAM[1]) / d[..., 1], np.inf)]
+    best = np.minimum.reduce(cand)
+    box_depth = render(boxes, wall=False)
+    best = np.where((box_depth > 0) & (box_depth < best), box_depth, best)
+    return np.where(np.isfinite(best), best, 0.0)
+
+
+def fresh2(**kw) -> LiveObstacleLayer:
+    kw = {"hit_stride_px": 2, "free_stride_px": 2, **kw}
+    return LiveObstacleLayer(course2(), params=LiveParams(**kw))
+
+
+def test_misfit_ignores_the_floor_and_catches_an_xy_error():
+    live = fresh2()
+    st = live.integrate(render2(), K, T_cam(CAM + [0.3, 0.0, 0.0]))       # pose 0.3 m off, floor in view
+    assert st.rejected and st.misfit > 0.9                                # walls disagree; floor can't dilute
+    st = live.integrate(render2(), K, T_cam())
+    assert not st.rejected and st.misfit < 0.05
+
+
+def test_a_net_a_little_off_its_mapped_place_is_explained_not_an_obstacle():
+    live = fresh2()
+    for _ in range(3):
+        st = live.integrate(render2(net_y=NET_Y + 0.15), K, T_cam())      # like the T4's offset net
+    assert not st.rejected and st.unexplained < 0.02 * st.hits
+    assert len(live.obstacle_voxels()) == 0
+
+
+def test_a_low_box_on_the_floor_still_shows_up():
+    live = fresh2()
+    low = (1.4, 1.6, -0.2, 0.2, 0.0, 0.25)                                # 25 cm tall
+    for _ in range(2):
+        live.integrate(render2(boxes=[low]), K, T_cam())
+    pts = live.obstacle_points()
+    assert len(pts) > 0 and np.all(pts[:, 2] <= 0.35)
+
+
 def test_combined_without_live_layer_is_the_static_map():
     c = course()
     cm = CombinedMap(c)
