@@ -66,6 +66,27 @@ All at 1.0 m height unless noted. These are planning-field values from the build
 
 **Window: hand-off note for Task 3.** The window leaves about **4 cm of slack** in this field (about 7.7 cm in reality). Vertically, the drone's centre must be within z 0.685–0.839 m. A 10 cm A* grid can easily miss that gap, so plan the window approach on the exact centre line, or on a finer grid locally. Get Gate B (CP4) working first; the window is worth +5 only on a finished run.
 
+## Live obstacles: `nav/live_map.py`
+
+The static map can't know about anything that isn't in the published layout: a wall moved before judging, a prop, a person inside the net. `LiveObstacleLayer` adds those from depth, and `CombinedMap` puts both behind the same calls as `CourseMap`:
+
+```python
+from nav.live_map import LiveObstacleLayer, CombinedMap
+live = LiveObstacleLayer(cm)                      # same 5 cm grid as the course map
+st = live.integrate(depth_m, K, T_map_cam)        # each depth frame; T maps the OPTICAL frame to map
+comb = CombinedMap(cm, live)                      # planner drop-in: planning = min(static, live)
+d, g = comb.query(pts)                            # one lookup; 'localization' passes through unchanged
+ok = comb.clearance_ok(setpoints, need=0.38)      # off the map is never ok
+seen = live.observed(pts)                         # has any ray reached this space?
+```
+
+- **Only unexplained returns are recorded.** A depth point within 12 cm of a mapped surface (walls, net, floor) adds nothing. That keeps the layer small, and it doubles as a check that the map and the pose agree.
+- **Phantoms are filtered:** a voxel needs hits in 2 separate frames. Rays that pass through it count against it, so a one-frame phantom never counts and a person who walks away is cleared.
+- **A 5 px min filter on depth** joins scattered net-cord returns into a surface. Pixels with no return anywhere nearby stay unknown.
+- **No return is unknown, never free.** Distance doesn't treat unseen space as blocked, because the static map is the prior there. A planner that must not fly into unseen space also checks `observed()`.
+- **Misalignment fails safe to the static map.** Over 4000 obstacle voxels means the map or the pose is probably off. `live.trusted` goes false, the live layer is withheld, and a supervisor should treat that as degraded perception.
+- **Cost on this laptop,** for a 640 × 400 frame: about 35 ms per frame to integrate, and about 30 ms per 41k-point query. numpy only. `FrameStats` reports explained, unexplained and off-map returns for every frame.
+
 ## Open issues
 
 - **Launch vs sim spawn.** The launch mark's centre is (−2.515, 0.914), but `todos.md` gives the sim spawn as (−2.515, 1.114), 0.2 m further north. It could be how the sim places `base_link`, or a layout difference between the sim's CAD and v3. `tools/sim_eval/compare_course_voxels.py` measures both the spawn offset and the best-fit x/y shift between this map and the sim's own voxels. Run it in the companion once the VM is up, then write the result here.
