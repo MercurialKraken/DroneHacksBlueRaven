@@ -10,7 +10,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nav.course_map import CourseMap  # noqa: E402
-from nav.live_map import CombinedMap, LiveObstacleLayer, LiveParams, min_filter  # noqa: E402
+from nav.live_map import (CombinedMap, LiveObstacleLayer, LiveParams, ObstacleCloud,  # noqa: E402
+                          PoseGate, min_filter)
 
 CELL = 0.05
 ORIGIN = np.array([-0.5, -1.5, -0.5])
@@ -144,6 +145,51 @@ def test_misaligned_map_is_refused_not_trusted():
     assert st.notes and not live.trusted and live.as_course_map() is None
     cm = CombinedMap(course(), live)
     assert cm.distance(np.array([[1.0, 0.0, 0.5]]))[0] == pytest.approx(2.0, abs=1e-6)
+
+
+def test_frame_with_a_wrong_pose_is_refused():
+    live = fresh()
+    D = render([BOX])                                                      # rendered from the TRUE pose
+    for _ in range(3):
+        st = live.integrate(D, K, T_cam(CAM + [0.3, 0.0, 0.0]))            # pose estimate 0.3 m off
+    assert st.rejected and st.misfit is not None and st.misfit > 0.9
+    assert len(live.obstacle_voxels()) == 0 and not live.observed(np.array([[1.0, 0.0, 0.5]]))[0]
+    st = live.integrate(D, K, T_cam())                                     # the right pose is accepted
+    assert not st.rejected and st.misfit is not None and st.misfit < 0.1
+
+
+def test_obstacle_cloud_rebuilds_the_same_combined_map():
+    live = fresh()
+    for _ in range(2):
+        live.integrate(render([BOX]), K, T_cam())
+    c = course()
+    p = np.random.default_rng(1).uniform([0.5, -1.0, 0.0], [2.5, 1.0, 1.0], size=(200, 3))
+    direct = CombinedMap(c, live).distance(p)
+    via_cloud = CombinedMap(c, ObstacleCloud(c, live.obstacle_points())).distance(p)
+    assert np.allclose(direct, via_cloud)
+    assert np.allclose(CombinedMap(c, ObstacleCloud(c, live.obstacle_points(), trusted=False)).distance(p),
+                       c.distance(p))
+
+
+def test_pose_gate():
+    g = PoseGate(recover_s=3.0, stale_s=1.0, max_speed_mps=2.5)
+    assert g.check(0.0, [0, 0, 1])[0] is False                             # no health heard yet
+    g.on_health(0.0, True)
+    assert g.check(0.1, [0, 0, 1]) == (True, "ok")
+    g.on_health(1.0, False)
+    assert g.check(1.1, [0.01, 0, 1])[0] is False                          # unhealthy
+    g.on_health(1.5, True)
+    assert g.check(2.0, [0.02, 0, 1])[0] is False                          # recovering until 4.0
+    g.on_health(4.1, True)
+    assert g.check(4.2, [0.03, 0, 1])[0] is True
+    g.on_health(4.4, True)
+    ok, why = g.check(4.4, [0.63, 0, 1])                                   # 0.6 m in 0.2 s: a VIO jump
+    assert not ok and "jumped" in why
+    g.on_health(5.0, True)
+    assert g.check(5.0, [0.63, 0, 1])[0] is False                          # still recovering
+    g.on_health(7.5, True)
+    assert g.check(7.5, [0.64, 0, 1])[0] is True
+    assert g.check(9.0, [0.64, 0, 1])[0] is False                          # health went stale
 
 
 def test_combined_without_live_layer_is_the_static_map():

@@ -19,7 +19,14 @@ launch:
                                                 # confirm how the drone is placed on the mark at the net.
   base_link_z: 0.07                             # base_link height when sitting on the mark: sim value,
                                                 # measure on the real drone
-  confirmed: false                              # the sim spawns at y = 1.114, 0.2 m north of this mark
+  confirmed: false                              # the sim spawns 0.2 m north of this mark: see launch_sim
+
+launch_sim:                                     # where the SIMULATOR spawns the drone (use for sim runs)
+  x: -2.5146                                    # FlyX environment.json spawn point; the T4 replica uses the
+  y: 1.1144                                     # same, confirmed by its ground truth on 2026-11-07. Route v5
+  yaw_deg: 90.0                                 # (Darion) is generated from this point.
+  base_link_z: 0.07
+  confirmed: true
 
 limits:
   wall_top_z: 1.727                             # 68 in. Some part of the frame must stay below it (rule 7.7)

@@ -51,6 +51,13 @@ class LiveParams:
     miss_weight: float = 0.5           # each frame a ray passes through cancels this many hits
     truncate_m: float = 0.80           # live distances are capped here (the static map covers beyond)
     max_obstacle_voxels: int = 4000    # above this the map is probably misaligned: refuse, don't stall
+    # Pose check per frame. With a good pose, returns near a mapped surface land ON it. If more than
+    # max_misfit of the returns within misfit_band_m of a surface miss it by over explain_tol_m, the
+    # pose disagrees with the map (a VIO jump) and the frame is refused instead of drawing real walls
+    # in the wrong place. Judged only when at least misfit_min_points such returns exist.
+    misfit_band_m: float = 0.50
+    max_misfit: float = 0.50
+    misfit_min_points: int = 200
 
 
 @dataclass
@@ -61,6 +68,8 @@ class FrameStats:
     off_map: int = 0                   # ... outside the map's grid (e.g. seen through the net)
     carved: int = 0                    # voxels a ray passed through this frame
     obstacles: int = 0                 # obstacle voxels after this frame
+    misfit: float | None = None        # share of near-surface returns that miss it (None: too few to judge)
+    rejected: bool = False             # True: the frame changed nothing (pose disagrees with the map)
     notes: list[str] = field(default_factory=list)
 
 
@@ -86,11 +95,7 @@ class LiveObstacleLayer:
         self._mark = np.zeros(self.hits.size, dtype=bool)  # scratch for de-duplicating indices
         self._occupied: np.ndarray | None = None          # (M, 3) voxel indices, cached
         self._field: CourseMap | None = None              # truncated live distance grid, cached
-        r = int(np.ceil(self.p.truncate_m / self.cell))
-        o = np.arange(-r, r + 1)
-        X, Y, Z = np.meshgrid(o, o, o, indexing="ij")
-        self._kernel = (np.sqrt(X * X + Y * Y + Z * Z) * self.cell).astype(np.float32)
-        self._r = r
+        self._kernel = distance_kernel(self.cell, self.p.truncate_m)
 
     # ------------------------------------------------------------------ input
     def integrate(self, depth_m: Any, K: Any, T_map_cam: Any) -> FrameStats:
@@ -115,6 +120,16 @@ class LiveObstacleLayer:
             explained = np.abs(d_static) <= self.p.explain_tol_m
             st.explained = int(np.count_nonzero(explained))
             st.unexplained = int(np.count_nonzero(~explained))
+            near = np.abs(d_static) <= self.p.misfit_band_m
+            n_near = int(np.count_nonzero(near))
+            if n_near >= self.p.misfit_min_points:
+                st.misfit = float(np.count_nonzero(near & ~explained)) / n_near
+                if st.misfit > self.p.max_misfit:
+                    st.rejected = True
+                    st.obstacles = len(self.obstacle_voxels())
+                    st.notes.append(f"frame refused: {st.misfit:.0%} of returns near a mapped surface miss it; "
+                                    "the pose probably disagrees with the map")
+                    return st
             lin = np.ravel_multi_index(idx[inside].T, self.shape)
             self._seen[lin] = True
             new = self._unique(lin[~explained])                    # one hit per voxel per frame
@@ -176,16 +191,7 @@ class LiveObstacleLayer:
         if len(occ) == 0 or len(occ) > self.p.max_obstacle_voxels:
             return None
         if self._field is None:
-            F = np.full(self.shape, self.p.truncate_m, dtype=np.float32)
-            r, n = self._r, np.array(self.shape)
-            for v in occ:
-                lo = np.maximum(v - r, 0)
-                hi = np.minimum(v + r + 1, n)
-                k0 = lo - (v - r)
-                k1 = k0 + (hi - lo)
-                sl = tuple(slice(a, b) for a, b in zip(lo, hi))
-                ks = tuple(slice(a, b) for a, b in zip(k0, k1))
-                np.minimum(F[sl], self._kernel[ks], out=F[sl])
+            F = stamp_field(self.shape, occ, self._kernel, self.p.truncate_m)
             self._field = CourseMap({"live": F}, self.origin, self.cell, {"source": "LiveObstacleLayer"})
         return self._field
 
@@ -286,6 +292,92 @@ class CombinedMap:
         obstacle. Off the map (nan) is never ok."""
         d = self.distance(points, field)
         return np.isfinite(d) & (d >= need)
+
+
+def distance_kernel(cell: float, truncate_m: float) -> np.ndarray:
+    """Distances (m) from the centre voxel of a cube reaching truncate_m in each direction."""
+    r = int(np.ceil(truncate_m / cell))
+    o = np.arange(-r, r + 1)
+    X, Y, Z = np.meshgrid(o, o, o, indexing="ij")
+    return (np.sqrt(X * X + Y * Y + Z * Z) * cell).astype(np.float32)
+
+
+def stamp_field(shape: tuple[int, int, int], voxels: np.ndarray, kernel: np.ndarray, truncate_m: float) -> np.ndarray:
+    """Distance to the nearest of `voxels` (index triples) on a grid, capped at truncate_m."""
+    F = np.full(shape, truncate_m, dtype=np.float32)
+    r, n = kernel.shape[0] // 2, np.array(shape)
+    for v in voxels:
+        lo = np.maximum(v - r, 0)
+        hi = np.minimum(v + r + 1, n)
+        k0 = lo - (v - r)
+        sl = tuple(slice(a, b) for a, b in zip(lo, hi))
+        ks = tuple(slice(a, a + (b - c)) for a, b, c in zip(k0, hi, lo))
+        np.minimum(F[sl], kernel[ks], out=F[sl])
+    return F
+
+
+class ObstacleCloud:
+    """Live obstacles received from another process (the live map node's point cloud), usable as
+    CombinedMap(course, ObstacleCloud(course, points)) without running a LiveObstacleLayer."""
+
+    def __init__(self, course: CourseMap, points: Any, truncate_m: float = 0.80, trusted: bool = True) -> None:
+        self.course = course
+        pts = np.asarray(points, dtype=float).reshape(-1, 3)
+        idx = np.rint((pts - course.origin) / course.cell).astype(np.intp)
+        ok = np.all((idx >= 0) & (idx < np.array(course.shape)), axis=1)
+        self.voxels = np.unique(idx[ok], axis=0) if ok.any() else np.zeros((0, 3), dtype=np.intp)
+        self.truncate_m = float(truncate_m)
+        self.trusted = bool(trusted)
+        self._field: CourseMap | None = None
+
+    def as_course_map(self) -> CourseMap | None:
+        if not self.trusted or len(self.voxels) == 0:
+            return None
+        if self._field is None:
+            F = stamp_field(self.course.shape, self.voxels, distance_kernel(self.course.cell, self.truncate_m),
+                            self.truncate_m)
+            self._field = CourseMap({"live": F}, self.course.origin, self.course.cell, {"source": "ObstacleCloud"})
+        return self._field
+
+
+class PoseGate:
+    """Decides whether the pose is trustworthy enough to map with. Pure: the caller supplies times.
+
+    Refuses while the estimator's health is unhealthy or stale, for recover_s after it last was, and
+    for recover_s after the camera position jumps faster than max_speed_mps between checks (a VIO
+    relocalisation can move the estimate 0.6 m while the drone stands still)."""
+
+    def __init__(self, recover_s: float = 3.0, stale_s: float = 1.0, max_speed_mps: float = 2.5) -> None:
+        self.recover_s, self.stale_s, self.max_speed = float(recover_s), float(stale_s), float(max_speed_mps)
+        self.health_t: float | None = None
+        self.healthy = False
+        self.bad_until = -np.inf
+        self.last: tuple[float, np.ndarray] | None = None
+
+    def on_health(self, t: float, ok: bool) -> None:
+        if not ok:
+            self.bad_until = max(self.bad_until, t + self.recover_s)
+        self.health_t, self.healthy = t, bool(ok)
+
+    def check(self, t: float, position: Any) -> tuple[bool, str]:
+        p = np.asarray(position, dtype=float).reshape(3)
+        if self.health_t is None:
+            return False, "no estimator health received"
+        if t - self.health_t > self.stale_s:
+            self.bad_until = max(self.bad_until, t + self.recover_s)
+            return False, f"estimator health stale ({t - self.health_t:.1f} s)"
+        if not self.healthy:
+            return False, "estimator unhealthy"
+        if self.last is not None and t > self.last[0]:
+            speed = float(np.linalg.norm(p - self.last[1])) / (t - self.last[0])
+            if speed > self.max_speed:
+                self.bad_until = max(self.bad_until, t + self.recover_s)
+                self.last = (t, p)
+                return False, f"pose jumped ({speed:.1f} m/s)"
+        self.last = (t, p)
+        if t < self.bad_until:
+            return False, f"recovering ({self.bad_until - t:.1f} s left)"
+        return True, "ok"
 
 
 def min_filter(D: np.ndarray, w: int) -> np.ndarray:

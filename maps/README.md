@@ -86,6 +86,29 @@ seen = live.observed(pts)                         # has any ray reached this spa
 - **No return is unknown, never free.** Distance doesn't treat unseen space as blocked, because the static map is the prior there. A planner that must not fly into unseen space also checks `observed()`.
 - **Misalignment fails safe to the static map.** Over 4000 obstacle voxels means the map or the pose is probably off. `live.trusted` goes false, the live layer is withheld, and a supervisor should treat that as degraded perception.
 - **Cost on this laptop,** for a 640 × 400 frame: about 35 ms per frame to integrate, and about 30 ms per 41k-point query. numpy only. `FrameStats` reports explained, unexplained and off-map returns for every frame.
+- **A pose that disagrees with the map is refused.** If more than half of the returns within 0.5 m of a mapped surface miss it by over 12 cm (`misfit`), the frame changes nothing. That's what a VIO jump looks like.
+
+### Running it: `nav/live_map_node.py`
+
+```sh
+# from the repo root, with the onboard services (cuVSLAM, vision bridge, px4_odometry) running
+python3 -m nav.live_map_node --ros-args -p use_sim_time:=true -p launch_key:=launch_sim -p depth_scale:=0.985
+```
+
+- **Pose:** TF map ← depth camera, at each image's timestamp. The node publishes a static map → odom from `course.yaml` (`launch_key`: `launch` for the real drone, `launch_sim` for the simulator's spawn point; see `nav/frames.py`). `px4_odom.py` supplies odom → base_link. When the drift correction (Task 2) publishes its own map → odom, set `publish_map_to_odom:=false`; two publishers would fight.
+- **Pauses mapping** while `/estimator/healthy` is false or silent, for 3 s afterwards (`recover_s`), after a pose jump faster than 2.5 m/s, and on any frame refused for misfit.
+- **Publishes:**
+  - `/blueraven/live_obstacles`: a PointCloud2 in `map`. Rebuild the combined map in another node with `CombinedMap(course, ObstacleCloud(course, points))`.
+  - `/blueraven/live_map/status`: JSON with frames mapped, skips by reason, the last frame's counts, obstacles and `trusted`.
+- **Rate:** at most 5 frames per second (`max_rate_hz`).
+
+### Replaying a recorded flight: `tools/sim_eval/replay_live_map.py` (sim only)
+
+```sh
+python3 tools/sim_eval/replay_live_map.py ~/bags/<run> --out runs/live_<run>
+```
+
+This runs the live layer twice over a rosbag, read-only. One copy uses the **true** pose from `/sim/truth/odometry`, which checks the course map against the sim's walls. The other uses the **estimated** pose through the node's pose gate, which shows what flight would have done, including around VIO jumps. It writes `frames.csv`, `summary.txt`, the obstacle points and `obstacles.png`.
 
 ## Open issues
 
