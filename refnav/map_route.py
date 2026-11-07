@@ -87,9 +87,10 @@ def builder(cm: CourseMap, launch: dict[str, float], z: float, drone_radius: flo
         sp = build_path(xy, cm, drone_radius=drone_radius, margin=margin, z=z, max_radius=max_radius, ds=F.STEP_M)
         keep = np.r_[True, np.diff(sp.s) > 1e-6]               # arcs and legs share their joining sample
         s, k_enu = sp.s[keep], sp.k[keep]
+        clear = cm.distance(np.c_[sp.xyz[keep, :2], np.full(int(keep.sum()), z)])
         n, e = frame.to_ned(sp.xyz[keep, 0], sp.xyz[keep, 1])
         psi = F.wrap(np.pi / 2 - (sp.psi[keep] - frame.a))  # ENU heading (ccw from east) -> NED yaw (cw from north)
         k, sharp = F.soften_kinks(s, psi, -k_enu)            # left-positive -> right-positive
-        return F.Path(s.copy(), n, e, psi, k, sharp)
+        return F.Path(s.copy(), n, e, psi, k, sharp, clear)
 
     return build

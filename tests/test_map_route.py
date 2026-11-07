@@ -81,3 +81,11 @@ def test_the_follower_flies_the_whole_map_path() -> None:
     c, xt, s, t = TF._fly_lagging(path, TF._follower(path), seconds=200.0)
     assert c.done, (path.length, s[-1])
     assert xt.max() < 0.2
+
+
+def test_speed_drops_where_the_mapped_path_is_tight() -> None:
+    path = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)(_route_ned())
+    v = F.speed_profile(path, 0.4, math.radians(45), 0.25, 0.5, 0.5, (0.40, 0.60, 0.15))
+    tight = path.clearance < 0.42
+    assert tight.any() and (v[tight] <= 0.15 + 0.4 * 0.1 + 1e-6).all()
+    assert v.max() == pytest.approx(0.4)

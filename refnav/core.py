@@ -94,6 +94,9 @@ class Params:
     stall_s: float = 45.0                       # no progress along the path this long: land
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
     a_lat_mps2: float = 0.25                    # sideways acceleration in turns: PX4 lags tighter ones and cuts the corner
+    tight_m: float = 0.40                       # where the mapped path passes this close to a surface it crawls...
+    roomy_m: float = 0.60                       # ...rising to full speed by this clearance
+    crawl_mps: float = 0.15
     look_min_m: float = 0.3                     # lookahead at rest; it grows by look_s per m/s made while on track
     look_s: float = 1.5
     look_max_m: float = 1.2
@@ -453,7 +456,8 @@ class Mission:
             self._land(now, out, "route complete")
             return
         path = self.path_builder([(self.sp[0], self.sp[1])] + self.targets)
-        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2, p.accel_mps2)
+        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2, p.accel_mps2,
+                               (p.tight_m, p.roomy_m, p.crawl_mps))
         lim = F.Limits(accel=p.accel_mps2, look_min=p.look_min_m, look_s=p.look_s, look_max=p.look_max_m,
                        face_tol=math.radians(p.face_tol_deg), yaw_slow=math.radians(p.yaw_slow_deg),
                        xtrack_slow=p.xtrack_slow_m, xtrack_stop=p.xtrack_stop_m, end_tol=p.arrive_m)

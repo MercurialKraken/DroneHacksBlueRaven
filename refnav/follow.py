@@ -59,6 +59,7 @@ class Path:
     psi: np.ndarray
     k: np.ndarray               # inf at a sharp corner
     corners: list[float]        # s of every sharp corner
+    clearance: np.ndarray | None = None   # distance to the nearest mapped surface at each sample, if a map built it
 
     @property
     def length(self) -> float:
@@ -154,7 +155,8 @@ def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: f
     return Path(s, np.concatenate(xs), np.concatenate(ys), psi, k, sharp)
 
 
-def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, a_acc: float, a_brake: float) -> np.ndarray:
+def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, a_acc: float, a_brake: float,
+                  tight: tuple[float, float, float] | None = None) -> np.ndarray:
     """Fastest speed at each sample: turn rate and lateral acceleration on curves, zero at sharp corners and the ends,
     then limited by braking (backward pass) and speeding up (forward pass)."""
     # the turn over the next few cm, not one sample's curvature: a 1 cm arc turning 12 deg is a gentle kink
@@ -164,6 +166,10 @@ def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, a_acc
     k = np.abs(psi_u[hi] - psi_u[lo]) / np.maximum(path.s[hi] - path.s[lo], STEP_M)
     with np.errstate(divide="ignore"):
         v = np.minimum.reduce([np.full(len(k), v_max), yaw_rate / k, np.sqrt(a_lat / k)])
+    if tight is not None and path.clearance is not None:     # (clearance at which to crawl, at which full speed, crawl speed)
+        lo, hi, crawl = tight
+        f = np.clip((path.clearance - lo) / (hi - lo), 0.0, 1.0)
+        v = np.minimum(v, np.where(np.isfinite(path.clearance), crawl + f * (v_max - crawl), v_max))
     v[path.index(np.asarray(path.corners))] = 0.0 if path.corners else v[0]
     v[0] = v[-1] = 0.0
     ds = np.diff(path.s)
