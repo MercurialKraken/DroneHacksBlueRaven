@@ -63,14 +63,20 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("bag"); ap.add_argument("--launch-key", default="launch_sim"); ap.add_argument("--every", type=int, default=3)
     ap.add_argument("--field", default=None, help="SDF field to align to (default: AlignParams.field)")
+    ap.add_argument("--method", choices=("align", "mcl"), default="align", help="DriftCorrector or the particle filter")
     a = ap.parse_args(argv)
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     L = load_launch(ROOT / "maps" / "course.yaml", a.launch_key)
     start = SE2(L["x"], L["y"], math.radians(L["yaw_deg"] - 90.0))
     from nav.map_align import AlignParams, CorrectorParams
     cp = CorrectorParams(align=AlignParams(field=a.field) if a.field else AlignParams())
-    print(f"field: {cp.align.field}")
-    dc = DriftCorrector(cm, start, cp)
+    if a.method == "mcl":
+        from nav.map_mcl import MclParams, ParticleCorrector
+        dc = ParticleCorrector(cm, start, MclParams(field=a.field) if a.field else MclParams())
+        print(f"method: particle filter, field {dc.p.field}, {dc.p.n} particles")
+    else:
+        dc = DriftCorrector(cm, start, cp)
+        print(f"method: align, field: {cp.align.field}")
     R_bc = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], float); t_bc = np.array([0.116, 0.037, 0.029])
     K = att = pos = truth = phase = None; t0 = None; n = 0; rows = []
     for topic, t, b in stream(a.bag):
@@ -102,10 +108,14 @@ def main(argv=None):
             raw = start.pose(odom)
             T = dc.update(t - t0, odom, pts)
             cor = T.pose(odom)
-            r = dc.last
+            if a.method == "mcl":
+                sx, sy, syaw = dc.spread
+                info = (dc.last_explained >= dc.p.min_explained, f"{sx:.2f}/{sy:.2f}/{syaw:.1f}", 0, dc.last_explained)
+            else:
+                r = dc.last
+                info = (r.ok, "".join("xyY"[i] if r.observable[i] else "-" for i in range(3)), r.inliers, r.rms_after)
             rows.append((t - t0, phase, math.hypot(raw[0] - truth[0], raw[1] - truth[1]), math.degrees(wrap(raw[3] - truth[3])),
-                         math.hypot(cor[0] - truth[0], cor[1] - truth[1]), math.degrees(wrap(cor[3] - truth[3])),
-                         r.ok, "".join("xyY"[i] if r.observable[i] else "-" for i in range(3)), r.inliers, r.rms_after))
+                         math.hypot(cor[0] - truth[0], cor[1] - truth[1]), math.degrees(wrap(cor[3] - truth[3])), *info))
     A = np.array([(r[2], r[3], r[4], r[5]) for r in rows])
     air = np.array([r[1] not in ("climb", "land") for r in rows])
     print(f"{a.bag}\nframes {len(rows)} (every {a.every}th depth frame while flying); corrector {dc.n}")
@@ -113,7 +123,8 @@ def main(argv=None):
         B = A[sel]
         print(f"[{name}] xy error  raw rms {np.sqrt(np.mean(B[:,0]**2)):.3f} max {B[:,0].max():.3f}  |  corrected rms {np.sqrt(np.mean(B[:,2]**2)):.3f} max {B[:,2].max():.3f} m")
         print(f"[{name}] yaw error raw rms {np.sqrt(np.mean(B[:,1]**2)):.2f} max {np.abs(B[:,1]).max():.2f}  |  corrected rms {np.sqrt(np.mean(B[:,3]**2)):.2f} max {np.abs(B[:,3]).max():.2f} deg")
-    print("\n   t   phase   raw_xy raw_yaw | cor_xy cor_yaw | fit obs  inl  rms")
+    head = "fit spread(x/y/yaw) explained" if a.method == "mcl" else "fit obs  inl  rms"
+    print(f"\n   t   phase   raw_xy raw_yaw | cor_xy cor_yaw | {head}")
     for r in rows[:: max(1, len(rows) // 32)]:
         print(f"{r[0]:6.1f} {str(r[1]):7s} {r[2]:6.3f} {r[3]:+6.2f} | {r[4]:6.3f} {r[5]:+6.2f} | {'ok ' if r[6] else 'rej'} {r[7]} {r[8]:4d} {r[9]:.3f}")
 
