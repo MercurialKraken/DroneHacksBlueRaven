@@ -17,7 +17,8 @@ STEP_M = 0.02           # path sample spacing
 MIN_SPEED = 0.05        # the reference creeps at least this fast when allowed to move, so v=0 samples never stall it
 PROJECT_BACK_M = 0.25   # the aircraft is matched to the path only this far behind its last match...
 PROJECT_AHEAD_M = 0.25  # ...or ahead of the reference, so a U-turn never jumps to the parallel corridor
-LEAD_M = 0.03           # the reference stays at least this far ahead; more would feed PX4 speed it was not planned
+LEAD_M, LEAD_MAX_M = 0.03, 0.10  # the reference leads the aircraft by this much: further ahead, PX4's position gain
+                                 # pulls straight at it, cutting corners and adding speed the profile never planned
 
 
 def wrap(a):
@@ -229,7 +230,7 @@ class Follower:
         i = int(P.index(self.s_ref))
         speed = min(max(float(self.v[i]), MIN_SPEED), v_cap) * scale
         gate = math.inf if at_corner and scale > 0.0 else corner      # a sharp corner is passed only once faced
-        s_new = min(self.s_ref + speed * dt, self.s_hat + lead / 2.0 + STEP_M, s_limit, P.length, gate)
+        s_new = min(self.s_ref + speed * dt, self.s_hat + LEAD_MAX_M, s_limit, P.length, gate)
         # always ahead of the aircraft: a reference it overruns pulls it back and flies a loop
         ahead = self.s_hat + LEAD_M
         self.s_ref = max(self.s_ref, s_new, min(ahead, s_limit, P.length, gate))
