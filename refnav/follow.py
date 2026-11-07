@@ -210,7 +210,8 @@ class Follower:
         s_new = min(self.s_ref + speed * dt, self.s_hat + lead / 2.0 + STEP_M, s_limit, P.length)
         if not at_corner:
             s_new = min(s_new, corner)
-        self.s_ref = max(self.s_ref, s_new)
+        # never behind the aircraft: pulling it back to a stalled reference flies a loop
+        self.s_ref = max(self.s_ref, s_new, min(self.s_hat, s_limit))
 
         i = int(P.index(self.s_ref))
         j = min(i + 1, len(self.v) - 1)

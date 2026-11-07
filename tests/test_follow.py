@@ -118,3 +118,15 @@ def test_the_mission_streams_velocity_feed_forward() -> None:
             seen["v"] = m.cmd.vel
     fly(C.Params(route=ROUTE), on_tick=grab)
     assert "v" in seen
+
+
+def test_the_reference_never_falls_behind_the_aircraft() -> None:
+    path = F.fillet_path([(0, 0), (3, 0)], 0.3)
+    fol = _follower(path)
+    fol.s_ref, fol.s_hat = 0.8, 0.9                             # the aircraft has overrun a slow reference
+    fol.step((1.0, 0.0), (0.4, 0.0), math.pi / 2, 0.05, math.inf)    # facing away: the reference would not move
+    assert fol.s_ref >= 1.0 - F.STEP_M
+    fol2 = _follower(path)
+    fol2.s_ref, fol2.s_hat = 0.4, 0.9
+    fol2.step((1.0, 0.0), (0.4, 0.0), math.pi / 2, 0.05, 0.5)  # ...but never into space depth has not seen
+    assert fol2.s_ref <= 0.5 + 1e-9

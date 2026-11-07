@@ -92,7 +92,7 @@ class Params:
     look_max_m: float = 1.2
     xtrack_slow_m: float = 0.12                 # off the path by more than this: slow down...
     xtrack_stop_m: float = 0.35                 # ...and stop at this
-    yaw_slow_deg: float = 35.0                  # heading error at which forward speed reaches zero
+    yaw_slow_deg: float = 60.0                  # heading error at which forward speed reaches zero
     eph_ok_m: float = 0.1                       # PX4 horizontal position std: full speed below this...
     eph_stop_m: float = 0.5                     # ...stopped at this
 
