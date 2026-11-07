@@ -129,6 +129,26 @@ class SE2:
         return x, y, odom_pose[2], wrap(odom_pose[3] + self.yaw)
 
 
+def compose(a: SE2, b: SE2) -> SE2:
+    """a . b (apply b first)."""
+    x, y = a.apply(b.x, b.y)
+    return SE2(x, y, wrap(a.yaw + b.yaw))
+
+
+def inverse(a: SE2) -> SE2:
+    c, s = math.cos(a.yaw), math.sin(a.yaw)
+    return SE2(-(c * a.x + s * a.y), -(-s * a.x + c * a.y), wrap(-a.yaw))
+
+
+def correction_ned(start: SE2, T: SE2) -> tuple[float, float, float]:
+    """The odom correction as refnav consumes it (/blueraven/odom_correction, frame px4_local_ned):
+    corrected = R(yaw_C) * p_px4 + (x_C, y_C), heading_corrected = heading_px4 + yaw_C, with x north,
+    y east and yaw clockwise from north (PX4's sense). start = map <- odom at launch, T = the
+    corrector's current map <- odom. The correction is start^-1 . T expressed in NED."""
+    C = compose(inverse(start), T)                      # odom <- odom, ENU (x east, y north, yaw CCW)
+    return C.y, C.x, wrap(-C.yaw)
+
+
 @dataclass
 class CorrectorParams:
     tau_s: float = 2.0            # time constant of the correction

@@ -111,6 +111,23 @@ def test_corrector_converges_smoothly_and_ignores_a_jump():
     assert math.hypot(moved[0] - est[0], moved[1] - est[1]) < 0.1
 
 
+def test_correction_ned_maps_raw_px4_onto_the_corrected_pose():
+    from nav.map_align import correction_ned
+    start = SE2(-2.5146, 1.1144, 0.0)                    # launch_sim: odom axes = map axes
+    T = SE2(start.x + 0.12, start.y - 0.30, math.radians(4.0))   # a corrector state
+    xC, yC, yawC = correction_ned(start, T)
+    for odom in ((1.6, 0.2, 0.8, math.radians(80)), (-0.5, 3.0, 0.8, math.radians(-30))):   # odom ENU poses
+        mx, my, _, myaw = T.pose(odom)                     # where the corrector puts the drone in the map
+        want_n, want_e = my - start.y, mx - start.x        # that pose in PX4 NED from the launch point
+        n, e = odom[1], odom[0]                            # the raw PX4 position (NED)
+        c, s = math.cos(yawC), math.sin(yawC)
+        got_n, got_e = c * n - s * e + xC, s * n + c * e + yC
+        assert abs(got_n - want_n) < 1e-9 and abs(got_e - want_e) < 1e-9
+        heading_px4 = math.pi / 2 - odom[3]                # NED heading from ENU yaw
+        want_heading = math.pi / 2 - myaw
+        assert abs(math.remainder(heading_px4 + yawC - want_heading, 2 * math.pi)) < 1e-9
+
+
 def test_points_that_match_no_wall_are_rejected():
     cm = room()
     rng = np.random.default_rng(3)
