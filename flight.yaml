@@ -8,3 +8,4 @@
     base_frame: base_link
     control_topic: /refnav/control
     status_topic: /refnav/status
+    settle_s: 0.5   # a turn ends only once heading and position have held this long

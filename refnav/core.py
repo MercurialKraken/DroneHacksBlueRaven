@@ -98,6 +98,8 @@ class Params:
     arm_wait_s: float = 30.0
     cmd_resend_s: float = 1.0
     land_timeout_s: float = 60.0
+    settle_s: float = 0.0                       # >0: a turn ends only after yaw stays in face_tol_deg this long
+    settle_m: float = 0.15                      # ...and the aircraft is back within this of the leg start
     stall_s: float = 45.0                       # no progress toward the current target this long on a leg: land
     avoid: bool = False                         # True: legs steer around obstacles (refnav.planner) instead of landing
     gap_fan_deg: float = 35.0                   # bearings tried either side of the nose; the camera sees about +-37
@@ -229,6 +231,7 @@ class Mission:
         self.gap_clear: float = 0.0
         self.gap_t: float | None = None             # the depth frame that bearing was chosen from
         self.looks: int = 0
+        self.t_settled: float | None = None         # since when the turn has held heading and position
         self.memory: P.PointMemory = P.PointMemory(params.gap_memory_s)
 
     def request_land(self, why: str = "requested") -> None:
@@ -383,7 +386,8 @@ class Mission:
 
         if self.phase in LEG_PHASES and self._stalled(now, v):
             self.counts["stalls"] += 1
-            self._land(now, out, f"no progress for {p.stall_s:.0f} s on leg {self.leg + 1}")
+            stuck = " (turn not settled)" if self.phase == "turn" else ""
+            self._land(now, out, f"no progress for {p.stall_s:.0f} s on leg {self.leg + 1}{stuck}")
         ph = self.phase
         if ph == "wait":
             ok, why = self.health.arm_ok(now)
@@ -443,7 +447,7 @@ class Mission:
                 self._next_leg(now, out, v)
         elif ph == "turn":
             err = self._slew_yaw(self.leg_yaw, dt)
-            if abs(err) < 1e-3 and abs(_wrap(self.leg_yaw - v.heading)) < math.radians(p.face_tol_deg):
+            if self._turn_settled(now, err, v):
                 self._set("check", now, out)
         elif ph == "check" and p.avoid:
             if self._frame_since_phase_start(now):
@@ -502,7 +506,7 @@ class Mission:
         self.leg_yaw = _wrap(self.leg_heading + off)
         self.clr_hist, self.corr_t = [], None
         self.best_dist, self.t_best = math.inf, now
-        self.gap_heading, self.looks = None, 0
+        self.gap_heading, self.looks, self.t_settled = None, 0, None
         self._set("turn", now, out, f"leg {self.leg + 1}/{len(self.targets)}")
 
     def _clearance(self, v: Vehicle) -> float | None:
@@ -530,6 +534,20 @@ class Mission:
         if min(c for _, c in self.clr_hist) < self.p.stop_m <= confirmed:
             self.counts["unconfirmed_obstacles"] += 1
         return confirmed
+
+    def _turn_settled(self, now: float, err: float, v: Vehicle) -> bool:
+        # the setpoint reaching the heading is not the aircraft reaching it: rushed turns drift off the leg line
+        p = self.p
+        faced = abs(err) < 1e-3 and abs(_wrap(self.leg_yaw - v.heading)) < math.radians(p.face_tol_deg)
+        if p.settle_s <= 0.0:
+            return faced
+        home = math.hypot(v.pos[0] - self.sp[0], v.pos[1] - self.sp[1]) < p.settle_m
+        if not (faced and home):
+            self.t_settled = None
+            return False
+        if self.t_settled is None:
+            self.t_settled = now
+        return now - self.t_settled >= p.settle_s
 
     def _frame_since_phase_start(self, now: float) -> bool:
         """A depth frame captured AFTER the turn ended looks along this leg."""
@@ -561,7 +579,7 @@ class Mission:
         self.looks += 1
         self.counts["looks"] += 1
         self.leg_yaw = _wrap(v.heading + math.copysign(math.radians(self.p.look_step_deg), goal))
-        self.gap_heading = None
+        self.gap_heading, self.t_settled = None, None
         self._set("turn", now, out, f"look {self.looks}/{self.p.look_tries}: no clear bearing")
 
     def _go_gap(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
