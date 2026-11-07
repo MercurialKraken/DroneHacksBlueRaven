@@ -40,6 +40,25 @@ def map_from_odom(launch: dict[str, float]) -> np.ndarray:
     return T
 
 
+def pose_xyz_yaw(x: float, y: float, z: float, yaw: float) -> np.ndarray:
+    """4x4 transform of a pose with only a heading (rotation about +z, counter-clockwise from +x)."""
+    T = np.eye(4)
+    c, s = math.cos(yaw), math.sin(yaw)
+    T[:2, :2] = [[c, -s], [s, c]]
+    T[:3, 3] = (x, y, z)
+    return T
+
+
+def map_from_startup_odom(launch: dict[str, float], odom_now: tuple[float, float, float, float]) -> np.ndarray:
+    """map <- odom for a frame whose origin is wherever the estimator STARTED (the real drone's
+    skybeta odom: ENU, x = forward and y = left at startup), computed while the drone sits on the
+    launch mark: T_map_odom = T_map_launch . inv(T_odom_now). odom_now = (x, y, z, yaw) of
+    base_link in odom right now; launch = load_launch(...). Heading only (roll and pitch are
+    ignored), so a slightly tilted pad doesn't tilt the map."""
+    T_map_launch = pose_xyz_yaw(launch["x"], launch["y"], launch["z"], math.radians(launch["yaw_deg"]))
+    return T_map_launch @ np.linalg.inv(pose_xyz_yaw(*odom_now))
+
+
 def correction_in_odom(x_north: float, y_east: float, yaw_cw: float) -> np.ndarray:
     """The drift correction published on /blueraven/odom_correction, as a 4x4 transform in `odom`.
 

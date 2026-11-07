@@ -10,8 +10,8 @@ import pytest
 
 pytest.importorskip("yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nav.frames import (correction_in_odom, load_launch, map_from_odom, quaternion_z,  # noqa: E402
-                        yaw_from_quaternion)
+from nav.frames import (correction_in_odom, load_launch, map_from_odom, map_from_startup_odom,  # noqa: E402
+                        pose_xyz_yaw, quaternion_z, yaw_from_quaternion)
 
 
 @pytest.fixture
@@ -58,6 +58,29 @@ def test_correction_in_odom_matches_the_ned_definition():
         fwd_enu = [math.sin(h), math.cos(h), 0.0]                           # heading h, as an ENU vector
         f2 = T[:3, :3] @ fwd_enu
         assert np.allclose(f2, [math.sin(h2), math.cos(h2), 0.0])
+
+
+LAUNCH_N = {"x": -2.5, "y": 0.9, "yaw_deg": 90.0, "z": 0.07}            # on the mark, facing course north
+
+
+def test_startup_odom_at_the_mark_maps_forward_to_the_launch_heading():
+    T = map_from_startup_odom(LAUNCH_N, (0.0, 0.0, 0.0, 0.0))            # stack started on the mark
+    assert np.allclose(T @ [0, 0, 0, 1], [-2.5, 0.9, 0.07, 1])             # odom origin = the mark
+    assert np.allclose(T @ [1, 0, 0, 1], [-2.5, 1.9, 0.07, 1])             # 1 m forward = 1 m north
+    assert np.allclose(T @ [0, 1, 0, 1], [-3.5, 0.9, 0.07, 1])             # 1 m left (west) = -x
+
+
+def test_startup_odom_started_elsewhere_still_puts_the_drone_on_the_mark():
+    # the stack started 1.2 m away and 30 deg rotated, then the drone was carried to the mark
+    now = (1.2, -0.4, 0.03, math.radians(30.0))
+    T = map_from_startup_odom(LAUNCH_N, now)
+    base_now = pose_xyz_yaw(*now)
+    assert np.allclose((T @ base_now)[:3, 3], [-2.5, 0.9, 0.07])           # the drone is on the mark...
+    fwd = T @ base_now @ [1, 0, 0, 1]                                      # ...and its nose points north
+    assert np.allclose(fwd[:3], [-2.5, 1.9, 0.07])
+    later = pose_xyz_yaw(*now) @ pose_xyz_yaw(0.5, 0.0, 0.7, 0.0)          # flown 0.5 m forward, 0.7 m up
+    assert np.allclose((T @ later)[:3, 3], [-2.5, 1.4, 0.77])
+    assert np.allclose(np.linalg.inv(T) @ T, np.eye(4))                    # round trip
 
 
 def test_yaw_from_quaternion():
