@@ -28,6 +28,7 @@ from rclpy.time import Time
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from blueraven_skybeta.frame_offset import twist_for_interface
 from blueraven_skybeta.mission_core import MissionParams, SkybetaMission, _repo_root
 
 ROOT = _repo_root()
@@ -52,6 +53,8 @@ class SkybetaMissionNode(Node):
         # the planner's simplification may lose at most this much of the centred path's clearance (a physical
         # course built of boards and tarp isn't exactly the published one); < 0 = the planner's tight default
         keep_centre = float(dp("keep_centre_m", 0.02).value)
+        # the SAME value the flight interface gets: it corrects poses for it, but not twists, so we do
+        self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0).value)
         rate = float(dp("rate_hz", 20.0).value)
         params = MissionParams(**{k: type(v)(dp(k, v).value) for k, v in vars(MissionParams()).items()})
         if params.mission not in ("hover", "course"):
@@ -209,8 +212,9 @@ class SkybetaMissionNode(Node):
         elif cmd.twist is not None:
             msg = TwistStamped()
             msg.header.stamp, msg.header.frame_id = stamp, "odom"
+            vx, vy = twist_for_interface(cmd.twist[0], cmd.twist[1], self.yaw_offset)
             msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z, msg.twist.angular.z = (
-                float(c) for c in cmd.twist)
+                float(vx), float(vy), float(cmd.twist[2]), float(cmd.twist[3]))
             self.pub_twist.publish(msg)
         if cmd.call_hold:
             if self.hold.service_is_ready():

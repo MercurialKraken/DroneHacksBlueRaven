@@ -51,6 +51,7 @@ def generate_launch_description():
         parameters=[{n: LaunchConfiguration(n)
                      for n in ('mission', 'hover_s', 'launch_key', 'height_m', 'cruise_mps', 'cp4',
                                'keep_centre_m', 'wall_centring')} | {
-                    'odometry_topic': LaunchConfiguration('odometry_topic')}],   # the same odometry as the interface
+                    'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
+                    'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],   # twists too
     )
     return LaunchDescription(declared + [flight_interface, mission])

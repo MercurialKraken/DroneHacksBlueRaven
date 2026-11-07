@@ -18,5 +18,6 @@ setup(
     maintainer='Chelsea Yan',
     description="Team Blue Raven's mission node for the skybeta stack",
     license='MIT',
-    entry_points={'console_scripts': ['mission = blueraven_skybeta.mission_node:main']},
+    entry_points={'console_scripts': ['mission = blueraven_skybeta.mission_node:main',
+                                      'yaw_offset_probe = blueraven_skybeta.yaw_offset_probe:main']},
 )

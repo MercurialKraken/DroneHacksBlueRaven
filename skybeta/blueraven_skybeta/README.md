@@ -13,6 +13,54 @@ never requests a mode. The safety pilot arms and switches to Position; that is t
 Everything below is **written from the docs and the unit tests; none of it has run on the drone yet.**
 Check each step's expected output and stop at the first surprise.
 
+## Hover day: command sheet
+
+Three shells on the drone. **A** = the stack's `competitor` tmux window (our node runs there), **B** and **C**
+= `host/run.sh shell` (monitoring, recording). `<sha>` = the reviewed commit. Sections 1-5 explain each step.
+
+```bash
+# --- laptop: package the reviewed commit, copy it over (or use a USB stick) ---
+git archive --format=tar.gz -o blueraven-<sha>.tar.gz <sha>
+scp blueraven-<sha>.tar.gz <user>@<drone>:~/
+
+# --- drone host ---
+sudo timedatectl set-ntp false                                   # rule 0
+mkdir -p ~/team_ws/src/blueraven && tar -xzf ~/blueraven-<sha>.tar.gz -C ~/team_ws/src/blueraven
+echo <sha> > ~/team_ws/src/blueraven/VERSION_FLOWN
+ls ~/team_ws/src                                                 # expect only blueraven
+
+# --- A: stop the organizers' example, build ours (two flight interfaces must never run) ---
+docker exec -it skybeta-stack tmux attach -t skybeta            # select the `competitor` window, Ctrl-C it
+cd /root/team_ws && team_build.sh --packages-select blueraven_skybeta && source install/setup.bash
+
+# --- B: health, then the frame offset (props OFF, drone on the ground, turn it by hand) ---
+source /root/team_ws/install/setup.bash
+ros2 topic echo /skybeta/state --once                           # px4_link: true, local_enu not null
+timeout 5 ros2 topic hz /visual_slam/tracking/odometry          # ~30 Hz
+ros2 run blueraven_skybeta yaw_offset_probe --ros-args -p seconds:=40.0   # prints RESULT: offset, spread
+
+# --- C: record (no images), before arming; Ctrl-C after it has disarmed ---
+ros2 bag record -s mcap -o /root/team_ws/bags/hover_NN \
+  /visual_slam/tracking/odometry /visual_slam/status /skybeta/state \
+  /skybeta/setpoint/pose /skybeta/setpoint/twist /blueraven/mission/status \
+  /fmu/in/vehicle_visual_odometry /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 \
+  /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude /tf /tf_static
+
+# --- A: our node (drone still on the launch mark). Add odom_to_ned_yaw_offset_rad:=<rad> only if agreed ---
+ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
+
+# --- B: watch it ---
+ros2 topic echo /blueraven/mission/status                       # INIT -> WAIT_OFFBOARD -> ...
+
+# --- after: Ctrl-C the node (A) and the recording (C) ---
+sudo timedatectl set-ntp true                                    # before power-off
+```
+
+**Before walking away from the drone:** after a stack restart the `competitor` window runs whatever
+`COMPETITOR_PKG` names in `/etc/skybeta/drone.env`, by default the organizers' example, which **takes off
+on arm + Position and flies a 5 m square**. Power down, or set `COMPETITOR_PKG=blueraven_skybeta` (a hover
+by default), so nobody arms into the square by accident.
+
 ## 0. Rules for every session on the drone
 
 - **NTP off** before the bench or a flight: `sudo timedatectl set-ntp false`. A clock step over 0.5 s
@@ -96,14 +144,13 @@ the data age at PX4 (anything over 200 ms means PX4 stopped trusting vision), dr
 
 1. **Start-up.** Node up, `WAIT_OFFBOARD` after 2 s still on the mark. Pick the drone up: status should
    stay `WAIT_OFFBOARD` (it streams holds wherever it is). Put it back.
-2. **Frame offset (the guide's section 1 caveat).** On the ground, compare the two headings:
-   ```bash
-   ros2 topic echo /visual_slam/tracking/odometry --field pose.pose.orientation
-   ros2 topic echo /fmu/out/vehicle_attitude --qos-reliability best_effort --qos-durability transient_local
-   ```
-   Turn the drone by hand to a few headings. If the yaws differ by a constant, that constant is
-   `odom_to_ned_yaw_offset_rad` (a launch argument here). Fly a hover with both at zero first unless the
-   difference is large. Write it down either way.
+2. **Frame offset (the guide's section 1 caveat).** On the ground, props off:
+   `ros2 run blueraven_skybeta yaw_offset_probe --ros-args -p seconds:=40.0`, turning the drone slowly by hand
+   to 3-4 headings. It reads the vision odometry and PX4's attitude (read-only), converts both with the
+   flight interface's own conventions and prints `RESULT: offset ... spread ...`. A small spread means a
+   constant offset: that is `odom_to_ned_yaw_offset_rad` (a launch argument; our node then applies it to its
+   twists too, which the interface itself does not). Under 3 deg: fly the hover at 0 first. A spread that
+   grows with heading is not a constant offset: stop and ask. Write the result down either way.
 3. **Handover.** Safety pilot: arm with the mode switch on **Altitude**, throttle low, then switch to
    **Position**. Expect `offboard_active` true in `/skybeta/state` and `WAIT_OFFBOARD -> TAKEOFF` in the
    log; motors spin up. With no props it can't climb: PX4 disarms about 10 s after arming
@@ -154,7 +201,8 @@ depth**. With map_align running, the node publishes `/blueraven/map_from_odom_in
 | `cp4` | `gate_b` | `gate_b` or `window` |
 | `keep_centre_m` | 0.02 | planner centring (< 0: the tight default) |
 | `wall_centring` | false | course: depth-based corridor centring |
-| `odom_to_ned_yaw_offset_rad`, `anchor_setpoints` | 0.0, false | the flight interface's frame-offset fixes |
+| `odom_to_ned_yaw_offset_rad` | 0.0 | measured frame offset: passed to the interface (poses) and our node (twists) |
+| `anchor_setpoints` | false | the interface's translation fix |
 
 ## Not tested
 

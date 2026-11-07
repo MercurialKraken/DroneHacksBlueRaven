@@ -439,6 +439,13 @@ def test_hover_aborts_like_the_course_mission_when_offboard_drops():
 
 
 def test_the_package_never_publishes_to_px4_directly():
+    """Nothing may command PX4 except through the flight interface: no /fmu/in anywhere. Reading /fmu/out
+    is allowed only in the bench's read-only yaw_offset_probe."""
     pkg = ROOT / "skybeta" / "blueraven_skybeta"
     for f in list(pkg.rglob("*.py")):
-        assert "/fmu/" not in f.read_text(encoding="utf-8"), f"{f} mentions /fmu/"
+        text = f.read_text(encoding="utf-8")
+        assert "/fmu/in" not in text, f"{f} mentions /fmu/in"
+        if f.name != "yaw_offset_probe.py":
+            assert "/fmu/" not in text, f"{f} mentions /fmu/"
+        else:
+            assert "create_publisher" not in text, "the probe must stay read-only"
