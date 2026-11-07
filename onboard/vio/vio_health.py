@@ -5,9 +5,12 @@ event and the pose coming back is not a second one:
 
 * an isolated bad sample (jump over jump_m, speed over max_speed_mps, non-finite, or a measurement time
   that did not advance) is withheld on its own; the next good sample goes through;
-* bad samples that agree with each other (a new, consistent position) for persist_s are a real jump:
-  the reference moves there and the sample is passed (the bridge's own jump check then bumps PX4's
-  reset counter);
+* a sample whose reported position variance exceeds max_var_m2 is bad (cuVSLAM's covariance jumped from
+  ~4e-4 to 3 m^2 as it degraded near the floor; such poses must never reach PX4);
+* bad samples that agree with each other (a new, consistent position, each with sane variance) for
+  persist_s are a re-anchor event: the reference moves there, the sample is passed and `rebased` is set
+  for that call, so the bridge re-anchors the new track to its last published pose (onboard/vio/anchor.py)
+  instead of passing the jump or bumping PX4's reset counter;
 * more than burst_n bad samples within burst_s that do NOT settle into a consistent new position mean
   the source is broken: unhealthy until quiet_s of good samples.
 
@@ -28,7 +31,9 @@ if TYPE_CHECKING:
 
 class VioHealth:
     def __init__(self, *, max_speed_mps: float = 5.0, jump_m: float = 1.0, persist_s: float = 0.3,
-                 burst_n: int = 2, burst_s: float = 1.0, quiet_s: float = 5.0) -> None:
+                 burst_n: int = 2, burst_s: float = 1.0, quiet_s: float = 5.0, max_var_m2: float = 0.05) -> None:
+        self.max_var = float(max_var_m2)
+        self.rebased: bool = False                                        # set for the one call that re-anchors
         self.max_speed = float(max_speed_mps)
         self.jump_m = float(jump_m)
         self.persist_s = float(persist_s)
@@ -57,12 +62,17 @@ class VioHealth:
             return f"speed {d / dt:.1f} m/s"
         return None
 
-    def update(self, t: float, pos: Sequence[float]) -> tuple[bool, str]:
-        """-> (ok, reason): ok False = withhold this sample. t in seconds (measurement time)."""
+    def update(self, t: float, pos: Sequence[float], var: float | None = None) -> tuple[bool, str]:
+        """-> (ok, reason): ok False = withhold this sample. t in seconds (measurement time); var = the
+        largest reported position variance of the sample (m^2), None if unknown."""
+        self.rebased = False
         finite = math.isfinite(t) and all(math.isfinite(float(c)) for c in pos)
         p = tuple(float(c) for c in pos) if finite else ()
+        high_var = var is not None and not (math.isfinite(var) and var <= self.max_var)
         if not finite:
             bad = "non-finite sample"
+        elif high_var:
+            bad = f"position variance {var:.3g} m2 > {self.max_var:g}"
         elif self._good is None:
             bad = None
         else:
@@ -85,7 +95,7 @@ class VioHealth:
         self.n_bad += 1
         self._events.append(tb)
         self._quiet_from = None
-        if finite and not bad.startswith("measurement time"):
+        if finite and not high_var and not bad.startswith("measurement time"):
             # a real jump: consecutive bad samples that agree with each other for persist_s
             if self._pending and self._problem(self._pending[-1], t, p) is not None:
                 self._pending = []                             # inconsistent with the previous bad one: start over
@@ -95,9 +105,10 @@ class VioHealth:
                 self._events.clear()
                 self._broken_since = None
                 self.n_rebased += 1
-                self.reason = f"rebased after a persistent {bad}"
+                self.rebased = True
+                self.reason = f"re-anchored after a persistent {bad}"
                 return True, self.reason
-        if len(self._events) > self.burst_n and not self._pending[1:]:
+        if (len(self._events) > self.burst_n and not self._pending[1:]) or (high_var and len(self._events) > self.burst_n):
             self._broken_since = self._broken_since if self._broken_since is not None else tb
         if self._broken_since is not None:
             self.reason = f"broken: {len(self._events)} bad samples in {self.burst_s:.0f} s (last: {bad})"

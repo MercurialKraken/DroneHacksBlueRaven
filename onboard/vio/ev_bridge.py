@@ -17,11 +17,12 @@ from std_msgs.msg import Bool
 from .frames import WORLDS,initial_reset_counter,odometry_to_px4,quat_xyzw_to_wxyz
 from .ownership import PublisherGuard
 from .ros_common import PX4_QOS,SENSOR_QOS,declare,fill_vehicle_odometry,now_us,stamp_of
+from .anchor import Anchor
 from .touchdown_hold import TouchdownHold
 from .validation import CaptureGate,sample_problem
 from .vio_health import VioHealth
 
-NAV_AUTO_LAND = 18
+NAV_LANDING = (18, 12)          # AUTO_LAND, DESCEND (failsafe)
 
 
 class EvBridge(Node):
@@ -45,6 +46,9 @@ class EvBridge(Node):
         self.health_stale_s=float(declare(self,'health_stale_s',0.5))
         self.max_speed=float(declare(self,'max_speed_mps',5.))
         self.quiet_s=float(declare(self,'health_quiet_s',5.))
+        self.max_var=float(declare(self,'max_position_var_m2',.05))
+        self.anchor: Anchor = Anchor()
+        self.last_out: tuple | None = None    # (pos, q_xyzw) last published, for re-anchoring
         if not all(math.isfinite(v) and v>0 for v in (self.jump_m,self.health_stale_s,self.max_speed,self.quiet_s)):
             raise ValueError('health limits must be positive finite numbers')
         self.gate: CaptureGate = CaptureGate(float(declare(self,'max_sample_age_s',.3)),float(declare(self,'future_tol_s',.005)))
@@ -61,11 +65,12 @@ class EvBridge(Node):
         # publish the last pose seen above ref_m instead of the camera's (it slides near the floor).
         self.hold: TouchdownHold | None = None
         if bool(declare(self,'touchdown_hold',True)):
-            from px4_msgs.msg import DistanceSensor, VehicleStatus
+            from px4_msgs.msg import DistanceSensor, VehicleLandDetected, VehicleStatus
             self.hold=TouchdownHold(engage_m=float(declare(self,'hold_engage_m',.7)),ref_m=float(declare(self,'hold_ref_m',.8)),
                                     release_m=float(declare(self,'hold_release_m',.9)),hold_var=float(declare(self,'hold_var_m2',.01)))
             self.create_subscription(DistanceSensor,str(declare(self,'range_topic','/fmu/out/distance_sensor')),self._on_range,PX4_QOS)
             self.create_subscription(VehicleStatus,str(declare(self,'status_topic','/fmu/out/vehicle_status_v1')),self._on_status,PX4_QOS)
+            self.create_subscription(VehicleLandDetected,str(declare(self,'land_topic','/fmu/out/vehicle_land_detected')),self._on_land,PX4_QOS)
         self.reset_counter: int = initial_reset_counter()
         self.last_pos: tuple[float, float, float] | None = None
         self.frame_id: str | None = None
@@ -87,7 +92,14 @@ class EvBridge(Node):
 
     def _on_status(self, msg) -> None:
         if self.hold is not None:
-            self.hold.landing=int(msg.nav_state)==NAV_AUTO_LAND
+            self.hold.landing=int(msg.nav_state) in NAV_LANDING
+
+    def _on_land(self, msg) -> None:
+        if self.hold is not None and (bool(msg.maybe_landed) or bool(msg.landed)):
+            was=self.hold.active
+            self.hold.on_contact(now_us(self)*1e-6)
+            if self.hold.active and not was:
+                self.get_logger().info('touchdown hold ENGAGED on land detector (maybe_landed/landed)')
 
     def _health(self) -> VioHealth:
         return VioHealth(max_speed_mps=self.max_speed,jump_m=self.jump_m,quiet_s=self.quiet_s)
@@ -135,11 +147,20 @@ class EvBridge(Node):
             problem=sample_problem(self.required,pos,quat,vel)
             if problem:
                 self.ok=False;self.reason=problem;self.counts['invalid']+=1;return
-            sane,reason=self.health.update(capture*1e-6,pos)
+            var=max(pose_cov[0],pose_cov[7],pose_cov[14]) if len(pose_cov)>=15 else None
+            sane,reason=self.health.update(capture*1e-6,pos,var)
             if self.guard is not None and not self.guard.may_publish():
                 self.ok=False;self.reason='proving sole vision ownership';self.counts['unowned']+=1;return
             self.ok,self.reason=sane,reason
             if not sane:self.counts['withheld']+=1;return
+            if self.health.rebased and self.last_out is not None:
+                # a persistent jump / re-init: keep the published track continuous instead of passing the jump
+                self.anchor.rebase(self.last_out[0],self.last_out[1],pos,quat)
+                self.counts['reanchored']=self.counts.get('reanchored',0)+1
+                self.get_logger().warning(f'VIO re-anchored ({reason}); offset yaw {math.degrees(self.anchor.dyaw):.1f} deg, '
+                                          f't=({self.anchor.tx:.2f},{self.anchor.ty:.2f},{self.anchor.tz:.2f})')
+            pos,quat=self.anchor.apply(pos,quat)
+            self.last_out=(pos,quat)
             if self.hold is not None:
                 self.hold.filter(capture*1e-6,(pos,quat,pose_cov))      # remembers the reference pose
         changed=(self.frame_id is not None and self.frame_id!=msg.header.frame_id)

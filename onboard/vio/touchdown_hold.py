@@ -5,8 +5,9 @@ cuVSLAM's position slid about 1.5 m in the last ~0.6 m of descent while PX4's ow
 PX4 then reset its xy to that bad vision). On FlyX a frozen VIO plus a 0.0 m rangefinder on the pad let
 the EKF dead-reckon away, so PX4 never confirmed the landing.
 
-Only while `landing` is true (the bridge sets it from PX4's nav_state == AUTO_LAND) and the downward
-rangefinder reads below `engage_m`, the bridge publishes
+Only while `landing` is true (the bridge sets it from PX4's nav_state: AUTO_LAND 18 or the DESCEND failsafe
+12) and the downward rangefinder reads below `engage_m` or PX4's land detector reports maybe_landed /
+landed (on_contact), the bridge publishes
 the LAST pose seen while the range was still at or above `ref_m`, instead of each new vision pose, with
 its x/y variance raised by `hold_var` and its z variance by `hold_z_var` (the held height is the height at
 ref_m, so it must not be used; the starter EKF2_EV_CTRL=9 does not fuse EV height anyway, which comes from
@@ -59,6 +60,13 @@ class TouchdownHold:
                     self.n["released"] += 1
             else:
                 self._above_since = None
+
+    def on_contact(self, t: float) -> None:
+        """PX4's land detector reports maybe_landed or landed: engage now (if landing) even if the range
+        never dropped below engage_m (a 0.0 m / invalid rangefinder on the floor)."""
+        if self.landing and not self.active and self._ref is not None:
+            self.active, self._held, self._above_since = True, self._ref[1], None
+            self.n["engaged"] += 1
 
     def filter(self, t: float, sample: Any) -> tuple[Any, bool]:
         """-> (sample to publish, held?). `sample` is whatever the bridge publishes (pose etc.)."""
