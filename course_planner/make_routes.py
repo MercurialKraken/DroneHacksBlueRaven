@@ -27,8 +27,9 @@ from .planner import plan, to_refnav_route
 HERE = Path(__file__).resolve().parent
 
 BASE_PARAMS = {"height_m": 0.8, "speed_mps": 0.4, "arrive_m": 0.15, "corridor_half_m": 0.25, "stop_m": 0.3}
-# v4, from run_0613: stop 0.65 = braking 0.34 + radius 0.29 + a little; corridor 0.35 = radius + margin
-V4_PARAMS = dict(BASE_PARAMS, stop_m=0.65, corridor_half_m=0.35, min_corridor_coverage=0.4)
+# stop 0.65 = braking 0.34 + radius 0.29 + a little; corridor 0.30 = radius + 1 cm: a 0.9 m corridor's centre line
+# leaves 0.45 m to each wall, so the checked band must stay well inside that for 10 cm of pose error
+V4_PARAMS = dict(BASE_PARAMS, stop_m=0.65, corridor_half_m=0.30, min_corridor_coverage=0.4)
 FLYX_SPAWN_XY = (-2.5146, 1.1144)   # FlyX environment.json spawn, measured on the T4 replica; NOT the 0.914 mark
 OVERSHOOT_M = 0.13          # past the end of a leg, as a PX4 model fitted to run_0613 predicts
 SAFE_END_M = 0.32           # drone radius 0.29 + 0.03
