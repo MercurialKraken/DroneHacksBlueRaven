@@ -30,22 +30,27 @@ def fly(centring: bool, shift=SHIFT, right_wall=True):
     sim.armed = sim.offboard = True
     faces = faces_of(0.5 + shift, (-0.5 + shift) if right_wall else None)
     lateral = []
+    whys = []
+    pending = []                                                # frames are delivered a tick after capture
 
     def hook(tt, s):
         if m.T_map_odom is None:
             return
+        while pending:
+            r = m.on_depth_points(tt, *pending.pop())
+            whys.append(m.centring.last.why if (r is None and m.centring and m.centring.last) else r)
         x, y, z = (m.T_map_odom @ [s.x, s.y, s.z, 1.0])[:3]    # no drift: believed = true
         yaw = s.yaw + m.yaw_off
-        if round(tt / T.DT) % 4 == 0 and m.phase == "FOLLOW":  # depth at 5 Hz
+        if round(tt / T.DT) % 4 == 0 and m.phase == "FOLLOW":  # depth at 5 Hz, captured at this pose
             P = sense((x, y, yaw), (x, y, yaw), faces)
             c, sn = math.cos(-yaw), math.sin(-yaw)
             rel = P[:, :2] - [x, y]
-            body = np.c_[c * rel[:, 0] - sn * rel[:, 1], sn * rel[:, 0] + c * rel[:, 1], P[:, 2] - z]
-            m.on_depth_points(tt, tt, body)
+            pending.append((tt, np.c_[c * rel[:, 0] - sn * rel[:, 1], sn * rel[:, 0] + c * rel[:, 1], P[:, 2] - z]))
         if m.phase == "FOLLOW" and 1.5 <= x <= 4.5:
             lateral.append(y - shift)                           # distance from the REAL centre line
     t, _ = T.run(m, sim, t, t + 60.0, hook=hook)
     assert m.phase == "DONE", m.why
+    m.whys = whys
     return np.asarray(lateral), m
 
 
@@ -57,8 +62,8 @@ def test_without_centring_the_drone_flies_the_maps_centre_line():
 def test_with_centring_it_flies_the_real_centre():
     lat, m = fly(True)
     assert abs(np.mean(lat)) < 0.03 and np.max(np.abs(lat)) < SHIFT   # centred between the real walls
-    st = m.status(0.0)
-    assert st["centring_why"] == "both walls"
+    assert m.whys.count("both walls") > 0.6 * len(m.whys)       # most frames saw both real walls
+    assert m.status(0.0)["centring_m"] is not None
 
 
 def test_one_real_wall_missing_keeps_the_mapped_distance_from_the_other():

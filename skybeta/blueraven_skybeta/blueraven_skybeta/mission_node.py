@@ -24,6 +24,7 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -92,6 +93,22 @@ class SkybetaMissionNode(Node):
         self.create_timer(0.5, self._status)
         self.last = None
 
+        # wall centring (course mission, wall_centring:=true): Darion's depth node output, placed in base_link
+        # with the static TF, fed to the core with the frame's capture stamp. Never subscribes to camera images.
+        self.T_base_cam = None
+        self.K = None
+        if self.mission is not None and self.mission.centring is not None:
+            from sensor_msgs.msg import CameraInfo, Image
+            from tf2_ros import Buffer, TransformListener
+            self.base_frame = dp("base_frame", "base_link").value
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
+            self.create_subscription(CameraInfo, dp("depth_info_topic", "/blueraven/depth/camera_info").value,
+                                     self._on_depth_info, ANY_PUBLISHER)
+            self.create_subscription(Image, dp("depth_topic", "/blueraven/depth/image_raw").value,
+                                     self._on_depth, ANY_PUBLISHER)
+            self.get_logger().info("wall centring ON: reading depth for the real corridor centre")
+
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -124,6 +141,44 @@ class SkybetaMissionNode(Node):
                                             stamp=stamp if stamp > 0.0 else None)
         if why is not None:
             self.get_logger().info(f"{MAP_FROM_ODOM_TOPIC} ignored: {why}", throttle_duration_sec=5.0)
+
+    def _on_depth_info(self, m) -> None:
+        import numpy as np
+        self.K = np.asarray(m.k, dtype=float).reshape(3, 3)
+
+    def _on_depth(self, m) -> None:
+        import numpy as np
+        if self.K is None:
+            return
+        if self.T_base_cam is None:                                     # static: look it up once
+            try:
+                tf = self.tf_buffer.lookup_transform(self.base_frame, m.header.frame_id, Time())
+            except Exception as e:                                      # noqa: BLE001 - tf2 raises several types
+                self.get_logger().warning(f"no TF {self.base_frame} <- {m.header.frame_id}: {e}",
+                                          throttle_duration_sec=5.0)
+                return
+            q, tr = tf.transform.rotation, tf.transform.translation
+            x, y, z, w = q.x, q.y, q.z, q.w
+            T = np.eye(4)
+            T[:3, :3] = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+            T[:3, 3] = (tr.x, tr.y, tr.z)
+            self.T_base_cam = T
+            self.get_logger().info(f"depth camera in {self.base_frame}: t=({tr.x:.3f}, {tr.y:.3f}, {tr.z:.3f})")
+        if m.encoding == "16UC1":
+            D, scale = np.frombuffer(m.data, dtype=np.uint16).reshape(m.height, m.step // 2)[:, :m.width], 0.001
+        elif m.encoding == "32FC1":
+            D, scale = np.frombuffer(m.data, dtype=np.float32).reshape(m.height, m.step // 4)[:, :m.width], 1.0
+        else:
+            self.get_logger().warning(f"depth encoding {m.encoding} not supported", throttle_duration_sec=10.0)
+            return
+        from nav.wall_centring import points_from_depth
+        pts = points_from_depth(D, self.K, self.T_base_cam, stride=4, scale=scale)
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        why = self.mission.on_depth_points(self._now(), stamp, pts)
+        if why is not None and why.startswith("no odometry"):
+            self.get_logger().info(f"depth frame skipped: {why}", throttle_duration_sec=5.0)
 
     def _tick(self) -> None:
         if self.mission is None:

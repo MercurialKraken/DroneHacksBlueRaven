@@ -29,6 +29,8 @@ MISSION_ARGS = [
     ('height_m', '0.7', 'flight height above the launch point, metres'),
     ('cruise_mps', '0.3', 'cruise speed, m/s'),
     ('cp4', 'gate_b', "checkpoint 4 route: 'gate_b' or 'window'"),
+    ('keep_centre_m', '0.02', 'planner: how much of the centred path a shortcut may lose (< 0: tight)'),
+    ('wall_centring', 'false', "course: steer toward the REAL corridor centre seen in depth (needs the depth node)"),
     ('competitor', 'true', 'also start the mission node'),
 ]
 
@@ -44,7 +46,8 @@ def generate_launch_description():
         package='blueraven_skybeta', executable='mission', name='blueraven_mission',
         output='screen', emulate_tty=True, condition=IfCondition(LaunchConfiguration('competitor')),
         parameters=[{n: LaunchConfiguration(n)
-                     for n in ('mission', 'hover_s', 'launch_key', 'height_m', 'cruise_mps', 'cp4')} | {
+                     for n in ('mission', 'hover_s', 'launch_key', 'height_m', 'cruise_mps', 'cp4',
+                               'keep_centre_m', 'wall_centring')} | {
                     'odometry_topic': LaunchConfiguration('odometry_topic')}],   # the same odometry as the interface
     )
     return LaunchDescription(declared + [flight_interface, mission])
