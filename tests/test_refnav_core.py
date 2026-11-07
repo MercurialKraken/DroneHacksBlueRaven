@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from refnav import core as C  # noqa: E402
 from refnav import depth as D  # noqa: E402
+from refnav import follow as F  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -87,7 +88,7 @@ class FakePX4:
             step = np.array([n, e, d]) - self.pos
             dist = np.linalg.norm(step)
             self.pos += step * min(1.0, 1.0 * dt / dist) if dist > 1e-9 else 0
-            err = (yaw - self.yaw + math.pi) % (2 * math.pi) - math.pi
+            err = float(F.wrap(yaw - self.yaw))
             self.yaw += max(-math.radians(60) * dt, min(math.radians(60) * dt, err))
             self.landed = self.pos[2] > -0.05
         elif self.nav == C.NAV_AUTO_LAND and self.armed:
@@ -152,9 +153,9 @@ ROUTE = [(3.0, 0.0), (3.0, 3.0)]            # forward 3 m, then 3 m to the left
 def test_nominal_route_completes_and_stops_streaming_once_px4_lands() -> None:
     m, px4, log = fly(C.Params(route=ROUTE))
     assert m.result == "complete", (m.result, m.why)
-    assert m.legs_done == 2
+    assert m.follower.points_passed == 2
     phases = [p for _, p, *_ in log]
-    assert phases.index("arm") < phases.index("climb") < phases.index("go") < phases.index("land")
+    assert phases.index("arm") < phases.index("climb") < phases.index("follow") < phases.index("land")
     # the takeoff heading is north (yaw 0): forward 3 m = n 3; left 3 m = e -3
     assert np.allclose(m.targets[1], (3.0, -3.0), atol=1e-9)
     land_auto = [i for i, (_, p, *_r) in enumerate(log) if p == "land" and px4.nav == C.NAV_AUTO_LAND]
@@ -178,7 +179,7 @@ def test_no_health_never_arms() -> None:
 def test_unhealthy_estimator_in_the_air_lands() -> None:
     m, px4, log = fly(C.Params(route=ROUTE), health=lambda t: t < 12.0)
     assert m.result.startswith("landed: estimator"), m.result
-    assert m.legs_done < 2 and not px4.armed
+    assert m.follower.points_passed < 2 and not px4.armed
 
 
 def test_health_gap_restarts_the_quiet_window() -> None:
@@ -191,11 +192,11 @@ def test_health_gap_restarts_the_quiet_window() -> None:
 
 
 def test_no_translation_without_live_depth_and_landing_when_it_stays_silent() -> None:
-    # depth stops at t = 14 s (mid-route): the carrot freezes, then the aircraft lands
+    # depth stops at t = 14 s (mid-route): the reference freezes, then the aircraft lands
     m, px4, log = fly(C.Params(route=[(6.0, 0.0)], speed_mps=0.5), depth_on=lambda t: t < 14.0)
     assert m.result.startswith("landed: depth silent"), m.result
     pos_at_cut = [pos for t, p, s, c, pos in log if abs(t - 14.6) < 0.026][0]
-    before_land = [pos for t, p, s, c, pos in log if p == "go" and t > 15.0]
+    before_land = [pos for t, p, s, c, pos in log if p == "follow" and t > 15.0]
     assert before_land and max(abs(q[0] - pos_at_cut[0]) for q in before_land) < 0.3
     assert m.counts["depth_holds"] > 0
 
@@ -226,7 +227,7 @@ def test_same_decisions_on_any_clock() -> None:
     # a tick that is exact in binary (1/32 s) and thresholds off its grid: at Unix-time magnitudes
     # a 50 ms tick is not representable, and a decision that lands EXACTLY on a threshold may
     # round either way - float rounding of the inputs, not a dependence on the clock
-    prm = dict(route=ROUTE, health_quiet_s=3.013, stream_lead_s=1.013, hold_s=1.013, cmd_resend_s=1.013)
+    prm = dict(route=ROUTE, health_quiet_s=3.013, stream_lead_s=1.013, cmd_resend_s=1.013)
     a = fly(C.Params(**prm), t0=0.0, dt=1 / 32)
     b = fly(C.Params(**prm), t0=1.76e9, dt=1 / 32)       # Unix time, as on hardware
     pa = [(round(t, 3), p, c) for t, p, s, c, pos in a[2]]
@@ -235,25 +236,35 @@ def test_same_decisions_on_any_clock() -> None:
 
 
 # ------------------------------------------------------------------ depth.py
-def test_clearance_levels_a_tilted_aircraft_and_ignores_the_floor() -> None:
+def _straight(length: float, bearing: float = 0.0, step: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    """Path samples (forward, right) along a bearing from the aircraft, and their distances."""
+    along = np.arange(0.0, length + 1e-9, step)
+    return np.stack([along * math.cos(bearing), along * math.sin(bearing)], 1), along
+
+
+def _free(img: np.ndarray, path: tuple[np.ndarray, np.ndarray], q=(1.0, 0.0, 0.0, 0.0), K_=K, stride: int = 2,
+          hits: int = 3) -> tuple[float, bool]:
+    f = D.DepthFrame(img, K_, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=stride)
+    return D.path_clearance(f, f.points(0.3, 6.0), *path, 0.6, 0.4, hits, 0.6, blind_m=0.9)
+
+
+def test_path_clearance_levels_a_tilted_aircraft_and_ignores_the_floor() -> None:
     walls = [(0, 3.0, -5.0, 5.0)]
     pos = (0.0, 0.0, -1.2)
     img = render_depth(pos, 0.0, walls)
-    for pitch_deg in (0.0, 6.0):                          # same image, attitude claims a nose-up tilt
-        q = (math.cos(math.radians(pitch_deg) / 2), 0.0, math.sin(math.radians(pitch_deg) / 2), 0.0)
-        pts = D.level_points(img, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=2)
-        clr = D.clearance(pts, 0.0, 0.6, 0.4)
-        if pitch_deg == 0.0:
-            assert clr == pytest.approx(3.0, abs=0.05)
-    floor_only = render_depth(pos, 0.0, [])
-    pts = D.level_points(floor_only, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation((1.0, 0, 0, 0)), stride=2)
-    assert math.isinf(D.clearance(pts, 0.0, 0.6, 0.4))
+    free, obstacle = _free(img, _straight(4.0))
+    assert obstacle and free == pytest.approx(3.0 - 0.6, abs=0.06)    # the wall, a corridor half-width early
+    q = (math.cos(math.radians(3.0)), 0.0, math.sin(math.radians(3.0)), 0.0)    # the same image, 6 deg nose-up
+    assert _free(img, _straight(4.0), q)[1]
+    free, obstacle = _free(render_depth(pos, 0.0, []), _straight(4.0))
+    assert not obstacle                                               # the floor is never an obstacle
 
 
-def test_bearing_selects_the_corridor() -> None:
-    pts = np.array([[2.0, 1.5, 0.0]] * 5)                 # 2 m ahead, 1.5 m to the right
-    assert math.isinf(D.clearance(pts, 0.0, 0.6, 0.4))
-    assert D.clearance(pts, math.atan2(1.5, 2.0), 0.6, 0.4) == pytest.approx(2.5)
+def test_an_obstacle_counts_only_beside_the_path_it_is_on() -> None:
+    walls = [(0, 2.0, 0.8, 1.2)]                           # a post 2 m ahead, 1 m to the right
+    img = render_depth((0.0, 0.0, -1.2), 0.0, walls)
+    assert not _free(img, _straight(3.0))[1]
+    assert _free(img, _straight(3.0, math.atan2(1.0, 2.0)))[1]
 
 
 def test_decode_depth_encodings() -> None:
@@ -294,24 +305,17 @@ def test_border_crop_removes_edge_rows() -> None:
 
 def test_sparse_points_are_not_an_obstacle_but_a_pole_is() -> None:
     """min_obstacle_px: a few scattered depth returns do not stop the aircraft; a 5 cm pole does."""
-    q = (1.0, 0.0, 0.0, 0.0)
-    m = C.Mission(C.Params(route=[(3.0, 0.0)]))
-    m.leg_heading = 0.0
-    img = np.full((800, 1280), 5.0, np.float32)           # the real camera's size, a wall 5 m ahead
     Kr = (842.0, 842.0, 640.0, 400.0)
-    img[300:308, 600:616] = 0.63                           # 8 x 16 px of junk, persistent
-    v = C.Vehicle(heading=0.0)
-    for t in (1.0, 1.1):                                   # the mission evaluates every new frame
-        m.on_depth(t, img, Kr, R_BODY_CAM, T_BODY_CAM, q)
-        c = m._clearance(v)
-    assert c == pytest.approx(5.16, abs=0.05)             # the wall, not the junk at 0.63 m
+    hits = max(3, round(C.Params().min_obstacle_px / 8 ** 2))
+    img = np.full((800, 1280), 5.0, np.float32)           # the real camera's size, a wall 5 m ahead
+    img[300:308, 600:616] = 0.63                           # 8 x 16 px of junk
+    free, obstacle = _free(img, _straight(5.5), K_=Kr, stride=8, hits=hits)
+    assert obstacle and free == pytest.approx(5.16 - 0.6, abs=0.06)      # the wall, not the junk at 0.63 m
     pole = np.full((800, 1280), 5.0, np.float32)
     w = int(0.05 / 3.0 * 842) + 1                          # a 5 cm pole 3 m ahead
     pole[100:700, 640 - w // 2:640 + w // 2 + 8] = 3.0
-    for t in (1.2, 1.3):
-        m.on_depth(t, pole, Kr, R_BODY_CAM, T_BODY_CAM, q)
-        c = m._clearance(v)
-    assert c == pytest.approx(3.16, abs=0.05)
+    free, obstacle = _free(pole, _straight(5.5), K_=Kr, stride=8, hits=hits)
+    assert obstacle and free == pytest.approx(3.16 - 0.6, abs=0.06)
 
 
 def test_a_px4_failsafe_landing_mid_route_is_never_streamed_over() -> None:
@@ -367,12 +371,12 @@ def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind: str
         log.append((t, out.phase, out.stream, tuple(out.commands), px4.pos.copy()))
         px4.apply(t, out, 0.05)
         t += 0.05
-    t_go = next(t for t, ph, *_ in log if ph == "go")
+    t_go = next(t for t, ph, *_ in log if ph == "follow")
     assert t_go < 11.0, t_go                              # it was flying the route when depth went bad
     pos_at_11 = next(pos for t, *_r, pos in log if t >= 11.0)
     ahead = max(pos[0] for t, *_r, pos in log if t >= 11.0) - pos_at_11[0]
-    # what was already commanded (one carrot lead at most) may complete; nothing beyond it
-    assert ahead < m.p.lead_max_m + 0.05, ahead
+    # what was already commanded (half the lookahead at most) may complete; nothing beyond it
+    assert ahead < m.p.look_max_m / 2 + 0.05, ahead
     assert m.result.startswith("landed: depth silent"), m.result
     key = {"blank": "depth_unusable", "sparse": "depth_unusable", "future": "depth_future", "stale": "depth_stale"}[kind]
     assert m.counts[key] > 0
@@ -386,31 +390,21 @@ def test_a_blank_frame_does_not_refresh_depth_and_says_why() -> None:
     assert m.depth_t == 1.0 and m.counts["depth_unusable"] == 1
 
 
-def test_a_corridor_out_of_view_is_unknown_not_free() -> None:
-    """A good frame looking AWAY from the leg keeps the camera alive but is no evidence for the leg."""
-    m = C.Mission(C.Params(route=[(3.0, 0.0)], depth_border_px=3))
-    m.leg_heading = math.radians(90)                      # the leg is to the right; the camera looks ahead
-    v = C.Vehicle(heading=0.0)
-    for k in range(3):
-        m.on_depth(1.0 + k * 0.1, render_depth(np.array([0, 0, -1.2]), 0.0, ROOM), K, R_BODY_CAM, T_BODY_CAM,
-                   q_yaw(0.0), now=1.0 + k * 0.1)
-        assert m._clearance(v) is None
-    assert m.depth_fresh(1.25) and not m.corridor_fresh(1.25)
-    assert m.counts["corridor_unobserved"] == 3
+def test_a_path_out_of_view_is_unknown_not_free() -> None:
+    """A good frame looking AWAY from the path keeps the camera alive but is no evidence for it."""
+    img = render_depth(np.array([0, 0, -1.2]), 0.0, ROOM)
+    free, obstacle = _free(img, _straight(3.0, math.radians(90)))
+    assert not obstacle and free < 1.0                     # stops at the first sample past the blind range
 
 
 def test_coverage_counts_far_returns_and_ignores_missing_ones() -> None:
-    q = q_yaw(0.0)
-    near_wall = np.full((H, W), 9.0, np.float32)          # everything 9 m away: beyond 6 m, still a return
-    f = D.DepthFrame(near_wall, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=4, border_px=3)
-    cov, n = f.corridor_coverage(0.0, 0.6, 0.4, 1.9)
-    assert n > 10 and cov == pytest.approx(1.0)
-    assert len(f.points(0.3, 6.0)) == 0                   # ... and no obstacle
-    holed = near_wall.copy()
-    holed[30:70, 60:100] = np.nan                         # the middle of the image returned nothing
-    cov2, _ = D.DepthFrame(holed, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=4, border_px=3) \
-        .corridor_coverage(0.0, 0.6, 0.4, 1.9)
-    assert cov2 < 0.6
+    far = np.full((H, W), 9.0, np.float32)                 # everything 9 m away: beyond 6 m, still a return
+    free, obstacle = _free(far, _straight(2.0), stride=4)
+    assert not obstacle and free == pytest.approx(2.0)
+    holed = far.copy()
+    holed[30:70, 60:100] = np.nan                          # the middle of the image returned nothing
+    free, obstacle = _free(holed, _straight(2.0), stride=4)
+    assert not obstacle and free < 1.9
 
 
 # ---- the interactive runtime's takeoff/land example and landing requests (2026-10-17) ----------------
@@ -423,7 +417,7 @@ def test_takeoff_hover_land_with_an_empty_route() -> None:
     assert not px4.armed and px4.landed
 
 
-def test_hover_zero_is_the_old_behaviour() -> None:
+def test_hover_zero_goes_straight_from_the_climb_to_the_path() -> None:
     m, px4, log = fly(C.Params(route=ROUTE))
     assert "hover" not in {p for _, p, *_ in log} and m.result == "complete"
 
@@ -472,105 +466,3 @@ def test_too_little_depth_never_arms_and_says_how_much_there_was() -> None:
 def test_no_depth_at_all_is_said_as_such() -> None:
     m, px4, log = fly(C.Params(route=[], wait_s=5.0), depth_on=lambda t: False, seconds=10.0)
     assert m.result == "refused: waiting for live depth: no depth frame has arrived after 5 s", m.result
-
-
-# ---- per-leg camera offset (leg_yaw_off_deg)
-def _offset_flight(offsets: list[float]) -> C.Params:
-    return C.Params(route=[(3.0, 0.0)], leg_yaw_off_deg=offsets, height_m=1.0, hover_s=0.0)
-
-
-def _start_leg(p: C.Params) -> C.Mission:
-    m = C.Mission(p)
-    m.sp, m.targets = [0.0, 0.0, -1.0, 0.0], [(n, -l) for n, l in p.route]
-    m._next_leg(0.0, C.Output("hover"), C.Vehicle())
-    return m
-
-
-def test_a_camera_offset_turns_the_camera_but_not_the_leg() -> None:
-    m = _start_leg(_offset_flight([30.0]))
-    assert m.leg_heading == pytest.approx(0.0)
-    assert m.leg_yaw == pytest.approx(math.radians(30.0))     # positive = right: NED yaw
-
-
-def test_the_turn_ends_at_the_offset_heading() -> None:
-    m = _start_leg(_offset_flight([20.0]))
-    v = C.Vehicle(pos=(0.0, 0.0, -1.0), heading=0.0, pos_ok=True, armed=True, nav_state=C.NAV_OFFBOARD, landed=False)
-    m.health.on_msg(0.0, True)
-    t = 0.0
-    while m.phase == "turn" and t < 10.0:
-        t += 0.05
-        m.health.on_msg(t, True)
-        m.depth_t = t
-        v.heading = m.sp[3]
-        m.step(t, v)
-    assert m.phase == "check"
-    assert m.sp[3] == pytest.approx(math.radians(20.0), abs=1e-3)
-
-
-def test_a_leg_past_the_end_of_the_offset_list_has_no_offset() -> None:
-    m = _start_leg(_offset_flight([]))
-    assert m.leg_yaw == pytest.approx(m.leg_heading)
-
-
-def test_depth_is_judged_along_travel_not_along_the_camera() -> None:
-    # a wall across the leg 1 m ahead; the camera looks 20 deg right of it and still reports the leg blocked
-    wall = [(0, 1.0, -5.0, 5.0)]
-    yaw = math.radians(20.0)
-    d = render_depth((0.0, 0.0, -1.0), yaw, wall)
-    f = D.DepthFrame(d, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q_yaw(yaw)), stride=2, border_px=2)
-    clr = D.clearance(f.points(), -yaw, 0.3, 0.4, 3)
-    assert clr == pytest.approx(1.0, abs=0.1)
-
-
-def _coverage_with_dead_left_columns(offset_deg: float, dead_px: int = 20) -> float:
-    """A wall fills the view; the leftmost columns return nothing, as stereo does (no match in the other eye)."""
-    yaw = math.radians(offset_deg)
-    d = render_depth((0.0, 0.0, -1.0), yaw, [(0, 4.0, -20.0, 20.0)])
-    d[:, :dead_px] = np.nan
-    f = D.DepthFrame(d, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q_yaw(yaw)), stride=2, border_px=2)
-    return f.corridor_coverage(-yaw, 0.25, 0.4, 0.8)[0]
-
-
-def test_a_right_camera_offset_loses_coverage_to_the_left_stereo_dead_band() -> None:
-    # run_0613: 30 deg right put 27 % of the corridor in dead columns; coverage sat at 0.55, under the 0.6 gate
-    def loss(offset_deg: float) -> float:
-        return _coverage_with_dead_left_columns(offset_deg, 0) - _coverage_with_dead_left_columns(offset_deg)
-
-    assert loss(0.0) == pytest.approx(0.0)        # straight ahead the dead columns are out of the corridor
-    assert loss(-30.0) == pytest.approx(0.0)      # a left offset moves the corridor away from them
-    assert loss(30.0) > 0.1
-
-
-# ---- stopping at the leg end (brake_mps2, end_clear_m)
-def test_the_carrot_slows_into_the_leg_end_and_still_arrives() -> None:
-    m = C.Mission(C.Params(speed_mps=0.4, brake_mps2=0.1))
-    m.leg_len = 2.0
-    m.s = 0.0
-    assert m._carrot_speed() == pytest.approx(0.4)
-    m.s = 1.9
-    assert m._carrot_speed() == pytest.approx(math.sqrt(0.02))
-    m.s = 2.0
-    assert m._carrot_speed() == pytest.approx(0.05)         # never zero, or the leg would not finish
-    done, _, _ = fly(C.Params(route=[(2.0, 0.0)], brake_mps2=0.1))
-    assert done.result == "complete", (done.result, done.why)
-
-
-def test_braking_is_off_unless_asked_for() -> None:
-    m = C.Mission(C.Params(speed_mps=0.4))
-    m.leg_len, m.s = 2.0, 1.99
-    assert m._carrot_speed() == 0.4
-
-
-def test_a_wall_past_the_leg_end_does_not_block_the_leg() -> None:
-    wall = [(0, 3.5, -5.0, 5.0)]                            # 0.5 m past the end of a 3 m leg, closer than stop_m
-    blocked, _, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9), wall)
-    assert "route blocked" in blocked.result
-    clear, _, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9, end_clear_m=0.35), wall)
-    assert clear.result == "complete", (clear.result, clear.why)
-
-
-def test_a_wall_too_close_to_the_leg_end_still_blocks_it() -> None:
-    wall = [(0, 3.2, -5.0, 5.0)]                            # 0.2 m past the end: the aircraft would hit it
-    m, px4, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9, end_clear_m=0.35), wall)
-    assert "route blocked" in m.result
-    assert px4.pos[0] < 3.0

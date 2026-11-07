@@ -5,21 +5,21 @@ it: simulation time in the simulator and in replays of recorded data (ROS use_si
 system time on hardware. The same code therefore runs against all three.
 
 The mission: wait until PX4 has a valid position and heading, the estimator reports healthy and
-the depth camera is live -> stream a hold setpoint, request Offboard and arm -> climb -> fly a
-pre-planned route of legs (each leg: turn to face it, check the depth ahead, advance a carrot at a
-bounded speed while the live depth shows the way clear) -> land.
+the depth camera is live -> stream a hold setpoint, request Offboard and arm -> climb -> follow one
+smooth path through the route's points (refnav.follow), moving only into space the live depth has
+observed free -> land.
 
 Safety behaviour (each one is a test in tests/test_refnav_core.py):
 * fail closed on estimator health: absent, stale or unhealthy refuses to arm; unhealthy or silent
   for health_bad_land_s in the air lands;
-* no translation without OBSERVED free space: the carrot advances only while a depth frame no older
-  than depth_stale_s returned depth on at least min_corridor_coverage of the rays crossing the
-  corridor ahead (no return is unknown space, never free space); a blank, sparse (valid fraction
-  < min_valid_frac), future-stamped, stale-on-arrival or out-of-order frame refreshes nothing; no
-  usable depth for depth_lost_land_s lands;
-* an obstacle closer than stop_m ahead stops the aircraft and ends the route (it lands where it
-  is: route blocked), unless avoid is set and refnav.planner finds a way around;
-* no progress toward the current target for stall_s lands, so a frozen carrot cannot hover forever;
+* no translation without OBSERVED free space: the reference only moves along path the latest depth
+  frame (no older than depth_stale_s) observed, where at least min_corridor_coverage of the rays
+  towards it returned depth (no return is unknown space, never free space), and brakes to stop there;
+  a blank, sparse (valid fraction < min_valid_frac), future-stamped, stale-on-arrival or out-of-order
+  frame refreshes nothing; no usable depth for depth_lost_land_s lands;
+* an obstacle on the path closer than stop_m in confirm_frames consecutive frames ends the route (it
+  lands where it is: route blocked);
+* no progress along the path for stall_s lands, so a frozen reference cannot hover forever;
 * PX4 leaving Offboard while airborne (a pilot or a failsafe) is never fought: the mission stops
   streaming and commanding and ends ("yielded");
 * PX4 owns the landing: once AUTO_LAND is observed the mission stops streaming setpoints (PX4's
@@ -39,39 +39,27 @@ import numpy as np
 
 from . import depth as D
 from . import follow as F
-from . import planner as P
 
 if TYPE_CHECKING:
     from typing import Any
-
-    import numpy as np
 
     Intrinsics = tuple[float, float, float, float]      # pinhole (fx, fy, cx, cy) in pixels
     QuatWXYZ = tuple[float, float, float, float]        # PX4 attitude, FRD body -> NED, w first
 
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
-AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold", "follow")
-LEG_PHASES = ("turn", "check", "go")
+AIRBORNE = ("climb", "hover", "follow")
 
 
 @dataclass
 class Params:
     route: list[tuple[float, float]] = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
-    # Per leg: camera looks this many deg right (+) / left (-) of travel. Depth checks stay on the travel
-    # direction. A right offset moves the corridor into the left image columns, where stereo returns no
-    # depth (columns < 80 of 640 in run_0613), so it lowers corridor coverage; see test_a_right_camera_offset...
-    leg_yaw_off_deg: list[float] = field(default_factory=lambda: [0.0])
     height_m: float = 1.2
     speed_mps: float = 0.6
-    lead_max_m: float = 1.0                     # the carrot never leads the aircraft by more
-    # Slow the carrot into the leg end at this deceleration (0: off). PX4 tracks a position-only stream about
-    # 1.2 s late and brakes at about 0.25 m/s2 (run_0613), so a carrot that stops dead overshoots by 0.3 m.
-    brake_mps2: float = 0.0
+    accel_mps2: float = 0.5                     # speeding up and braking along the path
     yaw_rate_dps: float = 45.0
     face_tol_deg: float = 8.0
-    arrive_m: float = 0.3
-    hold_s: float = 1.0
+    arrive_m: float = 0.3                       # the route is complete within this of its last point
     climb_tol_m: float = 0.15
     climb_rate_mps: float = 0.5
     hover_s: float = 0.0                        # hold at height_m this long after the climb (0: straight on)
@@ -81,9 +69,6 @@ class Params:
     depth_stale_s: float = 0.5
     depth_lost_land_s: float = 3.0
     stop_m: float = 0.9
-    # An obstacle further than this past the leg's end does not block the leg, so stop_m can exceed the room
-    # left at a corner (inf: stop_m alone decides).
-    end_clear_m: float = math.inf
     corridor_half_m: float = 0.6
     band_m: float = 0.4
     min_obstacle_px: int = 1200                 # an obstacle covers at least this many image pixels (~35 x 35):
@@ -99,32 +84,17 @@ class Params:
     arm_wait_s: float = 30.0
     cmd_resend_s: float = 1.0
     land_timeout_s: float = 60.0
-    settle_s: float = 0.0                       # >0: a turn ends only after yaw stays in face_tol_deg this long
-    settle_m: float = 0.15                      # ...and the aircraft is back within this of the leg start
-    stall_s: float = 45.0                       # no progress toward the current target this long on a leg: land
-    avoid: bool = False                         # True: legs steer around obstacles (refnav.planner) instead of landing
-    gap_fan_deg: float = 35.0                   # bearings tried either side of the nose; the camera sees about +-37
-    gap_step_deg: float = 5.0
-    gap_half_m: float = 0.4                     # half-width that must be clear: airframe radius 0.25 plus margin
-    gap_stop_m: float = 0.7                     # usable clearance a bearing needs
-    gap_look_m: float = 3.0                     # clearance beyond this earns nothing: stereo is coarse past 2 m
-    gap_trust: float = 0.05                     # range discount per metre squared of measured clearance
-    gap_turn_cost: float = 0.3                  # score lost per radian of change from the current bearing
-    gap_min_hits: int = 6                       # points that make an obstacle; a corridor grazing a corner sees few
-    gap_memory_s: float = 3.0                   # how long depth points count after they leave the camera's view
-    gap_view_deg: float = 34.0                  # half view inside which live depth replaces remembered points
-    look_step_deg: float = 30.0                 # yaw this far when no bearing is clear, then look again
-    look_tries: int = 3
-    follow: bool = False                        # True: fly one smooth path through the route instead of stop-turn-go legs
+    stall_s: float = 45.0                       # no progress along the path this long: land
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
     a_lat_mps2: float = 0.5
-    look_min_m: float = 0.3                     # the nose faces a point this far ahead, more at speed
+    look_min_m: float = 0.3                     # lookahead at rest; it grows by look_s per m/s made while on track
     look_s: float = 1.5
     look_max_m: float = 1.2
-    ref_lead_max_m: float = 0.4                 # the reference never leads the aircraft by more
     xtrack_slow_m: float = 0.12                 # off the path by more than this: slow down...
     xtrack_stop_m: float = 0.35                 # ...and stop at this
     yaw_slow_deg: float = 35.0                  # heading error at which forward speed reaches zero
+    eph_ok_m: float = 0.1                       # PX4 horizontal position std: full speed below this...
+    eph_stop_m: float = 0.5                     # ...stopped at this
 
 
 @dataclass
@@ -133,6 +103,8 @@ class Vehicle:
     pos: tuple[float, float, float] | None = None          # NED metres (vehicle_local_position)
     heading: float | None = None      # rad
     pos_ok: bool = False              # xy_valid and z_valid and a heading (good for control, or PX4 yaw-aligned)
+    vel: tuple[float, float] = (0.0, 0.0)  # NED m/s (vehicle_local_position vx, vy)
+    eph: float = 0.0                  # PX4's horizontal position standard deviation, m
     q: QuatWXYZ | None = None            # attitude, FRD -> NED, (w, x, y, z)
     armed: bool | None = None
     nav_state: int | None = None
@@ -195,10 +167,6 @@ class Health:
         return 0.0
 
 
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2 * math.pi) - math.pi
-
-
 class Mission:
     def __init__(self, params: Params) -> None:
         self.p: Params = params
@@ -207,9 +175,7 @@ class Mission:
         self.why: str = ""
         self.sp: list[float] | None = None    # [n, e, d, yaw]
         self.home: tuple[float, float, float, float] | None = None              # (n, e, d, heading) at the arm request
-        self.targets: list[tuple[float, float]] = []             # NED (n, e) of each leg's end
-        self.leg: int = 0
-        self.legs_done: int = 0
+        self.targets: list[tuple[float, float]] = []             # NED (n, e) of each route point
         self.t_phase: float | None = None
         self.t_started: float | None = None         # the first time this mission saw (its clock): where a replay starts
         self.t_last: float | None = None
@@ -222,35 +188,19 @@ class Mission:
         self.depth_t: float | None = None           # capture stamp of the latest USABLE depth frame (depth alive)
         self.frame: D.DepthFrame | None = None             # that frame (refnav.depth.DepthFrame) and its obstacle points
         self.depth_pts: np.ndarray | None = None
-        self.corr_t: float | None = None            # stamp of the latest frame that OBSERVED the current corridor
-        self._judged_t: float | None = None         # the latest frame judged against the corridor (each frame once)
-        self.last_coverage: float | None = None
-        self.leg_start: tuple[float, float] | None = None
-        self.leg_dir: tuple[float, float] | None = None
-        self.leg_len: float = 0.0
-        self.leg_heading: float = 0.0
-        self.leg_yaw: float = 0.0                   # heading held on this leg: leg_heading + camera offset, or a look direction
-        self.s: float = 0.0
+        self.judged_t: float | None = None          # the latest depth frame judged against the path (each frame once)
+        self.blocked_frames: int = 0                # consecutive judged frames with an obstacle inside stop_m
+        self.s_limit: float = 0.0                   # path distance the latest judged frame shows free to stop in
         self.counts: dict[str, int] = {"depth_frames": 0, "obstacle_stops": 0, "depth_holds": 0, "unconfirmed_obstacles": 0,
-                       "depth_unusable": 0, "depth_future": 0, "depth_stale": 0, "depth_out_of_order": 0,
-                       "corridor_unobserved": 0, "stalls": 0, "looks": 0}
-        self.clr_hist: list[tuple[float, float]] = []            # [(depth stamp, clearance)] along the current leg, newest last
+                       "depth_unusable": 0, "depth_future": 0, "depth_stale": 0, "depth_out_of_order": 0, "stalls": 0}
         self.last_clearance: float | None = None
         self.land_request: str | None = None      # why an outside landing request was made (request_land), until acted on
         self.depth_reject: tuple[str, str] | None = None      # (key, detail): why the latest refused depth frame was refused
         self.last_valid_frac: float | None = None   # fraction of pixels returning depth in the latest decoded frame
-        self.best_dist: float = math.inf            # closest this leg has come to its target
+        self.best_s: float = 0.0                    # furthest the aircraft has come along the path
         self.t_best: float = 0.0                    # when that was
-        self.gap_heading: float | None = None       # world heading of the bearing being flown
-        self.gap_clear: float = 0.0
-        self.gap_t: float | None = None             # the depth frame that bearing was chosen from
-        self.looks: int = 0
-        self.t_settled: float | None = None         # since when the turn has held heading and position
-        self.memory: P.PointMemory = P.PointMemory(params.gap_memory_s)
         self.follower: F.Follower | None = None
         self.cmd: F.Command | None = None
-        self.target_s: list[float] = []             # path distance of each route point
-        self.yawspeed: float = 0.0
 
     def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
@@ -320,10 +270,6 @@ class Mission:
         return (self.depth_fresh(now) and self.depth_ready_since is not None
                 and math.isfinite(self.p.health_quiet_s) and self.p.health_quiet_s >= 0
                 and self.depth_t - self.depth_ready_since >= self.p.health_quiet_s)
-
-    def corridor_fresh(self, now: float) -> bool:
-        """A recent frame OBSERVED the corridor of the current leg."""
-        return self.corr_t is not None and now - self.corr_t <= self.p.depth_stale_s
 
     # ------------------------------------------------------------------ step
     def _set(self, phase: str, now: float, out: Output, why: str = "") -> None:
@@ -397,15 +343,11 @@ class Mission:
             bad = self.health.bad_for(now)
             if bad > p.health_bad_land_s:
                 self._land(now, out, f"estimator unhealthy or silent for {bad:.1f} s")
-            elif not v.pos_ok or v.pos is None:
+            elif not v.pos_ok or v.pos is None or v.heading is None:
                 self._land(now, out, "PX4 position or heading invalid")
             elif self.depth_t is None or now - self.depth_t > p.depth_lost_land_s:
                 self._land(now, out, f"depth silent for more than {p.depth_lost_land_s:.0f} s")
 
-        if self.phase in LEG_PHASES and self._stalled(now, v):
-            self.counts["stalls"] += 1
-            stuck = " (turn not settled)" if self.phase == "turn" else ""
-            self._land(now, out, f"no progress for {p.stall_s:.0f} s on leg {self.leg + 1}{stuck}")
         ph = self.phase
         if ph == "wait":
             ok, why = self.health.arm_ok(now)
@@ -465,33 +407,6 @@ class Mission:
                 self._start(now, out, v)
         elif ph == "follow":
             self._follow(now, dt, out, v)
-        elif ph == "turn":
-            err = self._slew_yaw(self.leg_yaw, dt)
-            if self._turn_settled(now, err, v):
-                self._set("check", now, out)
-        elif ph == "check" and p.avoid:
-            if self._frame_since_phase_start(now):
-                self._set("go", now, out)
-        elif ph == "check":
-            if self._frame_since_phase_start(now):
-                if self.clr_hist and self.clr_hist[0][0] < self.t_phase:
-                    self.clr_hist, self.corr_t = [], None    # frames from before the turn ended look elsewhere
-                clr = self._clearance(v)                     # None: not enough observed frames yet, wait
-                if clr is not None and self.corridor_fresh(now):
-                    self.last_clearance = clr
-                    if clr < self._stop_at(self.leg_len):
-                        self.counts["obstacle_stops"] += 1
-                        self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead at leg {self.leg + 1}")
-                    else:
-                        self.s = 0.0
-                        self._set("go", now, out)
-        elif ph == "go":
-            self._go(now, dt, out, v)
-        elif ph == "hold":
-            if now - self.t_phase >= p.hold_s:
-                self.legs_done += 1
-                self.leg += 1
-                self._next_leg(now, out, v)
 
         if self.phase == "land":
             if v.nav_state == NAV_AUTO_LAND:
@@ -506,239 +421,89 @@ class Mission:
 
         out.phase = self.phase
         out.setpoint = tuple(self.sp) if self.sp is not None else None
-        if self.phase == "follow" and self.cmd is not None:
-            out.velocity, out.accel, out.yawspeed = self.cmd.vel, self.cmd.acc, self.yawspeed
         # PX4 owns the landing once AUTO_LAND is seen: nothing streams from then on
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
 
     def _start(self, now: float, out: Output, v: Vehicle) -> None:
-        if not self.p.follow:
-            self._next_leg(now, out, v)
-            return
         p = self.p
+        if not self.targets:
+            self._land(now, out, "route complete")
+            return
         path = F.fillet_path([(self.sp[0], self.sp[1])] + self.targets, p.fillet_m)
-        prof = F.speed_profile(path, p.speed_mps, math.radians(min(p.yaw_rate_dps, 45.0)), p.a_lat_mps2,
-                               0.5, p.brake_mps2 if p.brake_mps2 > 0 else 0.5)
-        self.follower = F.Follower(path, prof, ref_lead_max_m=p.ref_lead_max_m, look_min_m=p.look_min_m, look_s=p.look_s,
-                                   look_max_m=p.look_max_m, face_tol_rad=math.radians(p.face_tol_deg),
-                                   xtrack_slow_m=p.xtrack_slow_m, xtrack_stop_m=p.xtrack_stop_m,
-                                   yaw_slow_rad=math.radians(p.yaw_slow_deg), end_tol_m=p.arrive_m)
-        lo, self.target_s = 0.0, []
-        for t in self.targets:                       # in route order, so a U-turn's far corridor is never matched
-            lo = path.project(t, lo, path.length)[0]
-            self.target_s.append(lo)
-        self.best_dist, self.t_best = 0.0, now
-        self.clr_hist, self.corr_t = [], None
+        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2, p.accel_mps2)
+        lim = F.Limits(accel=p.accel_mps2, look_min=p.look_min_m, look_s=p.look_s, look_max=p.look_max_m,
+                       face_tol=math.radians(p.face_tol_deg), yaw_slow=math.radians(p.yaw_slow_deg),
+                       xtrack_slow=p.xtrack_slow_m, xtrack_stop=p.xtrack_stop_m, end_tol=p.arrive_m)
+        self.follower = F.Follower(path, prof, lim, self.targets)
+        self.best_s, self.t_best, self.s_limit = 0.0, now, 0.0
         self._set("follow", now, out, f"path {path.length:.1f} m through {len(self.targets)} points")
 
-    def _follow(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
-        """One tick on the path: depth must show the way clear along the current heading, else the reference waits."""
+    def _judge_depth(self, v: Vehicle) -> bool:
+        """Judge the newest depth frame against the path ahead, once per frame: set s_limit, where the reference must
+        be able to stop (in observed free space, stop_m short of an obstacle). -> True when the route is blocked."""
         p, fol = self.p, self.follower
-        path = fol.path
-        self.leg_heading = float(path.psi[path.index(fol.s_ref)])
-        clr = self._clearance(v) if self.depth_fresh(now) else None
-        if clr is not None and not self.corridor_fresh(now):
-            clr = None                                       # the latest evidence of this corridor is too old
-        scale = 1.0
-        if clr is None:
-            self.counts["depth_holds"] += 1
-            scale = 0.0
+        if self.frame is None or self.judged_t == self.depth_t:
+            return False
+        self.judged_t = self.depth_t
+        ne, along = fol.ahead(p.stop_m + p.look_max_m)
+        c, sn = math.cos(v.heading), math.sin(v.heading)
+        dn, de = ne[:, 0] - v.pos[0], ne[:, 1] - v.pos[1]
+        fr = np.stack([dn * c + de * sn, -dn * sn + de * c], 1)          # level heading frame: forward, right
+        hits = max(3, round(p.min_obstacle_px / p.depth_stride ** 2))
+        # closer than stop_m the view is mostly floor, which stereo often misses: those samples were judged from further back
+        free, obstacle = D.path_clearance(self.frame, self.depth_pts, fr, along, p.corridor_half_m, p.band_m, hits,
+                                          p.min_corridor_coverage, blind_m=p.stop_m)
+        self.last_clearance = free
+        close = obstacle and free < p.stop_m
+        self.blocked_frames = self.blocked_frames + 1 if close else 0
+        self.counts["unconfirmed_obstacles"] += 0 < self.blocked_frames < p.confirm_frames
+        if close:
+            self.s_limit = fol.s_ref
+        elif not obstacle and fol.s_hat + free >= fol.path.length - 1e-6:
+            self.s_limit = math.inf                          # clear to the end: the speed profile brings it to rest
         else:
-            self.last_clearance = clr
-            ahead = min(fol._next_sharp(fol.s_ref), path.length) - fol.s_hat
-            if clr < min(p.stop_m, max(ahead, 0.0) + p.end_clear_m):
-                self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
-                self.counts["obstacle_stops"] += 1
-                self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead at {fol.s_hat:.1f} m along the path")
-                return
-        self.cmd = fol.step((v.pos[0], v.pos[1]), v.heading, dt, scale)
+            self.s_limit = fol.s_hat + free - (p.stop_m if obstacle else 0.0)
+        return self.blocked_frames >= p.confirm_frames
+
+    def _follow(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
+        p, fol = self.p, self.follower
+        if not self.depth_fresh(now):
+            self.s_limit = fol.s_ref                         # no live evidence: the reference waits
+        elif self._judge_depth(v):
+            self.counts["obstacle_stops"] += 1
+            self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
+            self._land(now, out, f"route blocked: obstacle {self.last_clearance:.2f} m ahead at {fol.s_hat:.1f} m along the path")
+            return
+        if self.s_limit <= fol.s_ref:
+            self.counts["depth_holds"] += 1
+        doubt = (v.eph - p.eph_ok_m) / (p.eph_stop_m - p.eph_ok_m)
+        self.cmd = fol.step((v.pos[0], v.pos[1]), v.vel, v.heading, dt, self.s_limit, doubt)
         before = self.sp[3]
         self._slew_yaw(self.cmd.yaw, dt)
-        self.yawspeed = _wrap(self.sp[3] - before) / dt if dt > 0 else 0.0
         self.sp[0], self.sp[1] = self.cmd.pos
-        self.leg = sum(1 for ts in self.target_s if ts <= fol.s_hat + 0.05)
-        self.legs_done = self.leg
-        if fol.s_hat > self.best_dist + 0.1:
-            self.best_dist, self.t_best = fol.s_hat, now
+        out.velocity, out.accel = self.cmd.vel, self.cmd.acc
+        out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
+        if fol.s_hat > self.best_s + 0.1:
+            self.best_s, self.t_best = fol.s_hat, now
         if now - self.t_best > p.stall_s:
             self.counts["stalls"] += 1
             self._land(now, out, f"no progress along the path for {p.stall_s:.0f} s at {fol.s_hat:.1f} m")
         elif self.cmd.done:
             self._land(now, out, "route complete")
 
-    def _next_leg(self, now: float, out: Output, v: Vehicle) -> None:
-        if self.leg >= len(self.targets):
-            self._land(now, out, "route complete")
-            return
-        start = (self.sp[0], self.sp[1])
-        tn, te = self.targets[self.leg]
-        dn, de = tn - start[0], te - start[1]
-        self.leg_len = math.hypot(dn, de)
-        self.leg_start = start
-        self.leg_dir = (dn / self.leg_len, de / self.leg_len) if self.leg_len > 1e-6 else (1.0, 0.0)
-        self.leg_heading = math.atan2(de, dn) if self.leg_len > 1e-6 else self.sp[3]
-        offs = self.p.leg_yaw_off_deg
-        off = math.radians(offs[self.leg]) if self.leg < len(offs) else 0.0
-        self.leg_yaw = _wrap(self.leg_heading + off)
-        self.clr_hist, self.corr_t = [], None
-        self.best_dist, self.t_best = math.inf, now
-        self.gap_heading, self.looks, self.t_settled = None, 0, None
-        self._set("turn", now, out, f"leg {self.leg + 1}/{len(self.targets)}")
-
-    def _clearance(self, v: Vehicle) -> float | None:
-        """Clearance along the leg CONFIRMED by the last confirm_frames frames that OBSERVED the
-        corridor: the largest of their clearances, so an obstacle counts only when every one of
-        those frames shows it (a stereo false match lasts a frame; a wall does not go away). A frame
-        whose rays through the corridor (at stop_m + lead_max_m ahead) mostly returned nothing has
-        observed nothing there and is not evidence of free space. None = unknown (do not move)."""
-        p = self.p
-        bearing = _wrap(self.leg_heading - v.heading)        # positive = to the right (NED yaw)
-        if self.frame is not None and self._judged_t != self.depth_t:
-            self._judged_t = self.depth_t
-            cov, _ = self.frame.corridor_coverage(bearing, p.corridor_half_m, p.band_m, p.stop_m + p.lead_max_m)
-            self.last_coverage = cov
-            if cov >= p.min_corridor_coverage:
-                hits = max(3, round(p.min_obstacle_px / p.depth_stride ** 2))
-                c = D.clearance(self.depth_pts, bearing, p.corridor_half_m, p.band_m, hits)
-                self.clr_hist = (self.clr_hist + [(self.depth_t, c)])[-max(1, p.confirm_frames):]
-                self.corr_t = self.depth_t
-            else:
-                self.counts["corridor_unobserved"] += 1
-        if len(self.clr_hist) < self.p.confirm_frames:
-            return None
-        confirmed = max(c for _, c in self.clr_hist)
-        if min(c for _, c in self.clr_hist) < self.p.stop_m <= confirmed:
-            self.counts["unconfirmed_obstacles"] += 1
-        return confirmed
-
-    def _turn_settled(self, now: float, err: float, v: Vehicle) -> bool:
-        # the setpoint reaching the heading is not the aircraft reaching it: rushed turns drift off the leg line
-        p = self.p
-        faced = abs(err) < 1e-3 and abs(_wrap(self.leg_yaw - v.heading)) < math.radians(p.face_tol_deg)
-        if p.settle_s <= 0.0:
-            return faced
-        home = math.hypot(v.pos[0] - self.sp[0], v.pos[1] - self.sp[1]) < p.settle_m
-        if not (faced and home):
-            self.t_settled = None
-            return False
-        if self.t_settled is None:
-            self.t_settled = now
-        return now - self.t_settled >= p.settle_s
-
-    def _frame_since_phase_start(self, now: float) -> bool:
-        """A depth frame captured AFTER the turn ended looks along this leg."""
-        return self.depth_t is not None and self.depth_t >= self.t_phase and self.depth_fresh(now)
-
-    def _slew_yaw(self, target: float, dt: float) -> float:
-        err = _wrap(target - self.sp[3])
+    def _slew_yaw(self, target: float, dt: float) -> None:
         step = math.radians(self.p.yaw_rate_dps) * dt
-        self.sp[3] = _wrap(self.sp[3] + max(-step, min(step, err)))
-        return err
-
-    def _target_dist(self, v: Vehicle) -> float:
-        tn, te = self.targets[self.leg]
-        return math.hypot(v.pos[0] - tn, v.pos[1] - te)
-
-    def _stalled(self, now: float, v: Vehicle) -> bool:
-        d = self._target_dist(v)
-        if d < self.best_dist - 0.1:
-            self.best_dist, self.t_best = d, now
-        return now - self.t_best > self.p.stall_s
-
-    def _look(self, now: float, out: Output, v: Vehicle, goal: float) -> None:
-        """Nothing in view is clear: turn toward the goal side and look again before giving up."""
-        self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
-        if self.looks >= self.p.look_tries:
-            self.counts["obstacle_stops"] += 1
-            self._land(now, out, f"route blocked: no clear bearing after {self.looks} looks on leg {self.leg + 1}")
-            return
-        self.looks += 1
-        self.counts["looks"] += 1
-        self.leg_yaw = _wrap(v.heading + math.copysign(math.radians(self.p.look_step_deg), goal))
-        self.gap_heading, self.t_settled = None, None
-        self._set("turn", now, out, f"look {self.looks}/{self.p.look_tries}: no clear bearing")
-
-    def _go_gap(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
-        """One tick of a leg flown by gap picking: choose on each new frame, fly the choice in between."""
-        p = self.p
-        tn, te = self.targets[self.leg]
-        dn, de = tn - v.pos[0], te - v.pos[1]
-        if self._target_dist(v) < p.arrive_m:
-            self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
-            self._set("hold", now, out, f"arrived leg {self.leg + 1}")
-            return
-        if not self.depth_fresh(now):
-            self.counts["depth_holds"] += 1                  # no live evidence: the setpoint waits
-            return
-        if self.gap_heading is None or self.gap_t != self.depth_t:
-            self.gap_t = self.depth_t
-            goal = _wrap(math.atan2(de, dn) - v.heading)
-            last = goal if self.gap_heading is None else _wrap(self.gap_heading - v.heading)
-            near = self.depth_pts[np.abs(self.depth_pts[:, 2]) < p.band_m]    # clearance ignores the rest anyway
-            self.memory.add(now, near, v.pos, v.heading)
-            points = self.memory.merged(near, v.pos, v.heading, math.radians(p.gap_view_deg))
-            gap = P.choose_gap(self.frame, points, goal, last, p)
-            if gap is None:
-                self._look(now, out, v, goal)
-                return
-            self.gap_heading, self.gap_clear, self.looks = _wrap(v.heading + gap.bearing), gap.clear_m, 0
-        self._slew_yaw(self.gap_heading, dt)
-        self.sp[0] += math.cos(self.gap_heading) * p.speed_mps * dt
-        self.sp[1] += math.sin(self.gap_heading) * p.speed_mps * dt
-        lead = math.hypot(self.sp[0] - v.pos[0], self.sp[1] - v.pos[1])
-        cap = min(p.lead_max_m, max(self.gap_clear - p.gap_stop_m, 0.1))
-        if lead > cap:
-            self.sp[0] = v.pos[0] + (self.sp[0] - v.pos[0]) * cap / lead
-            self.sp[1] = v.pos[1] + (self.sp[1] - v.pos[1]) * cap / lead
-
-    def _stop_at(self, remaining_m: float) -> float:
-        """Clearance below which the leg is blocked: stop_m, or less when the leg ends sooner than that."""
-        return min(self.p.stop_m, max(remaining_m, 0.0) + self.p.end_clear_m)
-
-    def _carrot_speed(self) -> float:
-        """Carrot speed: speed_mps, slowing into the leg end at brake_mps2 (never to zero, so it arrives)."""
-        p = self.p
-        if p.brake_mps2 <= 0.0:
-            return p.speed_mps
-        return min(p.speed_mps, max(0.05, math.sqrt(2.0 * p.brake_mps2 * max(self.leg_len - self.s, 0.0))))
-
-    def _go(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
-        if self.p.avoid:
-            self._go_gap(now, dt, out, v)
-            return
-        p = self.p
-        n0, e0 = self.leg_start
-        un, ue = self.leg_dir
-        proj = (v.pos[0] - n0) * un + (v.pos[1] - e0) * ue
-        clr = self._clearance(v) if self.depth_fresh(now) else None
-        if clr is not None and not self.corridor_fresh(now):
-            clr = None                                       # the latest evidence of this corridor is too old
-        if clr is not None:
-            self.last_clearance = clr
-            if clr < self._stop_at(self.leg_len - proj):
-                # stop where the aircraft is (not where the carrot was)
-                self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
-                self.counts["obstacle_stops"] += 1
-                self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead on leg {self.leg + 1}")
-                return
-            self.s = min(self.s + self._carrot_speed() * dt, self.leg_len, max(proj, 0.0) + p.lead_max_m)
-        else:
-            self.counts["depth_holds"] += 1                  # no live evidence: the carrot waits
-        self.sp[0], self.sp[1] = n0 + un * self.s, e0 + ue * self.s
-        tn, te = self.targets[self.leg]
-        if self.s >= self.leg_len - 1e-6 and math.hypot(v.pos[0] - tn, v.pos[1] - te) < p.arrive_m:
-            self._set("hold", now, out, f"arrived leg {self.leg + 1}")
+        self.sp[3] = F.wrap(self.sp[3] + max(-step, min(step, F.wrap(target - self.sp[3]))))
 
     def status(self, now: float) -> dict[str, Any]:
-        return {"phase": self.phase, "why": self.why, "result": self.result, "started_t": self.t_started, "leg": self.leg,
-                "legs": len(self.targets), "legs_done": self.legs_done, "home": self.home,
+        return {"phase": self.phase, "why": self.why, "result": self.result, "started_t": self.t_started,
+                "points": len(self.targets), "points_passed": self.follower.points_passed if self.follower else 0,
+                "home": self.home,
                 "targets": [list(t) for t in self.targets], "setpoint": list(self.sp) if self.sp else None,
                 "clearance_m": (None if self.last_clearance is None or math.isinf(self.last_clearance)
                                 else round(self.last_clearance, 2)),
                 "depth_age_s": None if self.depth_t is None else round(now - self.depth_t, 3),
-                "corridor_age_s": None if self.corr_t is None else round(now - self.corr_t, 3),
-                "corridor_coverage": None if self.last_coverage is None else round(self.last_coverage, 2),
                 "depth_valid_frac": None if self.last_valid_frac is None else round(self.last_valid_frac, 3),
                 "depth_reject": None if self.depth_reject is None else self.depth_reject[1],
                 "health_bad_s": (None if math.isinf(self.health.bad_for(now)) else round(self.health.bad_for(now), 2)),
@@ -747,10 +512,10 @@ class Mission:
     def _follow_status(self) -> dict[str, Any]:
         if self.follower is None:
             return {}
-        path, c = self.follower.path, self.cmd
-        every = max(1, round(0.1 / F.STEP_M))
-        return {"path": [[round(float(a), 3), round(float(b), 3)] for a, b in zip(path.x[::every], path.y[::every])],
-                "path_len": round(path.length, 2),
-                **({} if c is None else {"s_ref": round(c.s_ref, 2), "s_hat": round(c.s_hat, 2), "xtrack": round(c.xtrack, 3),
-                                         "scale": round(c.scale, 2), "look": [round(c.look[0], 3), round(c.look[1], 3)],
-                                         "yaw_cmd": round(c.yaw, 3)})}
+        fol, c = self.follower, self.cmd
+        st = {"path": fol.path.downsample(0.1), "path_len": round(fol.path.length, 2), "s_ref": round(fol.s_ref, 2),
+              "s_hat": round(fol.s_hat, 2)}
+        if c is not None:
+            st.update(xtrack=round(c.xtrack, 3), scale=round(c.scale, 2), lead=round(c.lead, 2), yaw_cmd=round(c.yaw, 3),
+                      look=[round(c.look[0], 3), round(c.look[1], 3)])
+        return st

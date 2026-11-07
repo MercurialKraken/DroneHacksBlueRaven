@@ -77,11 +77,10 @@ def main():
         fig, axs = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
         T = [t for t, _ in st]
         g = lambda k: [s.get(k) if s.get(k) is not None else float("nan") for _, s in st]
-        axs[0].plot(T, g("corridor_coverage"), label="corridor_coverage")
         axs[0].plot(T, g("depth_valid_frac"), label="depth_valid_frac")
-        axs[0].axhline(0.6, ls=":", c="r", label="starter min_corridor_coverage 0.6")
+        axs[0].plot(T, g("scale"), label="speed scale"); axs[0].plot(T, g("xtrack"), label="cross-track m")
         axs[0].legend(fontsize=8); axs[0].set_ylim(0, 1)
-        axs[1].plot(T, g("depth_holds"), label="depth_holds"); axs[1].plot(T, g("corridor_unobserved"), label="corridor_unobserved")
+        axs[1].plot(T, g("clearance_m"), label="free along path m"); axs[1].plot(T, g("depth_holds"), label="depth_holds")
         axs[1].legend(fontsize=8)
         phases = sorted({s["phase"] for _, s in st})
         axs[2].step(T, [phases.index(s["phase"]) for _, s in st], where="post")

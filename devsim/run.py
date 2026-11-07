@@ -10,6 +10,7 @@ import sys
 import numpy as np
 
 from refnav import core as C
+from refnav import follow as F
 from .world import K, R_BODY_CAM, T_BODY_CAM, World, q_yaw
 
 DT = 1 / 60                     # physics tick; mission every 3 (20 Hz), depth every 4 (15 Hz)
@@ -56,7 +57,7 @@ class PX4:
             elif dist > 1e-6:
                 want[:2] = err[:2] / dist * min(VXY_MAX, XY_P * dist, math.sqrt(2 * ACC_XY * dist))
             want[2] = np.clip(1.0 * err[2], -VZ_UP, VZ_DN)
-            yerr = (sp[3] - self.yaw + math.pi) % (2 * math.pi) - math.pi
+            yerr = float(F.wrap(sp[3] - self.yaw))
             self.yaw += np.clip(yerr, -YAW_RATE * dt, YAW_RATE * dt)
         elif self.armed and self.nav == C.NAV_AUTO_LAND:
             want[2] = VZ_DN
@@ -77,7 +78,7 @@ class PX4:
         self.landed = self.pos[2] > -0.05
 
     def vehicle(self):
-        return C.Vehicle(pos=tuple(self.est()), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw),
+        return C.Vehicle(pos=tuple(self.est()), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw), vel=tuple(self.vel[:2]),
                          armed=self.armed, nav_state=self.nav, landed=self.landed)
 
 
@@ -95,7 +96,10 @@ def load_params(path, height, hover):
     pts = doc["route"] if isinstance(doc, dict) else doc
     prm = C.Params(route=[(float(a), float(b)) for a, b in pts], height_m=1.2, hover_s=5.0)   # the starter's mission
     for k, v in (doc.get("params", {}) if isinstance(doc, dict) else {}).items():
-        setattr(prm, k, type(getattr(prm, k))(v))
+        if hasattr(prm, k):                            # the route generator may carry params this mission no longer has
+            setattr(prm, k, type(getattr(prm, k))(v))
+        else:
+            print(f"ignored route param {k}", file=sys.stderr)
     prm.height_m = prm.height_m if height is None else height
     prm.hover_s = prm.hover_s if hover is None else hover
     return prm
@@ -181,7 +185,7 @@ def main(argv=None):
                                             a.seed, a.seconds)
     err = np.linalg.norm(px4.off[:2])
     print(f"result: {result}")
-    print(f"legs done {m.legs_done}/{len(m.targets)}; end true n={px4.pos[0]:.2f} e={px4.pos[1]:.2f}; "
+    print(f"points passed {m.follower.points_passed if m.follower else 0}/{len(m.targets)}; end true n={px4.pos[0]:.2f} e={px4.pos[1]:.2f}; "
           f"estimate error {err:.2f} m; sim time {log['t'][-1]:.1f} s")
     print("counts:", {k: v for k, v in m.counts.items() if v})
     if a.plot:

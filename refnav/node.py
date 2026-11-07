@@ -72,6 +72,9 @@ class RefNav(Node):
         super().__init__("refnav")
         route, doc = load_route(self)
         prm = C.Params(route=route)
+        unknown = sorted(set(doc.get("params", {})) - set(vars(prm)))
+        if unknown:
+            self.get_logger().warn(f"route file params not used by this mission: {', '.join(unknown)}")
         for k, v in vars(C.Params()).items():
             if k == "route":
                 continue
@@ -142,6 +145,8 @@ class RefNav(Node):
     def _on_lpos(self, m: VehicleLocalPosition) -> None:
         self.v.pos = (m.x, m.y, m.z)
         self.v.heading = m.heading
+        self.v.vel = (m.vx, m.vy) if m.v_xy_valid else (0.0, 0.0)
+        self.v.eph = float(m.eph)
         # heading: PX4's heading_good_for_control, OR its own yaw alignment. With a COMPASS, PX4 sets
         # heading_good_for_control only after re-aligning the heading in flight above 1.5 m (ekf.h
         # isYawFinalAlignComplete: ground magnetic anomalies), so a compass aircraft would wait on the
