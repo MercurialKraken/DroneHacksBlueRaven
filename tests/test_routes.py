@@ -30,7 +30,8 @@ def test_committed_route_files_match_the_generator():
         doc = json.loads((root / "routes" / name).read_text())
         assert doc["params"] == params, name
         assert doc["route"] == [[float("%.3f" % a), float("%.3f" % b)] for a, b in route], name
-    assert json.loads((root / "route.json").read_text()) == json.loads((root / "routes" / "route_v5.json").read_text())
+    flown, v5 = (json.loads((root / name).read_text())["route"] for name in ("route.json", "routes/route_v5.json"))
+    assert flown[:14] == v5[:14]           # the flown route is v5 to the tunnel exit, then through the window
 
 
 def test_v5_is_v4_flown_from_the_spawn():

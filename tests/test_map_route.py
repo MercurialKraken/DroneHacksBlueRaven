@@ -21,7 +21,7 @@ MAP_MARGIN_M = 0.20            # refnav.node's map_margin_m
 
 
 def _route_ned():
-    pts = json.loads((ROOT / "route.json").read_text())["route"]
+    pts = json.loads((ROOT / "routes" / "route_v5.json").read_text())["route"]   # a fixed route: the band tests pin its spots
     return [(0.0, 0.0)] + [(f, -l) for f, l in pts]              # forward/left from a north-facing launch
 
 
@@ -104,3 +104,12 @@ def test_speed_drops_where_the_mapped_path_is_tight() -> None:
     tight = path.clearance < 0.42
     assert tight.any() and (v[tight] <= 0.15 + 0.4 * 0.1 + 1e-6).all()
     assert v.max() == pytest.approx(0.4)
+
+
+def test_the_flown_route_clears_every_surface_at_its_height() -> None:
+    """route.json at main.py's height (the window route at the window's centre height) keeps 0.40 m everywhere."""
+    import re
+    height = float(re.search(r"^HEIGHT_M = ([0-9.]+)", (ROOT / "main.py").read_text(), re.M).group(1))
+    pts = json.loads((ROOT / "route.json").read_text())["route"]
+    path = M.builder(CM, LAUNCH, height + LAUNCH["z"], M.DRONE_RADIUS_M + MAP_MARGIN_M, 0.3)([(0.0, 0.0)] + [(f, -l) for f, l in pts])
+    assert np.nanmin(path.clearance) >= 0.40
