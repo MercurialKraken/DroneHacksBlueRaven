@@ -6,11 +6,13 @@ which owns Offboard. We only read /visual_slam/tracking/odometry and /skybeta/st
 node wraps this class; everything that decides what to publish is here, so it is unit-tested.
 
 Sequence (the safety pilot arms, then switches to Position; the interface enters Offboard ONCE):
-  INIT           nothing is published. Wait for fresh state and odometry, and for the drone to sit
-                 still on the launch mark for settle_s, then fix map <- odom from the current pose
-                 (the odom origin is wherever the stack started, not necessarily the mark).
+  INIT           nothing is published. Wait for fresh state and odometry, PX4 reporting landed, and
+                 the drone sitting still on the launch mark for settle_s, then fix map <- odom from
+                 the current pose (the odom origin is wherever the stack started, not the mark).
   WAIT_OFFBOARD  publish a pose at the current position every tick (the interface only enters
-                 Offboard if our node sent a setpoint in the last second). No movement.
+                 Offboard if our node sent a setpoint in the last second). No movement. If odometry
+                 is lost or jumps here, the stack may have restarted with a new origin (it restarts
+                 on clock steps): back to INIT, which fixes map <- odom again and re-sends it.
   TAKEOFF        offboard_active: a pose at the take-off point with z ramped up to the flight
                  height. Poses persist, so a stalled node leaves the drone holding.
   FOLLOW         a TWIST every tick: the reference's feed-forward velocity plus a P term towards
@@ -77,7 +79,11 @@ class MissionParams:
     arrive_m: float = 0.10
     takeoff_tol_m: float = 0.08
     state_stale_s: float = 0.6          # /skybeta/state is 5 Hz
-    odom_stale_s: float = 0.2           # odometry is 30 Hz
+    odom_stale_s: float = 0.5           # 30 Hz, but skybeta-09's bench saw gaps up to ~0.3 s (2026-11-07)
+    odom_jump_m: float = 0.15           # a sample this far from the last one AND faster than odom_jump_mps
+    odom_jump_mps: float = 3.0          # is a reset (the stack restarts on clock steps), not motion
+    odom_jump_deg: float = 30.0         # same for heading, with odom_jump_dps
+    odom_jump_dps: float = 360.0
     settle_s: float = 2.0               # the drone must sit still this long before map <- odom is fixed
     settle_tol_m: float = 0.02
     settle_tol_deg: float = 1.0
@@ -124,6 +130,9 @@ class SkybetaMission:
         self.T_odom_map: np.ndarray | None = None
         self.T_init: np.ndarray | None = None
         self.yaw_off = 0.0                  # map yaw = odom yaw + yaw_off
+        self.t_fixed = -math.inf            # when INIT last fixed map <- odom
+        self.n_init = 0
+        self.odom_jump: str | None = None   # set by on_odom, consumed by step
         self.t_corr = -math.inf             # last map_align correction taken
         self.n_corr = 0
         self.corr_step_max_m = 0.0          # largest move of the drone's map position by one correction
@@ -140,20 +149,31 @@ class SkybetaMission:
     def on_odom(self, t: float, x: float, y: float, z: float, yaw: float) -> None:
         if not all(math.isfinite(v) for v in (x, y, z, yaw)):
             return
+        if self.odom is not None and t > self.t_odom:
+            dt = max(t - self.t_odom, 1.0 / 30.0)
+            d = math.dist(self.odom[:3], (x, y, z))
+            dyaw = abs(_wrap(yaw - self.odom[3]))
+            if (d > self.p.odom_jump_m and d / dt > self.p.odom_jump_mps) or (
+                    dyaw > math.radians(self.p.odom_jump_deg) and dyaw / dt > math.radians(self.p.odom_jump_dps)):
+                self.odom_jump = (f"odometry jumped {d:.2f} m / {math.degrees(dyaw):.0f} deg in {t - self.t_odom:.2f} s "
+                                  f"(a stack restart resets it)")
         self.odom, self.t_odom = (float(x), float(y), float(z), float(yaw)), float(t)
         if self.phase == "INIT":
             self.settle.append((float(t), self.odom))
             while self.settle and t - self.settle[0][0] > 2.0 * self.p.settle_s:
                 self.settle.pop(0)
 
-    def on_map_from_odom(self, t: float, T: Any) -> str | None:
+    def on_map_from_odom(self, t: float, T: Any, stamp: float | None = None) -> str | None:
         """map_align's corrected map <- odom (MAP_FROM_ODOM_TOPIC), used from the next tick on.
         Takes x, y and yaw; z stays INIT's (map_align corrects only those three, and this way a bad z
         can't move the flight height). Ignored until INIT has fixed its own, which map_align starts
-        from. map_align gates its own updates; the largest step is reported. Returns why a message
+        from, and if stamped before the latest INIT (computed against an older odom origin).
+        map_align gates its own updates; the largest step is reported. Returns why a message
         was ignored, or None if it was taken."""
         if self.T_map_odom is None:
             return "before INIT fixed map <- odom"
+        if stamp is not None and stamp < self.t_fixed:
+            return "stamped before the latest INIT"
         T = np.asarray(T, dtype=float)
         if T.shape != (4, 4) or not np.all(np.isfinite(T)):
             return "not a finite 4x4 transform"
@@ -176,7 +196,7 @@ class SkybetaMission:
             p = np.array([*self.odom[:3], 1.0])
             moved = round(float(np.linalg.norm((self.T_map_odom @ p - self.T_init @ p)[:2])), 3)
         return {"phase": self.phase, "why": self.why, "s_ref": round(self.s_ref, 2),
-                "length": round(float(self.path.length), 2), "map_from_odom": src,
+                "length": round(float(self.path.length), 2), "inits": self.n_init, "map_from_odom": src,
                 "corr_age_s": None if self.n_corr == 0 else round(t - self.t_corr, 2),
                 "corr_n": self.n_corr, "corr_step_max_m": round(self.corr_step_max_m, 3),
                 "corr_from_init_m": moved}
@@ -234,15 +254,31 @@ class SkybetaMission:
             return out
         fresh, why = self._fresh(t)
         st = self.state or {}
+        jump, self.odom_jump = self.odom_jump, None
+
+        if self.phase == "WAIT_OFFBOARD":
+            # Before take-off a lost or reset odometry means the stack may have restarted with a new
+            # origin, so INIT's map <- odom is no longer true: fix it again (still on the mark).
+            odom_lost = self.odom is None or t - self.t_odom > p.odom_stale_s
+            if jump or odom_lost:
+                self._set("INIT", f"{jump or 'odometry lost'} before take-off: re-fixing map <- odom", out)
+                self.T_map_odom = self.T_odom_map = self.T_init = None
+                self.n_corr, self.t_corr, self.corr_step_max_m = 0, -math.inf, 0.0
+                self.settle = [(self.t_odom, self.odom)] if (self.odom and jump) else []
 
         if self.phase == "INIT":
+            if jump:
+                self.settle = [(self.t_odom, self.odom)]
             if not fresh:
                 self.why = f"waiting: {why}"
+            elif st.get("landed") is not True:
+                self.why = "waiting: /skybeta/state doesn't report landed (map <- odom is fixed on the mark)"
             elif not self._settled(t):
                 self.why = f"waiting for the drone to sit still for {p.settle_s:.0f} s on the launch mark"
             else:
                 self._set_T(map_from_startup_odom(self.launch, self.odom))
                 self.T_init = self.T_map_odom.copy()
+                self.t_fixed, self.n_init = t, self.n_init + 1
                 out.map_from_odom_init = self.T_init.copy()
                 self._set("WAIT_OFFBOARD", "map <- odom fixed; streaming a hold at the current position", out)
             out.phase, out.why = self.phase, self.why
@@ -269,6 +305,8 @@ class SkybetaMission:
         # ---- active phases: abort first ------------------------------------------------
         if not fresh:
             return self._end("ABORTED", why, out, hold=True)
+        if jump:
+            return self._end("ABORTED", jump, out, hold=True)
         if self.phase == "DESCEND" and st.get("landed") is True and st.get("armed") is False:
             return self._end("DONE", "landed and disarmed", out, hold=False)
         if st.get("offboard_active") is not True:
