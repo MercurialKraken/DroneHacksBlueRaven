@@ -130,6 +130,94 @@ def test_the_rectification_maps_move_a_raw_pixel_where_the_calibration_says():
         assert abs(xs.mean() - want[0]) < 1.0 and abs(ys.mean() - want[1]) < 1.0
 
 
+# --- the real skybeta-09 calibration (arnav-claude's read-only checks, 2026-11-07) ----------------------------
+# Both CameraInfo: 1024x640, rational_polynomial with 14 zero coefficients, R = I. The baseline sits on the LEFT P
+# (P_left[0,3] = -48.381 -> 75.3 mm) and P_right[0,3] = 0 (reversed from ROS), and cy differs by 21 px: CameraInfo is
+# no rectification. The static TF holds the factory extrinsic: tf2_echo oak_left_camera_optical_frame
+# oak_right_camera_optical_frame (the right camera expressed in the left) = t [0.075, -0.001, -0.002] m,
+# RPY [0.325, -0.338, 0.207] deg.
+SKY_KL = [642.443, 0, 502.110, 0, 642.161, 309.373, 0, 0, 1]
+SKY_KR = [639.476, 0, 510.784, 0, 639.036, 330.313, 0, 0, 1]
+SKY_L = CameraModel.from_lists(1024, 640, SKY_KL, [0.0] * 14, [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                               [642.443, 0, 502.110, -48.381, 0, 642.161, 309.373, 0, 0, 0, 1, 0],
+                               "rational_polynomial", "oak_left_camera_optical_frame")
+SKY_R = CameraModel.from_lists(1024, 640, SKY_KR, [0.0] * 14, [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                               [639.476, 0, 510.784, 0, 0, 639.036, 330.313, 0, 0, 0, 1, 0],
+                               "rational_polynomial", "oak_right_camera_optical_frame")
+
+
+def skybeta_extrinsic():
+    """TF left <- right (as tf2_echo printed it) -> X_right = R_rl X_left + t_rl, what the node looks up."""
+    r, p, y = (math.radians(v) for v in (0.325, -0.338, 0.207))
+    Rx = np.array([[1, 0, 0], [0, math.cos(r), -math.sin(r)], [0, math.sin(r), math.cos(r)]])
+    Ry = np.array([[math.cos(p), 0, math.sin(p)], [0, 1, 0], [-math.sin(p), 0, math.cos(p)]])
+    Rz = np.array([[math.cos(y), -math.sin(y), 0], [math.sin(y), math.cos(y), 0], [0, 0, 1]])
+    R_lr = Rz @ Ry @ Rx                                       # tf2 RPY: fixed-axis roll, pitch, yaw
+    t_lr = np.array([0.075, -0.001, -0.002])
+    return R_lr.T, -R_lr.T @ t_lr
+
+
+def test_skybeta_camera_info_is_not_taken_as_a_rectification():
+    R_rl, t_rl = skybeta_extrinsic()
+    with pytest.raises(ValueError):                           # without the extrinsic it must refuse, not guess
+        StereoRectifier(SKY_L, SKY_R, scale=0.5)
+    r = StereoRectifier(SKY_L, SKY_R, scale=0.5, R_rl=R_rl, t_rl=t_rl)
+    assert r.source == "stereoRectify" and not r.identity
+    assert r.baseline_m == pytest.approx(0.07503, abs=2e-4)
+
+
+def test_skybeta_rectified_rows_line_up():
+    """Points seen by both real cameras land on the same rectified row, with the disparity their depth implies;
+    unrectified, the same points sit tens of pixels apart vertically (cy gap + the factory rotation)."""
+    R_rl, t_rl = skybeta_extrinsic()
+    r = StereoRectifier(SKY_L, SKY_R, scale=0.5, R_rl=R_rl, t_rl=t_rl)
+    Ls, Rs = SKY_L.scaled(0.5), SKY_R.scaled(0.5)
+    rng = np.random.default_rng(5)
+    X = np.column_stack([rng.uniform(-1.2, 1.2, 80), rng.uniform(-0.7, 0.7, 80), rng.uniform(0.6, 4.0, 80)])
+    ul = cv2.projectPoints(X, np.zeros(3), np.zeros(3), Ls.K, None)[0].reshape(-1, 2)
+    ur = cv2.projectPoints(X, cv2.Rodrigues(R_rl)[0], t_rl, Rs.K, None)[0].reshape(-1, 2)
+    assert np.abs(ul[:, 1] - ur[:, 1]).max() > 8.0              # raw rows disagree (half resolution)
+    rl = cv2.undistortPoints(ul.reshape(-1, 1, 2), Ls.K, None, R=r.R1, P=r.P1).reshape(-1, 2)
+    rr = cv2.undistortPoints(ur.reshape(-1, 1, 2), Rs.K, None, R=r.R2, P=r.P2).reshape(-1, 2)
+    assert np.abs(rl[:, 1] - rr[:, 1]).max() < 0.05
+    z_rect = (X @ r.R1.T)[:, 2]
+    assert np.abs((rl[:, 0] - rr[:, 0]) - r.f * r.baseline_m / z_rect).max() < 0.05
+
+
+@pytest.mark.parametrize("z_true", [1.0, 2.0, 3.0])
+def test_skybeta_textured_plane(z_true):
+    """End to end with the real calibration: un-rectify a synthetic pair into raw skybeta images, recover depth."""
+    R_rl, t_rl = skybeta_extrinsic()
+    pipe = StereoDepthPipeline(SKY_L, SKY_R, scale=0.5, R_rl=R_rl, t_rl=t_rl)
+    r = pipe.rect
+    w, h = r.size
+    left_rect = texture(h, w, seed=11)
+    right_rect = shift(left_rect, r.f * r.baseline_m / z_true)
+
+    def unrectify(rect_img, cam, Rr, Pr):
+        cs = cam.scaled(0.5)
+        us, vs = np.meshgrid(np.arange(cs.width, dtype=np.float32), np.arange(cs.height, dtype=np.float32))
+        pts = np.stack([us.ravel(), vs.ravel()], 1).reshape(-1, 1, 2)
+        m = cv2.undistortPoints(pts, cs.K, None, R=Rr, P=Pr).reshape(cs.height, cs.width, 2).astype(np.float32)
+        return cv2.remap(rect_img, m[..., 0], m[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+    raw_l = cv2.resize(unrectify(left_rect, SKY_L, r.R1, r.P1), (1024, 640), interpolation=cv2.INTER_LINEAR)
+    raw_r = cv2.resize(unrectify(right_rect, SKY_R, r.R2, r.P2), (1024, 640), interpolation=cv2.INTER_LINEAR)
+    z = pipe(raw_l, raw_r)
+    roi = z[h // 4:3 * h // 4, w // 3:2 * w // 3]
+    assert np.isfinite(roi).mean() > 0.8
+    fB = r.f * r.baseline_m
+    assert abs(fB / np.nanmedian(roi) - fB / z_true) < 0.25
+
+
+def test_baseline_check():
+    from onboard.depth.stereo_depth import check_baseline
+    assert check_baseline(0.0753, 0.075, 0.01) is None
+    assert "0.000" in check_baseline(0.0, 0.075, 0.01)
+    assert check_baseline(0.12, 0.075, 0.01) is not None
+    assert check_baseline(0.12, 0.0, 0.01) is None                  # 0 disables the check
+
+
 # --- depth ---------------------------------------------------------------------------------------------------
 
 def test_disparity_to_depth_and_its_limits():

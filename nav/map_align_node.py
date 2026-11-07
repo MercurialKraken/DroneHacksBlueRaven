@@ -55,6 +55,11 @@ from nav.map_kf import KalmanCorrector, KfParams
 from nav.pose_buffer import ClockMap, PoseBuffer, enu_flu_to_ned_frd_wxyz
 from refnav import depth as D
 
+try:        # the shared names (chelsea-claude's nav/frames.py on chelsea/course-map); identical literals until merged
+    from nav.frames import MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC
+except ImportError:
+    MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC = "map", "/blueraven/map_from_odom_init", "/blueraven/map_from_odom"
+
 ROOT = Path(__file__).resolve().parents[1]
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -87,7 +92,7 @@ class MapAlignNode(Node):
         self.filter = str(p("filter", "kf"))
         # drone mode: the skybeta adapter's latched INIT map <- odom (chelsea-claude's interface, agreed on the bus);
         # "" = compute it here from launch_key and the first odometry pose
-        self.init_topic = str(p("init_topic", "/blueraven/map_from_odom_init" if self.source == "odometry" else ""))
+        self.init_topic = str(p("init_topic", MAP_FROM_ODOM_INIT_TOPIC if self.source == "odometry" else ""))
         launch_key = str(p("launch_key", ""))
         if not launch_key and not (self.source == "odometry" and self.init_topic):
             raise ValueError("launch_key is required (launch_sim in the sims, launch on the drone)")
@@ -114,7 +119,7 @@ class MapAlignNode(Node):
             self.create_subscription(Odometry, p("odom_topic", "/visual_slam/tracking/odometry"), self._on_odom, qos_profile_sensor_data)
             if self.init_topic:
                 self.create_subscription(PoseStamped, self.init_topic, self._on_init, LATCHED)
-            self.pub = self.create_publisher(PoseStamped, "/blueraven/map_from_odom", 10)
+            self.pub = self.create_publisher(PoseStamped, MAP_FROM_ODOM_TOPIC, 10)
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
         self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         self.pub_status = self.create_publisher(String, "/blueraven/odom_correction/status", 10)
@@ -240,7 +245,7 @@ class MapAlignNode(Node):
             ps.pose.orientation.w, ps.pose.orientation.z = math.cos(yawC / 2), math.sin(yawC / 2)
             corr = {"frame": "px4_local_ned", "x": round(xC, 4), "y": round(yC, 4), "yaw_deg": round(math.degrees(yawC), 3)}
         else:
-            ps.header.frame_id = "map"
+            ps.header.frame_id = MAP_FRAME
             ps.pose.position.x, ps.pose.position.y = float(T.x), float(T.y)
             ps.pose.orientation.w, ps.pose.orientation.z = math.cos(T.yaw / 2), math.sin(T.yaw / 2)
             corr = {"frame": "map", "map_odom": {"x": round(T.x, 4), "y": round(T.y, 4), "yaw_deg": round(math.degrees(T.yaw), 3)}}

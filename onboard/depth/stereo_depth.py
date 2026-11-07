@@ -155,6 +155,15 @@ class StereoRectifier:
         return quat_xyzw(self.R1.T)
 
 
+def check_baseline(baseline_m: float, expected_m: float, tol_m: float) -> str | None:
+    """None if the derived baseline is plausible, else why not (the node then refuses to start).
+    expected_m = 0 disables the check. The OAK on skybeta-09 is 75.3 mm; the T4 sim's is 75.7 mm."""
+    if expected_m <= 0 or abs(baseline_m - expected_m) <= tol_m:
+        return None
+    return (f"derived stereo baseline {baseline_m:.3f} m is not {expected_m:.3f} +- {tol_m:.3f} m: "
+            "wrong extrinsic or calibration source; refusing to publish depth")
+
+
 def quat_xyzw(R: np.ndarray) -> tuple[float, float, float, float]:
     R = np.asarray(R, float)
     tr = R[0, 0] + R[1, 1] + R[2, 2]

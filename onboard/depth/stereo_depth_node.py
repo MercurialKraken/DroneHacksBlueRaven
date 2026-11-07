@@ -17,6 +17,7 @@ right <- left extrinsic is read once from TF (both frames must be REP-103 optica
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 
@@ -30,7 +31,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, StaticTransformBroadcaster, TransformListener
 
-from onboard.depth.stereo_depth import CameraModel, DepthParams, StereoDepthPipeline, to_16uc1, to_gray
+from onboard.depth.stereo_depth import CameraModel, DepthParams, StereoDepthPipeline, check_baseline, to_16uc1, to_gray
 
 
 def _model(m: CameraInfo) -> CameraModel:
@@ -60,6 +61,10 @@ class StereoDepthNode(Node):
             raise ValueError("encoding must be 16UC1 or 32FC1")
         self.sync_tol_ns = int(float(p("sync_tol_s", 0.003)) * 1e9)
         self.out_frame_param = str(p("out_frame", ""))
+        # refuse to publish unless the derived baseline is about this (skybeta-09 OAK: 75.3 mm; T4 sim: 75.7 mm)
+        self.expected_baseline_m = float(p("expected_baseline_m", 0.075))
+        self.baseline_tol_m = float(p("baseline_tol_m", 0.01))
+        self.refused: str | None = None
         self.pipe: StereoDepthPipeline | None = None
         self.out_frame = ""
         self.infos: dict[str, CameraInfo] = {}
@@ -127,7 +132,17 @@ class StereoDepthNode(Node):
                 return False
             q, t = tf.transform.rotation, tf.transform.translation
             R_rl, t_rl = _quat_to_mat(q.x, q.y, q.z, q.w), np.array([t.x, t.y, t.z])
-        self.pipe = StereoDepthPipeline(L, R, self.scale, self.params, R_rl, t_rl)
+            rv = np.degrees(np.array([math.atan2(R_rl[2, 1], R_rl[2, 2]), -math.asin(max(-1.0, min(1.0, R_rl[2, 0]))),
+                                      math.atan2(R_rl[1, 0], R_rl[0, 0])]))
+            self.get_logger().info(f"extrinsic from TF {R.frame_id} <- {L.frame_id}: t = ({t.x:.4f}, {t.y:.4f}, {t.z:.4f}) m, "
+                                   f"rpy = ({rv[0]:.3f}, {rv[1]:.3f}, {rv[2]:.3f}) deg")
+        pipe = StereoDepthPipeline(L, R, self.scale, self.params, R_rl, t_rl)
+        why = check_baseline(pipe.rect.baseline_m, self.expected_baseline_m, self.baseline_tol_m)
+        if why:
+            self.refused = why
+            self.get_logger().error(why)
+            return False
+        self.pipe = pipe
         r = self.pipe.rect
         self.out_frame = L.frame_id if r.identity else (self.out_frame_param or f"{L.frame_id}_rect")
         if not r.identity:
@@ -173,6 +188,8 @@ class StereoDepthNode(Node):
                 self._error(f"stereo depth failed: {type(e).__name__}: {e}")
 
     def _process(self, left: Image, right: Image) -> None:
+        if self.refused:
+            return                                     # wrong calibration: never publish (logged once, in status)
         if self.pipe is None and not self._setup():
             return
         t0 = time.perf_counter()
@@ -217,7 +234,8 @@ class StereoDepthNode(Node):
         s = dict(ok=self.pipe is not None and bool(pubs), rate_hz=round(rate, 2), proc_ms_median=pct(pm, 50),
                  proc_ms_p95=pct(pm, 95), latency_ms_median=pct(lm, 50), latency_ms_p95=pct(lm, 95),
                  valid_frac=round(float(np.mean(vf)), 3) if vf else None, frame=self.out_frame, **st,
-                 last_error=self.last_error or None)
+                 last_error=self.last_error or None, refused=self.refused,
+                 baseline_m=round(self.pipe.rect.baseline_m, 5) if self.pipe else None)
         self.pub_status.publish(String(data=json.dumps(s)))
 
     def destroy_node(self) -> None:
