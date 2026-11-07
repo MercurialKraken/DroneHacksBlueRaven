@@ -52,7 +52,10 @@ AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold")
 @dataclass
 class Params:
     route: list[tuple[float, float]] = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
-    leg_yaw_off_deg: list = field(default_factory=lambda: [0.0])  # per leg: camera looks this many deg right (+) / left (-) of travel
+    # Per leg: camera looks this many deg right (+) / left (-) of travel. Depth checks stay on the travel
+    # direction. A right offset moves the corridor into the left image columns, where stereo returns no
+    # depth (columns < 80 of 640 in run_0613), so it lowers corridor coverage; see test_a_right_camera_offset...
+    leg_yaw_off_deg: list[float] = field(default_factory=lambda: [0.0])
     height_m: float = 1.2
     speed_mps: float = 0.6
     lead_max_m: float = 1.0                     # the carrot never leads the aircraft by more
@@ -185,6 +188,7 @@ class Mission:
         self.leg_dir: tuple[float, float] | None = None
         self.leg_len: float = 0.0
         self.leg_heading: float = 0.0
+        self.leg_yaw: float = 0.0                   # heading held on this leg: leg_heading + its camera offset
         self.s: float = 0.0
         self.counts: dict[str, int] = {"depth_frames": 0, "obstacle_stops": 0, "depth_holds": 0, "unconfirmed_obstacles": 0,
                        "depth_unusable": 0, "depth_future": 0, "depth_stale": 0, "depth_out_of_order": 0,

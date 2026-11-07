@@ -472,3 +472,70 @@ def test_too_little_depth_never_arms_and_says_how_much_there_was() -> None:
 def test_no_depth_at_all_is_said_as_such() -> None:
     m, px4, log = fly(C.Params(route=[], wait_s=5.0), depth_on=lambda t: False, seconds=10.0)
     assert m.result == "refused: waiting for live depth: no depth frame has arrived after 5 s", m.result
+
+
+# ---- per-leg camera offset (leg_yaw_off_deg)
+def _offset_flight(offsets: list[float]) -> C.Params:
+    return C.Params(route=[(3.0, 0.0)], leg_yaw_off_deg=offsets, height_m=1.0, hover_s=0.0)
+
+
+def _start_leg(p: C.Params) -> C.Mission:
+    m = C.Mission(p)
+    m.sp, m.targets = [0.0, 0.0, -1.0, 0.0], [(n, -l) for n, l in p.route]
+    m._next_leg(0.0, C.Output("hover"), C.Vehicle())
+    return m
+
+
+def test_a_camera_offset_turns_the_camera_but_not_the_leg() -> None:
+    m = _start_leg(_offset_flight([30.0]))
+    assert m.leg_heading == pytest.approx(0.0)
+    assert m.leg_yaw == pytest.approx(math.radians(30.0))     # positive = right: NED yaw
+
+
+def test_the_turn_ends_at_the_offset_heading() -> None:
+    m = _start_leg(_offset_flight([20.0]))
+    v = C.Vehicle(pos=(0.0, 0.0, -1.0), heading=0.0, pos_ok=True, armed=True, nav_state=C.NAV_OFFBOARD, landed=False)
+    m.health.on_msg(0.0, True)
+    t = 0.0
+    while m.phase == "turn" and t < 10.0:
+        t += 0.05
+        m.health.on_msg(t, True)
+        m.depth_t = t
+        v.heading = m.sp[3]
+        m.step(t, v)
+    assert m.phase == "check"
+    assert m.sp[3] == pytest.approx(math.radians(20.0), abs=1e-3)
+
+
+def test_a_leg_past_the_end_of_the_offset_list_has_no_offset() -> None:
+    m = _start_leg(_offset_flight([]))
+    assert m.leg_yaw == pytest.approx(m.leg_heading)
+
+
+def test_depth_is_judged_along_travel_not_along_the_camera() -> None:
+    # a wall across the leg 1 m ahead; the camera looks 20 deg right of it and still reports the leg blocked
+    wall = [(0, 1.0, -5.0, 5.0)]
+    yaw = math.radians(20.0)
+    d = render_depth((0.0, 0.0, -1.0), yaw, wall)
+    f = D.DepthFrame(d, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q_yaw(yaw)), stride=2, border_px=2)
+    clr = D.clearance(f.points(), -yaw, 0.3, 0.4, 3)
+    assert clr == pytest.approx(1.0, abs=0.1)
+
+
+def _coverage_with_dead_left_columns(offset_deg: float, dead_px: int = 20) -> float:
+    """A wall fills the view; the leftmost columns return nothing, as stereo does (no match in the other eye)."""
+    yaw = math.radians(offset_deg)
+    d = render_depth((0.0, 0.0, -1.0), yaw, [(0, 4.0, -20.0, 20.0)])
+    d[:, :dead_px] = np.nan
+    f = D.DepthFrame(d, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q_yaw(yaw)), stride=2, border_px=2)
+    return f.corridor_coverage(-yaw, 0.25, 0.4, 0.8)[0]
+
+
+def test_a_right_camera_offset_loses_coverage_to_the_left_stereo_dead_band() -> None:
+    # run_0613: 30 deg right put 27 % of the corridor in dead columns; coverage sat at 0.55, under the 0.6 gate
+    def loss(offset_deg: float) -> float:
+        return _coverage_with_dead_left_columns(offset_deg, 0) - _coverage_with_dead_left_columns(offset_deg)
+
+    assert loss(0.0) == pytest.approx(0.0)        # straight ahead the dead columns are out of the corridor
+    assert loss(-30.0) == pytest.approx(0.0)      # a left offset moves the corridor away from them
+    assert loss(30.0) > 0.1
