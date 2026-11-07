@@ -10,7 +10,7 @@ The optional workbench Run button captures this project for managed
 recording and grading. Plain Python does not call the lab API or create a Run.
 Read onboard/README.md for perception bringup and native ROS examples.
 """
-HEIGHT_M = 0.8      # metres above the take-off point
+HEIGHT_M = 0.7      # metres above the take-off point
 HOVER_S = 2.0       # seconds to hold at that height before landing
 MAP_ALIGN = True    # run nav/map_align_node beside the flight: corrects drift by aligning depth to the course map
 
