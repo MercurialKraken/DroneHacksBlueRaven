@@ -21,25 +21,44 @@ def test_fillet_path_is_continuous_and_cuts_the_corner_by_the_arc() -> None:
     assert p.k.max() == pytest.approx(1 / 0.4)                  # right turn in NED is +
 
 
-def test_no_room_for_an_arc_is_a_sharp_corner_with_zero_speed() -> None:
-    p = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.0)
-    assert p.corners == [pytest.approx(1.0)]
-    v = F.speed_profile(p, 0.5, math.radians(45), 0.5, 0.5, 0.5)
-    assert v[p.index(1.0)] == 0.0 and v[0] == 0.0 and v[-1] == 0.0
+def test_a_corner_with_little_room_is_a_tight_arc_flown_slowly() -> None:
+    p = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.05)
+    assert np.isfinite(p.k).all() and p.k.max() == pytest.approx(1 / 0.05)
+    assert np.degrees(np.abs(F.wrap(np.diff(p.psi)))).max() < 25.0
+    v = F.speed_profile(p, 0.5, math.radians(45), 0.5, 0.5)
+    assert v[p.index(1.0)] <= math.radians(45) * 0.05 + 1e-9 and v[0] == 0.0 and v[-1] == 0.0
 
 
-def test_speed_respects_turn_rate_and_braking() -> None:
+def test_the_speed_profile_keeps_every_bound() -> None:
     p = F.fillet_path(U_TURN, 0.5)
-    v = F.speed_profile(p, 0.6, math.radians(45), 0.5, 0.5, 0.3)
-    arc = np.abs(p.k) > 0                                          # arc samples, 0.5 m radius
-    mid = arc & np.roll(arc, 6) & np.roll(arc, -6)                 # away from the ends, where speed blends in
-    assert (v[mid] <= math.radians(45) * 0.5 + 1e-6).all()
-    dv2 = np.diff(v ** 2) / F.STEP_M
-    assert dv2.min() >= -2 * 0.3 - 1e-9 and dv2.max() <= 2 * 0.5 + 1e-9
+    v = F.speed_profile(p, 0.6, math.radians(45), 0.5, 0.3)
+    k = np.abs(p.k)
+    assert v.max() <= 0.6 + 1e-9 and v[0] == 0.0 and v[-1] == 0.0
+    assert (v * k <= math.radians(45) + 1e-9).all() and (v * v * k <= 0.5 + 1e-9).all()
+    assert (np.abs(np.diff(v ** 2)) / np.diff(p.s) <= 2 * 0.3 + 1e-6).all()
+
+
+def test_the_speed_profile_changes_acceleration_smoothly_for_little_time() -> None:
+    """Against the bang-bang profile (full acceleration, then full braking): far less jerk, little more time."""
+    p = F.fillet_path(U_TURN, 0.5)
+    v = F.speed_profile(p, 0.6, math.radians(45), 0.5, 0.3)
+    top = np.minimum(0.6, np.sqrt(np.divide(math.radians(45) ** 2, p.k ** 2, out=np.full(len(p.k), np.inf), where=p.k != 0)))
+    top = np.minimum(top, np.sqrt(np.divide(0.5, np.abs(p.k), out=np.full(len(p.k), np.inf), where=p.k != 0)))
+    top[[0, -1]] = 0.0
+    bang = np.sqrt(F._accel_limit(top ** 2, F.STEP_M, 0.3))
+
+    def jerk_and_time(v):
+        ds = np.diff(p.s)
+        a = np.diff(v ** 2) / (2 * ds)
+        vm = (v[1:] + v[:-1]) / 2
+        return np.abs(np.diff(a) / ds[1:] * vm[1:]).max(), np.sum(ds / np.maximum(vm, F.MIN_SPEED))
+    (j, t), (j0, t0) = jerk_and_time(v), jerk_and_time(bang)
+    assert j < j0 / 4, (j, j0)
+    assert t < t0 * 1.1, (t, t0)
 
 
 def _follower(path):
-    v = F.speed_profile(path, 0.5, math.radians(45), 0.5, 0.5, 0.5)
+    v = F.speed_profile(path, 0.5, math.radians(45), 0.5, 0.5)
     lim = F.Limits(accel=0.5, look_min=0.3, look_s=1.5, look_max=1.2, face_tol=math.radians(8), yaw_slow=math.radians(35),
                    xtrack_slow=0.12, xtrack_stop=0.35, end_tol=0.15)
     return F.Follower(path, v, lim, [])
@@ -80,15 +99,16 @@ def test_the_projection_window_never_jumps_to_the_parallel_corridor() -> None:
     assert fol.s_hat < 2.0
 
 
-def test_the_reference_waits_at_a_sharp_corner_until_the_nose_faces_the_next_leg() -> None:
-    path = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.0)
+def test_the_reference_waits_at_a_tight_corner_until_the_nose_turns() -> None:
+    path = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.05)
     fol = _follower(path)
-    fol.s_ref = fol.s_hat = 1.0
-    c = fol.step((1.0, 0.0), (0.0, 0.0), 0.0, 0.1, math.inf)   # facing north, the next leg goes east
-    assert fol.s_ref == pytest.approx(1.0) and c.scale == 0.0
-    assert c.yaw == pytest.approx(math.pi / 2, abs=0.05)        # but it is told to turn east
-    fol.step((1.0, 0.0), (0.0, 0.0), math.pi / 2, 0.1, math.inf)
-    assert fol.s_ref > 1.0
+    fol.s_ref = fol.s_hat = 0.95                                # where the arc starts
+    c = fol.step((0.95, 0.0), (0.0, 0.0), 0.0, 0.1, math.inf)  # facing north, the path turns east
+    held = fol.s_ref
+    assert c.scale == 0.0 and held <= 0.95 + F.LEAD_M + 1e-9   # only the lead ahead of the aircraft
+    assert c.yaw > math.radians(60)                             # but it is told to turn east
+    c = fol.step((0.95, 0.0), (0.0, 0.0), c.yaw, 0.1, math.inf)
+    assert c.scale == 1.0 and fol.s_ref > held
 
 
 def test_the_reference_never_passes_the_observed_free_space() -> None:
@@ -146,12 +166,3 @@ def test_a_drift_correction_moves_the_flown_track_not_the_path() -> None:
     m, px4, log = fly(C.Params(route=ROUTE), on_tick=lambda t, m: m.on_correction(t, 0.0, 0.3, 0.0))
     assert m.result == "complete", (m.result, m.why)
     assert px4.pos[1] == pytest.approx(-3.0 - 0.3, abs=0.15)
-
-
-def test_a_small_kink_is_flown_through_slowly_not_stopped_at() -> None:
-    p = F.fillet_path([(0, 0), (1, 0), (2, 0.07)], 0.0)            # a 4 deg kink with no room for an arc
-    assert p.corners == []
-    v = F.speed_profile(p, 0.5, math.radians(45), 0.5, 0.5, 0.5)
-    assert v[p.index(1.0)] > 0.1
-    q = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.0)               # a 90 deg corner still stops and turns
-    assert q.corners == [pytest.approx(1.0)]

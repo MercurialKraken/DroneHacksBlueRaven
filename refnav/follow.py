@@ -1,9 +1,9 @@
 """Continuous path following. PURE (numpy only), no clock reads.
 
-A smooth path (fillet arcs at corners) carries a speed profile. Each tick a reference point slides along it at the
-profile speed, never past the space depth has observed free, and the nose faces a look point further along. The
-lookahead grows with the speed the aircraft is making while on track and shrinks for turns, cross-track error and
-estimator doubt. Sharp corners (no room for an arc) are a stop and turn in place.
+A smooth path (fillet arcs at corners, or a map-optimised curve) carries a speed profile. Each tick a reference point
+slides along it at the profile speed, never past the space depth has observed free, and the nose faces a look point
+further along. The lookahead grows with the speed the aircraft is making while on track and shrinks for turns,
+cross-track error and estimator doubt; a heading error beyond face_tol slows the reference until the nose catches up.
 Frame: the mission's NED, x north, y east, psi the NED yaw of the tangent, k signed curvature (+ right).
 """
 from __future__ import annotations
@@ -17,8 +17,8 @@ STEP_M = 0.02           # path sample spacing
 MIN_SPEED = 0.05        # the reference creeps at least this fast when allowed to move, so v=0 samples never stall it
 PROJECT_BACK_M = 0.25   # the aircraft is matched to the path only this far behind its last match...
 PROJECT_AHEAD_M = 0.25  # ...or ahead of the reference, so a U-turn never jumps to the parallel corridor
-TURN_WINDOW_M = 0.2    # speed in turns is set by the heading change over this much path
-KINK_RAD = math.radians(30)  # a sharp corner turning less than this is flown through, as a curve of the same turn
+SPEED_GRID_M = 0.05     # the speed profile is solved on nodes this far apart
+JERK_WEIGHT = 1.0       # flight time (s) traded for each (m/s3)^2 s of squared jerk
 LEAD_M, LEAD_MAX_M = 0.03, 0.10  # the reference leads the aircraft by this much: further ahead, PX4's position gain
                                  # pulls straight at it, cutting corners and adding speed the profile never planned
 
@@ -57,8 +57,7 @@ class Path:
     x: np.ndarray
     y: np.ndarray
     psi: np.ndarray
-    k: np.ndarray               # inf at a sharp corner
-    corners: list[float]        # s of every sharp corner
+    k: np.ndarray
     clearance: np.ndarray | None = None   # distance to the nearest mapped surface at each sample, if a map built it
 
     @property
@@ -84,28 +83,13 @@ class Path:
         return np.round(np.stack([self.x[::every], self.y[::every]], 1), 3).tolist()
 
 
-def soften_kinks(s: np.ndarray, psi: np.ndarray, k: np.ndarray) -> tuple[np.ndarray, list[float]]:
-    """Sharp samples (k = inf) that turn less than KINK_RAD get the curvature of their turn over one sample,
-    so speed_profile slows for them instead of stopping. -> (k, s of the corners that stay sharp)."""
-    k, sharp = k.copy(), []
-    for i in np.flatnonzero(~np.isfinite(k)):
-        turn = float(wrap(psi[min(i + 1, len(psi) - 1)] - psi[max(i - 1, 0)]))
-        ds = max(float(s[min(i + 1, len(s) - 1)] - s[max(i - 1, 0)]), 2 * STEP_M)   # samples can bunch at a corner
-        if abs(turn) < KINK_RAD:
-            k[i] = turn / ds
-        else:
-            sharp.append(float(s[i]))
-    return k, sharp
-
-
-def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: float = 0.05) -> Path:
-    """Straight legs joined by arcs of up to `radius`, each using at most half of either adjacent leg. A corner with
-    no room for an arc of min_radius stays sharp."""
+def fillet_path(corners: list[tuple[float, float]], radius: float) -> Path:
+    """Straight legs joined by arcs of up to `radius`, each using at most half of either adjacent leg."""
     P = [np.asarray(c, float) for c in corners]
     P = [p for i, p in enumerate(P) if i == 0 or np.hypot(*(p - P[i - 1])) > 1e-6]
     if len(P) < 2:
         raise ValueError("a path needs two distinct points")
-    pieces, start, sharp_after = [], P[0], set()        # ("line", a, b) | ("arc", centre, r, start_angle, sweep)
+    pieces, start = [], P[0]                            # ("line", a, b) | ("arc", centre, r, start_angle, sweep)
     for i in range(1, len(P) - 1):
         u1 = (P[i] - P[i - 1]) / np.hypot(*(P[i] - P[i - 1]))
         u2 = (P[i + 1] - P[i]) / np.hypot(*(P[i + 1] - P[i]))
@@ -113,12 +97,7 @@ def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: f
         if abs(turn) < 1e-3:
             continue
         room = 0.5 * min(np.hypot(*(P[i] - P[i - 1])), np.hypot(*(P[i + 1] - P[i])))
-        r = min(radius, room / math.tan(abs(turn) / 2.0)) if abs(turn) < math.pi - 1e-3 else 0.0
-        if r < min_radius:
-            pieces.append(("line", start, P[i]))
-            sharp_after.add(len(pieces) - 1)
-            start = P[i]
-            continue
+        r = min(radius, room / math.tan(abs(turn) / 2.0))
         t = r * math.tan(abs(turn) / 2.0)
         a, b = P[i] - u1 * t, P[i] + u2 * t
         c = a + np.array([-u1[1], u1[0]]) * math.copysign(r, turn)          # the centre is on the inside of the turn
@@ -126,8 +105,8 @@ def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: f
         start = b
     pieces.append(("line", start, P[-1]))
 
-    xs, ys, ps, ks, ds, sharp_n = [], [], [], [], [], []
-    for n, pc in enumerate(pieces):
+    xs, ys, ps, ks, ds = [], [], [], [], []
+    for pc in pieces:
         if pc[0] == "line":
             _, a, b = pc
             L = float(np.hypot(*(b - a)))
@@ -144,40 +123,76 @@ def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: f
             xs.append(c[0] + r * np.cos(th)); ys.append(c[1] + r * np.sin(th))
             ps.append(th + math.copysign(math.pi / 2, sweep)); ks.append(np.full(m, math.copysign(1.0 / r, sweep)))
             ds.append(np.full(m, abs(sweep) * r / m))
-        if n in sharp_after:
-            sharp_n.append(sum(len(d) for d in ds))     # the sample at the corner point starts the next piece
     xs.append([P[-1][0]]); ys.append([P[-1][1]]); ps.append([ps[-1][-1]]); ks.append([0.0])
     s = np.concatenate([[0.0], np.cumsum(np.concatenate(ds))])
-    k = np.concatenate(ks)
-    k[[min(i, len(k) - 1) for i in sharp_n]] = math.inf
-    psi = wrap(np.concatenate(ps))
-    k, sharp = soften_kinks(s, psi, k)
-    return Path(s, np.concatenate(xs), np.concatenate(ys), psi, k, sharp)
+    return Path(s, np.concatenate(xs), np.concatenate(ys), wrap(np.concatenate(ps)), np.concatenate(ks))
 
 
-def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, a_acc: float, a_brake: float,
+def polyline_path(x: np.ndarray, y: np.ndarray) -> Path:
+    """A Path along a dense, smooth polyline: curvature of the circle through each three neighbours, heading along
+    the chord across each point, resampled every STEP_M."""
+    P = np.stack([x, y], 1)
+    a, b, c = P[:-2], P[1:-1], P[2:]
+    cross = (b - a)[:, 0] * (c - b)[:, 1] - (b - a)[:, 1] * (c - b)[:, 0]
+    k = 2.0 * cross / np.prod([np.hypot(*(q - p).T) for p, q in ((a, b), (b, c), (a, c))], axis=0)
+    k = np.r_[k[0], k, k[-1]]
+    d = np.vstack([P[1] - P[0], c - a, P[-1] - P[-2]])
+    psi = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    s0 = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
+    s = np.linspace(0.0, s0[-1], math.ceil(s0[-1] / STEP_M) + 1)
+    return Path(s, np.interp(s, s0, x), np.interp(s, s0, y), wrap(np.interp(s, s0, psi)), np.interp(s, s0, k))
+
+
+def _accel_limit(u: np.ndarray, ds: float, accel: float) -> np.ndarray:
+    """The largest v^2 profile under u that speeds up and brakes within accel: a backward then a forward pass."""
+    u = u.copy()
+    for i in range(len(u) - 2, -1, -1):
+        u[i] = min(u[i], u[i + 1] + 2.0 * accel * ds)
+    for i in range(1, len(u)):
+        u[i] = min(u[i], u[i - 1] + 2.0 * accel * ds)
+    return u
+
+
+def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, accel: float,
                   tight: tuple[float, float, float] | None = None) -> np.ndarray:
-    """Fastest speed at each sample: turn rate and lateral acceleration on curves, zero at sharp corners and the ends,
-    then limited by braking (backward pass) and speeding up (forward pass)."""
-    # the turn over the next few cm, not one sample's curvature: a 1 cm arc turning 12 deg is a gentle kink
-    psi_u = np.unwrap(path.psi)
-    lo, hi = np.searchsorted(path.s, path.s - TURN_WINDOW_M / 2), np.searchsorted(path.s, path.s + TURN_WINDOW_M / 2)
-    hi = np.minimum(hi, len(path.s) - 1)
-    k = np.abs(psi_u[hi] - psi_u[lo]) / np.maximum(path.s[hi] - path.s[lo], STEP_M)
+    """Speed at each sample: as fast as it can be with smooth acceleration, within v_max, the turn rate and lateral
+    acceleration of the curvature, a crawl where the mapped clearance is short, accel along the path and 0 at both
+    ends. tight = (clearance at which to crawl, at which full speed is allowed, crawl speed).
+
+    On nodes SPEED_GRID_M apart u = v^2 solves, by ADMM,  min -g.u + JERK_WEIGHT * integral(jerk^2 dt)  within the
+    bounds, where g = d(flight time)/du at the fastest feasible profile: slowing where it is already slow costs most."""
+    k = np.abs(path.k)
     with np.errstate(divide="ignore"):
         v = np.minimum.reduce([np.full(len(k), v_max), yaw_rate / k, np.sqrt(a_lat / k)])
-    if tight is not None and path.clearance is not None:     # (clearance at which to crawl, at which full speed, crawl speed)
+    if tight is not None and path.clearance is not None:
         lo, hi, crawl = tight
         f = np.clip((path.clearance - lo) / (hi - lo), 0.0, 1.0)
         v = np.minimum(v, np.where(np.isfinite(path.clearance), crawl + f * (v_max - crawl), v_max))
-    v[path.index(np.asarray(path.corners))] = 0.0 if path.corners else v[0]
-    v[0] = v[-1] = 0.0
-    ds = np.diff(path.s)
-    for i in range(len(v) - 2, -1, -1):
-        v[i] = min(v[i], math.sqrt(v[i + 1] ** 2 + 2.0 * a_brake * ds[i]))
-    for i in range(1, len(v)):
-        v[i] = min(v[i], math.sqrt(v[i - 1] ** 2 + 2.0 * a_acc * ds[i - 1]))
-    return v
+
+    n = max(3, math.ceil(path.length / SPEED_GRID_M) + 1)
+    sg, h = np.linspace(0.0, path.length, n), path.length / (n - 1)
+    cell = np.full(n - 1, np.inf)        # every sample bounds both nodes around it, so interpolating the nodes keeps it
+    np.minimum.at(cell, np.clip(np.searchsorted(sg, path.s, "right") - 1, 0, n - 2), v ** 2)
+    top = np.minimum(np.r_[cell, np.inf], np.r_[np.inf, cell])
+    top[[0, -1]] = 0.0
+    top = _accel_limit(top, h, accel)
+
+    vf = np.maximum(np.sqrt(top), MIN_SPEED)
+    g = h / (2.0 * vf ** 3)
+    D2 = np.diff(np.eye(n), 2, axis=0) / h ** 2
+    J = D2.T @ (D2 * (vf[1:-1] * h / 4.0)[:, None])    # jerk = v u''/2 and dt = ds/v: jerk^2 dt = v u''^2 ds / 4
+    E = np.vstack([np.eye(n), np.diff(np.eye(n), axis=0)])     # u itself and its steps, each boxed
+    lo = np.r_[np.zeros(n), np.full(n - 1, -2.0 * accel * h)]
+    hi = np.r_[top, np.full(n - 1, 2.0 * accel * h)]
+    rho = 30.0 * float(np.median(g))     # stiff: the fastest feasible profile it starts from is close to the answer
+    solve = np.linalg.inv(2.0 * JERK_WEIGHT * J + rho * E.T @ E)
+    z, y = E @ top, np.zeros(len(lo))
+    for _ in range(300):
+        Eu = E @ (solve @ (g + rho * E.T @ (z - y)))
+        z = np.clip(Eu + y, lo, hi)
+        y += Eu - z
+    u = _accel_limit(z[:n], h, accel)     # ADMM ends within a residual of the step bounds: make them exact
+    return np.sqrt(np.interp(path.s, sg, u))
 
 
 @dataclass
@@ -186,7 +201,7 @@ class Limits:
     look_min: float             # lookahead at rest, m; it grows by look_s per m/s made while on track...
     look_s: float
     look_max: float             # ...up to this
-    face_tol: float             # rad: a sharp corner is left only once the nose is this close to the next leg
+    face_tol: float             # rad: heading error the reference still moves at full speed with
     yaw_slow: float             # rad: heading error at which forward speed reaches zero
     xtrack_slow: float          # m off the path where speed starts to drop...
     xtrack_stop: float          # ...and reaches zero
@@ -221,9 +236,6 @@ class Follower:
     def points_passed(self) -> int:
         return sum(1 for s in self.points_s if s <= self.s_hat + 2 * STEP_M)
 
-    def next_sharp(self, s: float) -> float:
-        return next((c for c in self.path.corners if c >= s - 1e-9), math.inf)
-
     def ahead(self, length: float, step: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
         """Path samples from the aircraft's projection forward, always including the path end: (M,2) (n, e) and
         their distance from the projection."""
@@ -242,9 +254,7 @@ class Follower:
         trust = clamp01((L.xtrack_stop - xtrack) / (L.xtrack_stop - L.xtrack_slow)) * (1.0 - clamp01(doubt))
         made = min(math.hypot(*vel), float(self.v[P.index(self.s_hat)]))      # a coming turn lowers the plan here
         lead = min(L.look_max, L.look_min + L.look_s * made * trust)
-        corner = self.next_sharp(self.s_ref)
-        at_corner = corner - self.s_ref < STEP_M
-        s_look = min(corner + L.look_min if at_corner else self.s_hat + lead, P.length)
+        s_look = min(self.s_hat + lead, P.length)
         look = P.point(s_look)
         if math.hypot(look[0] - pos[0], look[1] - pos[1]) > L.look_min / 2:
             yaw = math.atan2(look[1] - pos[1], look[0] - pos[0])
@@ -253,16 +263,13 @@ class Follower:
         yaw_err = abs(float(wrap(yaw - heading)))
 
         scale = trust * clamp01(1.0 - (yaw_err - L.face_tol) / (L.yaw_slow - L.face_tol))
-        if at_corner and yaw_err > L.face_tol:
-            scale = 0.0
         v_cap = math.sqrt(2.0 * L.accel * max(s_limit - self.s_ref, 0.0)) if math.isfinite(s_limit) else math.inf
         i = int(P.index(self.s_ref))
         speed = min(max(float(self.v[i]), MIN_SPEED), v_cap) * scale
-        gate = math.inf if at_corner and scale > 0.0 else corner      # a sharp corner is passed only once faced
-        s_new = min(self.s_ref + speed * dt, self.s_hat + LEAD_MAX_M, s_limit, P.length, gate)
+        s_new = min(self.s_ref + speed * dt, self.s_hat + LEAD_MAX_M, s_limit, P.length)
         # always ahead of the aircraft: a reference it overruns pulls it back and flies a loop
         ahead = self.s_hat + LEAD_M
-        self.s_ref = max(self.s_ref, s_new, min(ahead, s_limit, P.length, gate))
+        self.s_ref = max(self.s_ref, s_new, min(ahead, s_limit, P.length))
 
         i = int(P.index(self.s_ref))
         j = min(i + 1, len(self.v) - 1)
@@ -270,7 +277,7 @@ class Follower:
         vf = min(float(self.v[i]), v_cap) * scale
         ds = float(P.s[j] - P.s[i])
         a_t = 0.0 if capped or ds <= 1e-9 else vf * (float(self.v[j]) - float(self.v[i])) * scale / ds
-        a_n = vf * vf * (float(P.k[i]) if math.isfinite(P.k[i]) else 0.0)      # + right: towards a right turn's centre
+        a_n = vf * vf * float(P.k[i])                  # + right: towards a right turn's centre
         c, sn = math.cos(P.psi[i]), math.sin(P.psi[i])
         ref = P.point(self.s_ref)
         done = self.s_ref >= P.length - 1e-6 and math.hypot(pos[0] - ref[0], pos[1] - ref[1]) < L.end_tol

@@ -456,7 +456,7 @@ class Mission:
             self._land(now, out, "route complete")
             return
         path = self.path_builder([(self.sp[0], self.sp[1])] + self.targets)
-        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2, p.accel_mps2,
+        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2,
                                (p.tight_m, p.roomy_m, p.crawl_mps))
         lim = F.Limits(accel=p.accel_mps2, look_min=p.look_min_m, look_s=p.look_s, look_max=p.look_max_m,
                        face_tol=math.radians(p.face_tol_deg), yaw_slow=math.radians(p.yaw_slow_deg),

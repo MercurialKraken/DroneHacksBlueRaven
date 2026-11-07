@@ -1,4 +1,4 @@
-"""The route nudged into clear space on the real course map (refnav.map_route)."""
+"""The route as an elastic band on the real course map (refnav.map_route)."""
 from __future__ import annotations
 
 import json
@@ -24,9 +24,16 @@ def _route_ned():
     return [(0.0, 0.0)] + [(f, -l) for f, l in pts]              # forward/left from a north-facing launch
 
 
+NARROW = (0.53, -0.95)          # the one stretch of route_v5's corridor whose centre is only ~0.40 m clear
+
+
 def _clearance(path: F.Path) -> np.ndarray:
     x, y = M.MapFrame(LAUNCH).to_map(path.x, path.y)
     return CM.distance(np.c_[x, y, np.full(len(x), Z)])
+
+
+def _build() -> F.Path:
+    return M.builder(CM, LAUNCH, Z, 0.48, 0.3)(_route_ned())
 
 
 def test_the_map_frame_round_trips_and_puts_the_launch_at_the_spawn() -> None:
@@ -38,34 +45,41 @@ def test_the_map_frame_round_trips_and_puts_the_launch_at_the_spawn() -> None:
     assert np.allclose(n, [0, 1]) and np.allclose(e, [0, 0])
 
 
-def test_route_v5_keeps_its_clearance_after_nudging() -> None:
-    build = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)
-    plain = F.fillet_path(_route_ned(), 0.3)
-    nudged = build(_route_ned())
-    before, after = _clearance(plain), _clearance(nudged)
-    assert np.nanmin(after) >= np.nanmin(before)
-    assert np.mean(after < 0.42) < np.mean(before < 0.42) / 2, (np.mean(before < 0.42), np.mean(after < 0.42))
-    assert np.nanmin(after) >= 0.28 + 0.08, np.nanmin(after)              # never closer than radius + 8 cm
-    assert abs(nudged.length - plain.length) < 1.0                         # the same route, not a new one
+def test_the_band_keeps_the_corridor_centre_where_the_route_ran_close() -> None:
+    path, plain = _build(), F.fillet_path(_route_ned(), 0.3)
+    d = path.clearance
+    assert np.allclose(d, _clearance(path), equal_nan=True)
+    assert np.nanmin(d) >= 0.40 and np.nanmin(_clearance(plain)) < 0.40
+    x, y = M.MapFrame(LAUNCH).to_map(path.x, path.y)
+    dip = (d[1:-1] <= d[:-2]) & (d[1:-1] <= d[2:]) & (d[1:-1] < 0.47)       # every tight spot along the path
+    away = np.hypot(x[1:-1] - NARROW[0], y[1:-1] - NARROW[1]) > 0.3
+    assert dip.any() and (d[1:-1][dip & away] >= 0.44).all(), d[1:-1][dip & away].min()
 
 
-def test_corners_move_only_where_clearance_is_short_and_within_the_shift() -> None:
+def test_the_band_stays_within_max_shift_of_the_route_and_passes_its_points() -> None:
+    path = _build()
     fr = M.MapFrame(LAUNCH)
     C = np.asarray(_route_ned())
-    xy = np.stack(fr.to_map(C[:, 0], C[:, 1]), 1)
-    out = M.clear_corners(xy, CM, Z, 0.43, 0.3)
-    d0 = CM.distance(np.c_[xy, np.full(len(xy), Z)])
-    for p, q, d in zip(xy[1:-1], out[1:-1], d0[1:-1]):
-        moved = float(np.hypot(*(q - p))) if len(out) == len(xy) else None
-        if moved is not None:
-            assert moved <= 0.3 + 1e-6
-            if d >= 0.43:
-                assert moved < 1e-9
-    assert np.allclose(out[0], xy[0]) and np.allclose(out[-1], xy[-1])
+    route = np.stack(fr.to_map(C[:, 0], C[:, 1]), 1)
+    xy = np.stack(fr.to_map(path.x, path.y), 1)
+    a, b = route[:-1], route[1:]
+    t = np.clip(np.einsum("nmk,mk->nm", xy[:, None] - a, b - a) / ((b - a) ** 2).sum(1), 0.0, 1.0)
+    off = np.linalg.norm(xy[:, None] - (a + t[..., None] * (b - a)), axis=2).min(1)
+    assert off.max() <= 0.3 + 0.005
+    assert max(np.hypot(*(xy - q).T).min() for q in route) <= 0.3 + 0.005
+    assert np.allclose(xy[[0, -1]], route[[0, -1]], atol=1e-6)
+
+
+def test_the_band_is_smooth_enough_to_fly_without_stopping() -> None:
+    path = _build()
+    assert np.abs(path.k).max() < 4.0                               # tightest radius 0.25 m
+    assert np.degrees(np.abs(F.wrap(np.diff(path.psi)))).max() < 6.0
+    v = F.speed_profile(path, 0.4, math.radians(45), 0.25, 0.5, (0.40, 0.60, 0.15))
+    assert v[1:-1].min() > 0.1
 
 
 def test_the_built_path_is_in_ned_with_consistent_headings() -> None:
-    path = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)(_route_ned())
+    path = _build()
     i = len(path.s) // 3
     j = i + 5
     step = math.atan2(path.y[j] - path.y[i], path.x[j] - path.x[i])
@@ -76,7 +90,7 @@ def test_the_built_path_is_in_ned_with_consistent_headings() -> None:
 def test_the_follower_flies_the_whole_map_path() -> None:
     """End to end on the real map's path: strictly increasing s, and a lagging vehicle reaches the end."""
     import test_follow as TF
-    path = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)(_route_ned())
+    path = _build()
     assert (np.diff(path.s) > 0).all()
     c, xt, s, t = TF._fly_lagging(path, TF._follower(path), seconds=200.0)
     assert c.done, (path.length, s[-1])
@@ -84,8 +98,8 @@ def test_the_follower_flies_the_whole_map_path() -> None:
 
 
 def test_speed_drops_where_the_mapped_path_is_tight() -> None:
-    path = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)(_route_ned())
-    v = F.speed_profile(path, 0.4, math.radians(45), 0.25, 0.5, 0.5, (0.40, 0.60, 0.15))
+    path = _build()
+    v = F.speed_profile(path, 0.4, math.radians(45), 0.25, 0.5, (0.40, 0.60, 0.15))
     tight = path.clearance < 0.42
     assert tight.any() and (v[tight] <= 0.15 + 0.4 * 0.1 + 1e-6).all()
     assert v.max() == pytest.approx(0.4)

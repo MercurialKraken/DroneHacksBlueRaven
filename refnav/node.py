@@ -70,12 +70,12 @@ def load_route(node: Node) -> tuple[list[tuple[float, float]], dict[str, Any]]:
 
 class RefNav(Node):
     def _map_builder(self, prm: C.Params):
-        """With the course map: the route nudged into clear space and smoothed against it. Without: plain arcs."""
+        """With the course map: the route as an elastic band kept clear of the map. Without: plain arcs."""
         root = Path(__file__).resolve().parents[1]
         path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
         course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value
         key = self.declare_parameter("launch_key", "launch_sim").value      # the real course: launch
-        margin = float(self.declare_parameter("map_margin_m", 0.15).value)
+        margin = float(self.declare_parameter("map_margin_m", 0.20).value)
         shift = float(self.declare_parameter("map_max_shift_m", 0.3).value)
         if not path:
             return None
@@ -88,8 +88,8 @@ class RefNav(Node):
         except (OSError, KeyError, ValueError) as e:
             self.get_logger().warn(f"no course map ({e}): the route is flown as plain arcs")
             return None
-        self.get_logger().info(f"course map {path}, launch {key}: route corners kept {0.28 + margin:.2f} m clear")
-        return map_route.builder(cm, launch, prm.height_m + launch["z"], 0.28, margin, 1.0, shift)
+        self.get_logger().info(f"course map {path}, launch {key}: the path keeps {0.28 + margin:.2f} m clear where it fits")
+        return map_route.builder(cm, launch, prm.height_m + launch["z"], 0.28 + margin, shift)
 
     def __init__(self) -> None:
         super().__init__("refnav")

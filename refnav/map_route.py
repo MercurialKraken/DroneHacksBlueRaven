@@ -1,8 +1,7 @@
-"""The route's corners nudged into clear space on the course map, then smoothed by nav.path_geometry. Numpy only.
+"""The route as an elastic band on the course map: as straight as it can be while keeping clear of every mapped
+surface and within max_shift of the route's own line, so it still passes the route's points. Numpy only.
 
-A corner moves only where the map says the airframe would pass closer than `need` to a surface, and never more
-than `max_shift` from where the route put it, so the path stays the route's own; a straight leg that grazes a
-wall gets one extra corner pushed off it. The result is a refnav.follow.Path in the mission's NED frame.
+The result is a refnav.follow.Path in the mission's NED frame, carrying its clearance for the speed profile.
 """
 from __future__ import annotations
 
@@ -10,8 +9,6 @@ import math
 from typing import TYPE_CHECKING
 
 import numpy as np
-
-from nav.path_geometry import build_path
 
 from . import follow as F
 
@@ -26,7 +23,7 @@ class MapFrame:
 
     def __init__(self, launch: dict[str, float]) -> None:
         a = math.radians(launch["yaw_deg"] - 90.0)      # the course's rotation of the launch's odom ENU frame
-        self.c, self.s, self.a = math.cos(a), math.sin(a), a
+        self.c, self.s = math.cos(a), math.sin(a)
         self.x0, self.y0 = launch["x"], launch["y"]
 
     def to_map(self, n: np.ndarray, e: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -37,60 +34,54 @@ class MapFrame:
         return -self.s * dx + self.c * dy, self.c * dx + self.s * dy
 
 
-def clear_corners(P: np.ndarray, cm: CourseMap, z: float, need: float, max_shift: float,
-                  step: float = 0.01, iters: int = 80, passes: int = 3) -> np.ndarray:
-    """Interior corners climb the map's distance field while closer than `need`, within max_shift of the route's;
-    then each straight leg whose closest sample is under `need` gets a corner there, pushed off the same way."""
-    def climb(pts: np.ndarray, fixed: np.ndarray, movable: np.ndarray) -> np.ndarray:
-        pts = pts.copy()
-        for _ in range(iters):
-            d, g = cm.query(np.c_[pts, np.full(len(pts), z)])
-            low = movable & np.isfinite(d) & (d < need)
-            if not low.any():
-                break
-            gxy = g[low, :2] / np.maximum(np.linalg.norm(g[low, :2], axis=1, keepdims=True), 1e-9)
-            pts[low] += step * gxy
-            off = pts - fixed
-            far = np.linalg.norm(off, axis=1) > max_shift
-            pts[far] = fixed[far] + off[far] / np.linalg.norm(off[far], axis=1, keepdims=True) * max_shift
-        return pts
-
-    inner = np.r_[False, np.ones(len(P) - 2, bool), False]
-    P = climb(P, P.copy(), inner)
-    for _ in range(passes):                             # a leg can graze two surfaces: split it again until clear
-        out = [P[0]]
-        for a, b in zip(P[:-1], P[1:]):
-            f = np.linspace(0.0, 1.0, max(2, math.ceil(np.hypot(*(b - a)) / 0.02)))[1:-1]
-            if len(f):
-                q = a + (b - a) * f[:, None]
-                d = cm.distance(np.c_[q, np.full(len(q), z)])
-                j = int(np.nanargmin(d)) if np.isfinite(d).any() else -1
-                if j >= 0 and d[j] < need - 0.01:
-                    out.append(climb(q[j:j + 1], q[j:j + 1].copy(), np.array([True]))[0])
-            out.append(b)
-        if len(out) == len(P):
-            break
-        P = np.array(out)
-    return P
+BAND_STEP_M = 0.05      # band point spacing
+BAND_BEND = 30.0        # stiffness against bending, relative to the pull towards the constraints
+BAND_ITERS = 300
 
 
-def builder(cm: CourseMap, launch: dict[str, float], z: float, drone_radius: float, margin: float,
-            max_radius: float, max_shift: float) -> Callable[[list[tuple[float, float]]], F.Path]:
+def elastic_band(P: np.ndarray, cm: CourseMap, z: float, clear: float, max_shift: float) -> np.ndarray:
+    """The route polyline P (map frame, end points fixed) bent as little as it can be (least squared second
+    differences) while every point is at least `clear` from the map's surfaces, or on the corridor's centre where
+    that is narrower, and within max_shift of its place on P. ADMM: an exact bending solve, then a projection."""
+    seg = np.hypot(*np.diff(P, axis=0).T)
+    s = np.r_[0.0, np.cumsum(seg)]
+    t = np.linspace(0.0, s[-1], max(3, round(s[-1] / BAND_STEP_M) + 1))
+    home = np.stack([np.interp(t, s, P[:, 0]), np.interp(t, s, P[:, 1])], 1)
+    n, zs = len(home), np.full(len(home), z)
+    D2 = np.diff(np.eye(n), 2, axis=0)
+    A = np.eye(n) + BAND_BEND * D2.T @ D2
+    A[[0, -1]] = np.eye(n)[[0, -1]]                     # the end points stay put
+    bend = np.linalg.inv(A)
+
+    def project(p: np.ndarray) -> np.ndarray:
+        d, g = cm.query(np.c_[p, zs])
+        g = np.nan_to_num(g[:, :2])
+        need = np.nan_to_num(np.clip(clear - d, 0.0, None))
+        # moving `need` up the gradient gains less than that once it crosses the corridor's centre: stop there
+        rise = np.nan_to_num(cm.distance(np.c_[p + need[:, None] * g, zs]) - d)
+        p = p + np.clip((need + rise) / 2.0, 0.0, None)[:, None] * g
+        off = p - home
+        return home + off * np.minimum(1.0, max_shift / np.maximum(np.hypot(*off.T), 1e-12))[:, None]
+
+    q, u = home, np.zeros_like(home)                    # q: the projected band, u: the pull it has kept resisting
+    for _ in range(BAND_ITERS):
+        x = bend @ (q - u)
+        q = project(x + u)
+        u += x - q
+    return x
+
+
+def builder(cm: CourseMap, launch: dict[str, float], z: float, clear: float,
+            max_shift: float) -> Callable[[list[tuple[float, float]]], F.Path]:
     """A path builder for refnav.core.Mission: NED route corners in, a NED follow.Path out."""
     frame = MapFrame(launch)
-    need = drone_radius + margin
 
     def build(corners_ned: list[tuple[float, float]]) -> F.Path:
         C = np.asarray(corners_ned, float)
-        xy = np.stack(frame.to_map(C[:, 0], C[:, 1]), 1)
-        xy = clear_corners(xy, cm, z, need, max_shift)
-        sp = build_path(xy, cm, drone_radius=drone_radius, margin=margin, z=z, max_radius=max_radius, ds=F.STEP_M)
-        keep = np.r_[True, np.diff(sp.s) > 1e-6]               # arcs and legs share their joining sample
-        s, k_enu = sp.s[keep], sp.k[keep]
-        clear = cm.distance(np.c_[sp.xyz[keep, :2], np.full(int(keep.sum()), z)])
-        n, e = frame.to_ned(sp.xyz[keep, 0], sp.xyz[keep, 1])
-        psi = F.wrap(np.pi / 2 - (sp.psi[keep] - frame.a))  # ENU heading (ccw from east) -> NED yaw (cw from north)
-        k, sharp = F.soften_kinks(s, psi, -k_enu)            # left-positive -> right-positive
-        return F.Path(s.copy(), n, e, psi, k, sharp, clear)
+        band = elastic_band(np.stack(frame.to_map(C[:, 0], C[:, 1]), 1), cm, z, clear, max_shift)
+        path = F.polyline_path(*frame.to_ned(band[:, 0], band[:, 1]))
+        x, y = frame.to_map(path.x, path.y)
+        path.clearance = cm.distance(np.c_[x, y, np.full(len(x), z)])
+        return path
 
     return build
