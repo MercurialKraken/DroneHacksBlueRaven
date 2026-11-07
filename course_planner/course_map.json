@@ -1,0 +1,436 @@
+{
+ "version": 2,
+ "frame": "course frame: x = East, y = North, z = Up (ENU), metres, origin = centre of the floor. Derived from the organizers' published model dronehacks-course-v3.glb (preliminary layout).",
+ "bounds": {
+  "x_min": -3.048,
+  "x_max": 3.048,
+  "y_min": -3.048,
+  "y_max": 3.048,
+  "height_m": 3.048
+ },
+ "walls": [
+  {
+   "name": "Barrier 1",
+   "footprint_xy": [
+    [
+     -3.048,
+     0.406
+    ],
+    [
+     -1.435,
+     0.406
+    ],
+    [
+     -1.435,
+     0.508
+    ],
+    [
+     -3.048,
+     0.508
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "Barrier 2",
+   "footprint_xy": [
+    [
+     -1.435,
+     0.406
+    ],
+    [
+     0.178,
+     0.406
+    ],
+    [
+     0.178,
+     0.508
+    ],
+    [
+     -1.435,
+     0.508
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "Barrier 3 (cut to 55 in)",
+   "footprint_xy": [
+    [
+     0.178,
+     0.406
+    ],
+    [
+     1.575,
+     0.406
+    ],
+    [
+     1.575,
+     0.508
+    ],
+    [
+     0.178,
+     0.508
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "M1 maze divider",
+   "footprint_xy": [
+    [
+     -1.981,
+     0.508
+    ],
+    [
+     -1.88,
+     0.508
+    ],
+    [
+     -1.88,
+     2.121
+    ],
+    [
+     -1.981,
+     2.121
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "M2 maze divider",
+   "footprint_xy": [
+    [
+     -0.864,
+     1.435
+    ],
+    [
+     -0.762,
+     1.435
+    ],
+    [
+     -0.762,
+     3.048
+    ],
+    [
+     -0.864,
+     3.048
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "M3 maze divider",
+   "footprint_xy": [
+    [
+     0.254,
+     0.508
+    ],
+    [
+     0.356,
+     0.508
+    ],
+    [
+     0.356,
+     2.121
+    ],
+    [
+     0.254,
+     2.121
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "A1 approach wall",
+   "footprint_xy": [
+    [
+     -1.026,
+     -0.622
+    ],
+    [
+     -0.925,
+     -0.622
+    ],
+    [
+     -0.925,
+     0.406
+    ],
+    [
+     -1.026,
+     0.406
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "C1 chicane wall",
+   "footprint_xy": [
+    [
+     0.926,
+     -1.111
+    ],
+    [
+     1.021,
+     -1.146
+    ],
+    [
+     1.573,
+     0.37
+    ],
+    [
+     1.477,
+     0.405
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "C2b chicane wall",
+   "footprint_xy": [
+    [
+     -0.243,
+     -1.496
+    ],
+    [
+     -0.147,
+     -1.531
+    ],
+    [
+     0.204,
+     -0.565
+    ],
+    [
+     0.109,
+     -0.53
+    ]
+   ],
+   "height_m": 1.727
+  },
+  {
+   "name": "C2a chicane wall (window)",
+   "footprint_xy": [
+    [
+     -0.794,
+     -3.012
+    ],
+    [
+     -0.699,
+     -3.047
+    ],
+    [
+     -0.267,
+     -1.86
+    ],
+    [
+     -0.147,
+     -1.532
+    ],
+    [
+     -0.243,
+     -1.497
+    ]
+   ],
+   "height_m": 1.727
+  }
+ ],
+ "openings": [
+  {
+   "name": "window",
+   "wall": "C2a chicane wall (window)",
+   "centre_xy": [
+    -0.469,
+    -2.271
+   ],
+   "along_wall_unit": [
+    0.34,
+    0.94
+   ],
+   "width_m": 0.914,
+   "bottom_m": 0.305,
+   "top_m": 1.219
+  }
+ ],
+ "tunnel": {
+  "entry_xy": [
+   2.311,
+   1.219
+  ],
+  "exit_xy": [
+   2.311,
+   -0.305
+  ],
+  "inner_width_m": 1.47,
+  "floor_m": 0.025,
+  "inner_height_m": 1.82,
+  "shell_thickness_m": 0.03
+ },
+ "boulders": [
+  {
+   "name": "Boulder 1",
+   "centre_xy": [
+    2.012,
+    -2.469
+   ],
+   "radius_m": 0.229,
+   "height_m": 0.533
+  },
+  {
+   "name": "Boulder 2",
+   "centre_xy": [
+    2.53,
+    -1.554
+   ],
+   "radius_m": 0.229,
+   "height_m": 0.533
+  },
+  {
+   "name": "Boulder 3",
+   "centre_xy": [
+    0.792,
+    -2.347
+   ],
+   "radius_m": 0.229,
+   "height_m": 0.533
+  },
+  {
+   "name": "Boulder 4",
+   "centre_xy": [
+    -2.56,
+    -2.499
+   ],
+   "radius_m": 0.229,
+   "height_m": 0.533
+  },
+  {
+   "name": "Boulder 5",
+   "centre_xy": [
+    -1.341,
+    -2.377
+   ],
+   "radius_m": 0.229,
+   "height_m": 0.533
+  }
+ ],
+ "launch_mark_xy": [
+  -2.515,
+  0.914
+ ],
+ "landing_pad": {
+  "centre_xy": [
+   -2.042,
+   -0.792
+  ],
+  "outer_ring_radius_m": 0.762
+ },
+ "checkpoints": [
+  {
+   "id": 1,
+   "name": "first corridor",
+   "kind": "line",
+   "line": [
+    [
+     -3.048,
+     2.62
+    ],
+    [
+     -1.93,
+     2.62
+    ]
+   ]
+  },
+  {
+   "id": 2,
+   "name": "Gate A",
+   "kind": "line",
+   "line": [
+    [
+     0.305,
+     2.121
+    ],
+    [
+     0.305,
+     3.048
+    ]
+   ]
+  },
+  {
+   "id": 3,
+   "name": "tunnel exit",
+   "kind": "line",
+   "line": [
+    [
+     1.575,
+     -0.305
+    ],
+    [
+     3.048,
+     -0.305
+    ]
+   ]
+  },
+  {
+   "id": 4,
+   "name": "landing area entry",
+   "kind": "choice",
+   "options": {
+    "gate_b": {
+     "kind": "line",
+     "line": [
+      [
+       0.152,
+       -0.53
+      ],
+      [
+       0.152,
+       0.406
+      ]
+     ]
+    },
+    "window": {
+     "kind": "opening",
+     "opening": "window"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "name": "landing",
+   "kind": "pad"
+  }
+ ],
+ "floor_guideline_xy": [
+  [
+   -2.515,
+   0.9
+  ],
+  [
+   -2.515,
+   2.6
+  ],
+  [
+   -1.37,
+   2.6
+  ],
+  [
+   -1.37,
+   0.98
+  ],
+  [
+   -0.26,
+   0.98
+  ],
+  [
+   -0.26,
+   2.6
+  ],
+  [
+   0.335,
+   2.6
+  ]
+ ],
+ "notes": [
+  "Checkpoint lines read from the organizers' top-view diagram; the model also contains an 'Approach ring (stage 4 line)' around the pad, not used here (rules text says CP4 = Gate B or window).",
+  "Eastern barrier section is named 'cut to 55 in' in the model but modelled at 68 in."
+ ]
+}

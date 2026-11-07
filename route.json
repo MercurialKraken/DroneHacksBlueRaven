@@ -1,5 +1,5 @@
 {"route": [
-  [1.788, -0.017],
+  [1.688, -0.016],
   [1.663, -0.842],
   [1.363, -1.142],
   [0.238, -1.167],
@@ -19,5 +19,5 @@
   [-2.087, -1.742],
   [-1.712, -0.467]
  ],
- "params": {"height_m": 0.8, "speed_mps": 0.4, "lead_max_m": 0.5, "arrive_m": 0.15, "corridor_half_m": 0.25, "stop_m": 0.3, "hold_s": 0.2, "yaw_rate_dps": 90.0, "min_corridor_coverage": 0.4, "leg_yaw_off_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+ "params": {"height_m": 0.8, "speed_mps": 0.4, "lead_max_m": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "hold_s": 0.2, "yaw_rate_dps": 90.0, "brake_mps2": 0.1, "end_clear_m": 0.35, "min_corridor_coverage": 0.4, "leg_yaw_off_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
 }

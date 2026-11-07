@@ -59,6 +59,9 @@ class Params:
     height_m: float = 1.2
     speed_mps: float = 0.6
     lead_max_m: float = 1.0                     # the carrot never leads the aircraft by more
+    # Slow the carrot into the leg end at this deceleration (0: off). PX4 tracks a position-only stream about
+    # 1.2 s late and brakes at about 0.25 m/s2 (run_0613), so a carrot that stops dead overshoots by 0.3 m.
+    brake_mps2: float = 0.0
     yaw_rate_dps: float = 45.0
     face_tol_deg: float = 8.0
     arrive_m: float = 0.3
@@ -72,6 +75,9 @@ class Params:
     depth_stale_s: float = 0.5
     depth_lost_land_s: float = 3.0
     stop_m: float = 0.9
+    # An obstacle further than this past the leg's end does not block the leg, so stop_m can exceed the room
+    # left at a corner (inf: stop_m alone decides).
+    end_clear_m: float = math.inf
     corridor_half_m: float = 0.6
     band_m: float = 0.4
     min_obstacle_px: int = 1200                 # an obstacle covers at least this many image pixels (~35 x 35):
@@ -420,7 +426,7 @@ class Mission:
                 clr = self._clearance(v)                     # None: not enough observed frames yet, wait
                 if clr is not None and self.corridor_fresh(now):
                     self.last_clearance = clr
-                    if clr < p.stop_m:
+                    if clr < self._stop_at(self.leg_len):
                         self.counts["obstacle_stops"] += 1
                         self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead at leg {self.leg + 1}")
                     else:
@@ -494,6 +500,17 @@ class Mission:
             self.counts["unconfirmed_obstacles"] += 1
         return confirmed
 
+    def _stop_at(self, remaining_m: float) -> float:
+        """Clearance below which the leg is blocked: stop_m, or less when the leg ends sooner than that."""
+        return min(self.p.stop_m, max(remaining_m, 0.0) + self.p.end_clear_m)
+
+    def _carrot_speed(self) -> float:
+        """Carrot speed: speed_mps, slowing into the leg end at brake_mps2 (never to zero, so it arrives)."""
+        p = self.p
+        if p.brake_mps2 <= 0.0:
+            return p.speed_mps
+        return min(p.speed_mps, max(0.05, math.sqrt(2.0 * p.brake_mps2 * max(self.leg_len - self.s, 0.0))))
+
     def _go(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
         p = self.p
         n0, e0 = self.leg_start
@@ -504,13 +521,13 @@ class Mission:
             clr = None                                       # the latest evidence of this corridor is too old
         if clr is not None:
             self.last_clearance = clr
-            if clr < p.stop_m:
+            if clr < self._stop_at(self.leg_len - proj):
                 # stop where the aircraft is (not where the carrot was)
                 self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
                 self.counts["obstacle_stops"] += 1
                 self._land(now, out, f"route blocked: obstacle {clr:.2f} m ahead on leg {self.leg + 1}")
                 return
-            self.s = min(self.s + p.speed_mps * dt, self.leg_len, max(proj, 0.0) + p.lead_max_m)
+            self.s = min(self.s + self._carrot_speed() * dt, self.leg_len, max(proj, 0.0) + p.lead_max_m)
         else:
             self.counts["depth_holds"] += 1                  # no live evidence: the carrot waits
         self.sp[0], self.sp[1] = n0 + un * self.s, e0 + ue * self.s

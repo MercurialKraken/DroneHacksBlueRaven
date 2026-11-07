@@ -539,3 +539,38 @@ def test_a_right_camera_offset_loses_coverage_to_the_left_stereo_dead_band() -> 
     assert loss(0.0) == pytest.approx(0.0)        # straight ahead the dead columns are out of the corridor
     assert loss(-30.0) == pytest.approx(0.0)      # a left offset moves the corridor away from them
     assert loss(30.0) > 0.1
+
+
+# ---- stopping at the leg end (brake_mps2, end_clear_m)
+def test_the_carrot_slows_into_the_leg_end_and_still_arrives() -> None:
+    m = C.Mission(C.Params(speed_mps=0.4, brake_mps2=0.1))
+    m.leg_len = 2.0
+    m.s = 0.0
+    assert m._carrot_speed() == pytest.approx(0.4)
+    m.s = 1.9
+    assert m._carrot_speed() == pytest.approx(math.sqrt(0.02))
+    m.s = 2.0
+    assert m._carrot_speed() == pytest.approx(0.05)         # never zero, or the leg would not finish
+    done, _, _ = fly(C.Params(route=[(2.0, 0.0)], brake_mps2=0.1))
+    assert done.result == "complete", (done.result, done.why)
+
+
+def test_braking_is_off_unless_asked_for() -> None:
+    m = C.Mission(C.Params(speed_mps=0.4))
+    m.leg_len, m.s = 2.0, 1.99
+    assert m._carrot_speed() == 0.4
+
+
+def test_a_wall_past_the_leg_end_does_not_block_the_leg() -> None:
+    wall = [(0, 3.5, -5.0, 5.0)]                            # 0.5 m past the end of a 3 m leg, closer than stop_m
+    blocked, _, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9), wall)
+    assert "route blocked" in blocked.result
+    clear, _, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9, end_clear_m=0.35), wall)
+    assert clear.result == "complete", (clear.result, clear.why)
+
+
+def test_a_wall_too_close_to_the_leg_end_still_blocks_it() -> None:
+    wall = [(0, 3.2, -5.0, 5.0)]                            # 0.2 m past the end: the aircraft would hit it
+    m, px4, _ = fly(C.Params(route=[(3.0, 0.0)], stop_m=0.9, end_clear_m=0.35), wall)
+    assert "route blocked" in m.result
+    assert px4.pos[0] < 3.0
