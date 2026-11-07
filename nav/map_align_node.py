@@ -93,9 +93,12 @@ class MapAlignNode(Node):
         # drone mode: the skybeta adapter's latched INIT map <- odom (chelsea-claude's interface, agreed on the bus);
         # "" = compute it here from launch_key and the first odometry pose
         self.init_topic = str(p("init_topic", MAP_FROM_ODOM_INIT_TOPIC if self.source == "odometry" else ""))
-        launch_key = str(p("launch_key", ""))
+        # px4 (the sims): default launch_sim, the same default refnav uses, because neither flight.yaml nor the sims'
+        # /etc/flyx/mission.yaml sets launch_key (an empty default made this node exit at start-up in the sim, so the
+        # flight ran uncorrected). odometry (the drone): no default; the adapter's INIT or an explicit key is required.
+        launch_key = str(p("launch_key", "launch_sim" if self.source == "px4" else ""))
         if not launch_key and not (self.source == "odometry" and self.init_topic):
-            raise ValueError("launch_key is required (launch_sim in the sims, launch on the drone)")
+            raise ValueError("launch_key is required on the drone (launch), unless init_topic is set")
         self.launch = load_launch(p("course_yaml", str(ROOT / "maps" / "course.yaml")), launch_key) if launch_key else None
         self.cm = CourseMap.load(p("course_map", str(ROOT / "maps" / "course_sdf.npz")))
         self.tau_s = float(p("tau_s", 2.0))
