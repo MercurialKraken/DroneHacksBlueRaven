@@ -174,11 +174,16 @@ class CorrectorParams:
     max_rate_yaw: float = math.radians(3.0)
     max_jump_xy: float = 0.5      # a single measurement further than this is ignored (likely a wrong match)
     max_jump_yaw: float = math.radians(10.0)
-    max_total_yaw: float = math.radians(6.0)    # the correction's yaw never exceeds this (raw drift seen: up to 9 deg)
+    max_total_yaw: float = math.radians(12.0)   # the correction's yaw never exceeds this (raw drift seen: up to 9 deg)
     # The fits' heading accuracy floor is ~1.2-1.5 deg rms (T4, 10 truth bags), worse than a good raw heading
     # (0.3-0.7 deg). So yaw follows only a sustained innovation beyond yaw_deadband, and slowly.
     tau_yaw_s: float = 8.0
     yaw_deadband: float = math.radians(1.0)
+    # ...but a large innovation is real drift (raw heading drifted 9 deg on follow_115005Z) and must be followed
+    # fast: above yaw_fast the yaw uses tau_yaw_fast_s. With a single slow tau the corrected heading on that bag
+    # went 1.6 -> 3.1 deg rms.
+    yaw_fast: float = math.radians(2.5)
+    tau_yaw_fast_s: float = 2.0
     align: AlignParams = field(default_factory=AlignParams)
 
 
@@ -207,7 +212,8 @@ class DriftCorrector:
             self.n["rejected_jump"] += 1
             return self.T
         k = 1.0 - math.exp(-dt / self.p.tau_s) if dt > 0 else 0.0
-        k_yaw = 1.0 - math.exp(-dt / self.p.tau_yaw_s) if dt > 0 else 0.0
+        tau_y = self.p.tau_yaw_fast_s if abs(dyaw) > self.p.yaw_fast else self.p.tau_yaw_s
+        k_yaw = 1.0 - math.exp(-dt / tau_y) if dt > 0 else 0.0
         dyaw_eff = math.copysign(max(0.0, abs(dyaw) - self.p.yaw_deadband), dyaw)
         sx, sy, syaw = k * dx, k * dy, k_yaw * dyaw_eff
         lim = self.p.max_rate_xy * dt
