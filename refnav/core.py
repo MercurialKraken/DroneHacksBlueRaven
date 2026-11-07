@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
 AIRBORNE = ("climb", "hover", "follow")
-HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 5.0   # the path is rebuilt only if the aircraft has moved this much on the ground
+HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 1.0   # a plan holds while the aircraft sits within this of where it was made
 
 
 @dataclass
@@ -406,8 +406,6 @@ class Mission:
                 self.why = "waiting for an explicit disarmed PX4 report"
             elif not v.pos_ok or v.pos is None or v.heading is None:
                 self.why = "waiting for PX4 position and heading"
-            elif (bad := self._plan_from(v)):
-                self._end(now, out, f"refused: {bad}")
             elif not ok:
                 self.why = why
             elif not self.depth_fresh(now):
@@ -417,6 +415,12 @@ class Mission:
                     f"the latest usable frame is {now - self.depth_t:.1f} s old")
             elif not self.depth_ready_for_arm(now):
                 self.why = f"waiting for {p.health_quiet_s:g} s of continuously usable depth"
+            elif self._moved_since_plan(v):
+                # heading is settled only once the estimator has been healthy: plan now, then let readiness see
+                # fresh inputs again before arming (the build blocks the tick)
+                bad = self._plan_from(v)
+                if bad:
+                    self._end(now, out, f"refused: {bad}")
             else:
                 self.sp = list(self.home)
                 self._set("arm", now, out)
@@ -474,13 +478,16 @@ class Mission:
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
 
+    def _moved_since_plan(self, v: Vehicle) -> bool:
+        if self.home is None:
+            return True
+        n, e, _ = v.pos
+        return (math.hypot(n - self.home[0], e - self.home[1]) >= HOME_MOVED_M
+                or abs(float(F.wrap(v.heading - self.home[3]))) >= math.radians(HOME_TURNED_DEG))
+
     def _plan_from(self, v: Vehicle) -> str | None:
-        """Home, targets and path from where the aircraft sits, built once and again only if it has moved: the build
-        blocks the tick, so it runs before the readiness windows start, never between them and arming."""
+        """Home, targets, path and speed profile from where the aircraft sits."""
         n, e, d = v.pos
-        if self.home is not None and math.hypot(n - self.home[0], e - self.home[1]) < HOME_MOVED_M \
-                and abs(float(F.wrap(v.heading - self.home[3]))) < math.radians(HOME_TURNED_DEG):
-            return None
         self.home = (n, e, d, v.heading)
         c, s = math.cos(v.heading), math.sin(v.heading)
         self.targets = [(n + f * c + l * s, e + f * s - l * c) for f, l in self.p.route]

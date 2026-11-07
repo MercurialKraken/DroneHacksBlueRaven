@@ -530,14 +530,28 @@ def test_the_path_is_built_on_the_ground_before_arming(monkeypatch: pytest.Monke
     assert m.follower.path is m.path
 
 
+def test_the_plan_waits_for_a_settled_heading() -> None:
+    """The route is laid out along the take-off heading: a plan made before the estimator settles is rotated."""
+    headings: list[float] = []
+
+    def watch(t: float, m: C.Mission) -> None:
+        if m.home is not None and not headings:
+            headings.append(m.home[3])
+            assert m.health.arm_ok(t)[0], "planned before the estimator was healthy"
+    m, px4, log = fly(C.Params(route=ROUTE), on_tick=watch)
+    assert m.result == "complete" and headings
+
+
 def test_requalifying_on_the_ground_keeps_the_path() -> None:
     """A requalify (here: depth stale once at arm) must not rebuild: a rebuild blocks the tick, staling the inputs it
     then requalifies on, which loops forever."""
     builds: list[str] = []
     stale_once: list[bool] = []
+    wrapped: list[C.Mission] = []
 
     def watch(t: float, m: C.Mission) -> None:
-        if not builds:
+        if not wrapped:
+            wrapped.append(m)
             build = m.path_builder
             m.path_builder = lambda pts: builds.append(m.phase) or build(pts)
         if m.phase == "arm" and not stale_once:
