@@ -64,6 +64,7 @@ if str(_repo_root()) not in sys.path:
     sys.path.insert(0, str(_repo_root()))
 from nav.frames import MAP_FROM_ODOM_STALE_S, map_from_startup_odom, pose_xyz_yaw  # noqa: E402
 from nav.path_geometry import build_path  # noqa: E402
+from nav.wall_centring import CentringParams, WallCentring  # noqa: E402
 
 
 @dataclass
@@ -101,6 +102,11 @@ class MissionParams:
     drone_radius: float = 0.28
     margin: float = 0.10
     max_radius_m: float = 1.0           # largest corner arc; 0 makes every corner a stop-and-turn
+    wall_centring: bool = False         # course: shift the reference toward the REAL corridor centre seen in
+                                        # depth (nav.wall_centring); needs on_depth_points. Off until benched
+    centring_cap_m: float = 0.15
+    pose_buffer_s: float = 2.0          # odometry kept to place a depth frame at its capture time
+    pose_gap_s: float = 0.15            # refuse to interpolate across a bigger odometry gap
 
 
 @dataclass
@@ -135,6 +141,9 @@ class SkybetaMission:
             C = np.asarray(corners_map, dtype=float)
             self.path = build_path(C[:, :2], course_map, params.drone_radius, params.margin, z=self.z_map,
                                    max_radius=params.max_radius_m)
+        self.centring = (WallCentring(course_map, CentringParams(cap_m=params.centring_cap_m))
+                         if (params.wall_centring and params.mission == "course" and course_map is not None) else None)
+        self.poses: list[tuple[float, float, float, float, float]] = []   # (stamp, x, y, z, yaw) in odom
         self.t_hover: float | None = None
         self.land_xy_odom: tuple[float, float] | None = None   # hover: descend over this odom point
         self.hold_xy_on_descent = True      # false after a hold-error: straight down, no xy correction
@@ -182,6 +191,11 @@ class SkybetaMission:
                 self.odom_jump = (f"odometry jumped {d:.2f} m / {math.degrees(dyaw):.0f} deg in {dt:.2f} s "
                                   f"(a stack restart resets it)")
         self.odom, self.t_odom = (float(x), float(y), float(z), float(yaw)), float(t)
+        st = float(stamp) if stamp is not None else float(t)
+        if not self.poses or st > self.poses[-1][0]:
+            self.poses.append((st, *self.odom))
+            while self.poses and st - self.poses[0][0] > self.p.pose_buffer_s:
+                self.poses.pop(0)
         if self.phase == "INIT":
             self.settle.append((float(t), self.odom))
             while self.settle and t - self.settle[0][0] > 2.0 * self.p.settle_s:
@@ -210,6 +224,43 @@ class SkybetaMission:
         self.t_corr, self.n_corr = float(t), self.n_corr + 1
         return None
 
+    def pose_at(self, stamp: float) -> tuple[tuple[float, float, float, float], float] | None:
+        """Odometry (x, y, z, yaw) interpolated at a capture stamp, and the yaw rate there; None if the stamp
+        is outside the buffer or falls in a gap over pose_gap_s (never extrapolates)."""
+        P = self.poses
+        if len(P) < 2 or not P[0][0] <= stamp <= P[-1][0]:
+            return None
+        i = next(k for k in range(1, len(P)) if P[k][0] >= stamp)
+        (t0, *a), (t1, *b) = P[i - 1], P[i]
+        if t1 - t0 > self.p.pose_gap_s:
+            return None
+        f = 0.0 if t1 == t0 else (stamp - t0) / (t1 - t0)
+        dyaw = _wrap(b[3] - a[3])
+        pose = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), _wrap(a[3] + f * dyaw))
+        return pose, (dyaw / (t1 - t0) if t1 > t0 else 0.0)
+
+    def on_depth_points(self, t: float, stamp: float, pts_base: Any) -> str | None:
+        """Wall points from one depth frame, in base_link (x forward, y left, z up), captured at `stamp`.
+        Feeds wall centring; returns why the frame wasn't used, or None."""
+        if self.centring is None:
+            return "wall centring is off"
+        if self.phase != "FOLLOW" or self.T_map_odom is None:
+            return f"not following ({self.phase})"
+        at = self.pose_at(stamp)
+        if at is None:
+            return "no odometry at the frame's capture time"
+        (x, y, z, yaw), rate = at
+        B = np.asarray(pts_base, dtype=float).reshape(-1, 3)
+        c, s = math.cos(yaw), math.sin(yaw)
+        odom = np.c_[c * B[:, 0] - s * B[:, 1] + x, s * B[:, 0] + c * B[:, 1] + y, B[:, 2] + z]
+        T = self.T_map_odom
+        pts_map = odom @ T[:3, :3].T + T[:3, 3]
+        drone = (T @ [x, y, z, 1.0])[:3]
+        s_at = self.path.project(drone[:2], self.s_proj - 0.5, self.s_proj + 0.5)
+        m = self.centring.measure(pts_map, drone, self.path, s_at, yaw_rate=rate)
+        self.centring.update(t, m)
+        return None if m.ok else m.why
+
     def status(self, t: float) -> dict[str, Any]:
         """For /blueraven/mission/status: phase, progress, and which map <- odom is in use."""
         src = None
@@ -224,7 +275,9 @@ class SkybetaMission:
                 "inits": self.n_init, "map_from_odom": src,
                 "corr_age_s": None if self.n_corr == 0 else round(t - self.t_corr, 2),
                 "corr_n": self.n_corr, "corr_step_max_m": round(self.corr_step_max_m, 3),
-                "corr_from_init_m": moved}
+                "corr_from_init_m": moved,
+                "centring_m": None if self.centring is None else round(self.centring.offset, 3),
+                "centring_why": None if (self.centring is None or self.centring.last is None) else self.centring.last.why}
 
     # --------------------------------------------------------------- helpers
     def _set_T(self, T: np.ndarray) -> None:
@@ -393,7 +446,11 @@ class SkybetaMission:
             ref = path.sample(self.s_ref)
             psi = float(ref["psi"])
             vff = (v * math.cos(psi), v * math.sin(psi))
-            ex, ey, ez = float(ref["x"]) - pm[0], float(ref["y"]) - pm[1], self.z_map - pm[2]
+            shift = 0.0
+            if self.centring is not None:                      # toward the REAL corridor centre seen in depth
+                shift = self.centring.update(t, None)           # advances hold/decay; frames update it too
+            rx, ry = float(ref["x"]) - shift * math.sin(psi), float(ref["y"]) + shift * math.cos(psi)
+            ex, ey, ez = rx - pm[0], ry - pm[1], self.z_map - pm[2]
             vx, vy = vff[0] + p.kp_xy * ex, vff[1] + p.kp_xy * ey
             vz = p.kp_z * ez
             n = math.sqrt(vx * vx + vy * vy + vz * vz)
