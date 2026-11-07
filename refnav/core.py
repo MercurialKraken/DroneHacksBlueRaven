@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
 AIRBORNE = ("climb", "hover", "follow")
+HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 5.0   # the path is rebuilt only if the aircraft has moved this much on the ground
 
 
 @dataclass
@@ -341,9 +342,9 @@ class Mission:
         return False
 
     def _requalify(self, now: float, out: Output, why: str) -> None:
-        # Cancel the old priming interval and its held position. The original
-        # preflight deadline remains t_started; this cannot renew its budget.
-        self.sp, self.home, self.targets, self.path, self.speed = None, None, [], None, None
+        # the held setpoint is dropped; the path stays (built on the ground, kept while home has not moved) and the
+        # preflight deadline remains t_started, so requalifying cannot renew its budget
+        self.sp = None
         self._set("wait", now, out, why)
 
     def step(self, now: float, v: Vehicle) -> Output:
@@ -405,6 +406,8 @@ class Mission:
                 self.why = "waiting for an explicit disarmed PX4 report"
             elif not v.pos_ok or v.pos is None or v.heading is None:
                 self.why = "waiting for PX4 position and heading"
+            elif (bad := self._plan_from(v)):
+                self._end(now, out, f"refused: {bad}")
             elif not ok:
                 self.why = why
             elif not self.depth_fresh(now):
@@ -415,16 +418,8 @@ class Mission:
             elif not self.depth_ready_for_arm(now):
                 self.why = f"waiting for {p.health_quiet_s:g} s of continuously usable depth"
             else:
-                n, e, d = v.pos
-                self.home = (n, e, d, v.heading)
-                self.sp = [n, e, d, v.heading]
-                c, s = math.cos(v.heading), math.sin(v.heading)
-                self.targets = [(n + f * c + l * s, e + f * s - l * c) for f, l in p.route]
-                bad = self._build_path()
-                if bad:
-                    self._end(now, out, f"refused: {bad}")
-                else:
-                    self._set("arm", now, out)
+                self.sp = list(self.home)
+                self._set("arm", now, out)
         elif ph == "arm":
             ok, why = self.health.arm_ok(now)
             if not ok:
@@ -478,6 +473,18 @@ class Mission:
         # PX4 owns the landing once AUTO_LAND is seen: nothing streams from then on
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
+
+    def _plan_from(self, v: Vehicle) -> str | None:
+        """Home, targets and path from where the aircraft sits, built once and again only if it has moved: the build
+        blocks the tick, so it runs before the readiness windows start, never between them and arming."""
+        n, e, d = v.pos
+        if self.home is not None and math.hypot(n - self.home[0], e - self.home[1]) < HOME_MOVED_M \
+                and abs(float(F.wrap(v.heading - self.home[3]))) < math.radians(HOME_TURNED_DEG):
+            return None
+        self.home = (n, e, d, v.heading)
+        c, s = math.cos(v.heading), math.sin(v.heading)
+        self.targets = [(n + f * c + l * s, e + f * s - l * c) for f, l in self.p.route]
+        return self._build_path()
 
     def _build_path(self) -> str | None:
         """Path and speed profile from home through the targets (the climb never moves north or east).

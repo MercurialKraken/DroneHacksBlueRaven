@@ -530,6 +530,24 @@ def test_the_path_is_built_on_the_ground_before_arming(monkeypatch: pytest.Monke
     assert m.follower.path is m.path
 
 
+def test_requalifying_on_the_ground_keeps_the_path() -> None:
+    """A requalify (here: depth stale once at arm) must not rebuild: a rebuild blocks the tick, staling the inputs it
+    then requalifies on, which loops forever."""
+    builds: list[str] = []
+    stale_once: list[bool] = []
+
+    def watch(t: float, m: C.Mission) -> None:
+        if not builds:
+            build = m.path_builder
+            m.path_builder = lambda pts: builds.append(m.phase) or build(pts)
+        if m.phase == "arm" and not stale_once:
+            stale_once.append(True)
+            m.depth_ready_since = None                  # depth drops out once between readiness and arming
+    m, px4, log = fly(C.Params(route=ROUTE), on_tick=watch)
+    assert m.result == "complete", (m.result, m.why)
+    assert stale_once and builds == ["wait"]
+
+
 def test_a_reversal_route_flies_to_its_point_and_back() -> None:
     cmds: list[F.Command] = []
     m, px4, log = fly(C.Params(route=[(2.0, 0.0), (0.0, 0.0)]),
