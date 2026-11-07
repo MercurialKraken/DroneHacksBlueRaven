@@ -1,5 +1,11 @@
 # perception/ — stereo depth for the real drone
 
+> **Status: independent implementation, not for merge.** Darion owns depth on the drone (Task C)
+> and has his own implementation. This one was written in parallel before that was known. It is
+> kept as a **cross-check**: two independent SGBM pipelines on the same frames should agree, and
+> where they don't, one of them has a calibration, scale or baseline mistake. If the team prefers,
+> parts of it (tests, the 16UC1 conversion, the status JSON) can be borrowed.
+
 **Why.** The real drone publishes no depth image: the organizers' camera config disables it to save
 USB bandwidth (`issues.md` → Hardware). Without depth, drift correction (`map_align`) and any live
 obstacle check cannot run on hardware. `todos.md` → "Also needed": *compute it on the Jetson from
