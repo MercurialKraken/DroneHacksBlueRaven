@@ -144,6 +144,28 @@ def test_interpolation_is_exact_at_samples_and_linear_between():
     assert yaw == pytest.approx(11.0, abs=1e-6)
 
 
+def test_an_exact_stamp_returns_that_sample_untouched():
+    """On the drone, depth and odometry share the capture stamp: the buffer must return that very sample."""
+    b = PoseBuffer()
+    for k in range(30):                                          # 30 Hz odometry with irregular stamps
+        t = 100.0 + k / 30.0 + (0.001 if k % 3 else 0.0)
+        b.add_position(t, (k * 0.01, 0.5, 1.0)); b.add_attitude(t, (math.sin(k * 0.01), 0.0, 0.0, math.cos(k * 0.01)))
+    t17 = 100.0 + 17 / 30.0 + 0.001
+    p, q = b.at(t17)
+    assert np.array_equal(p, np.array([0.17, 0.5, 1.0])) and np.array_equal(q, np.array([math.sin(0.17), 0.0, 0.0, math.cos(0.17)]))
+
+
+def test_map_from_odom_round_trips_through_the_pose_message_layout():
+    """The /blueraven/map_from_odom layout (position x, y; yaw about +z as w = cos(yaw/2), z = sin(yaw/2)) keeps the
+    transform and its yaw sign: a point mapped with the decoded transform lands where the original puts it."""
+    from nav.map_align import SE2
+    for T in (SE2(-2.51, 1.11, math.radians(90)), SE2(0.3, -4.0, math.radians(-170)), SE2(1.0, 2.0, math.radians(3.5))):
+        w, z = math.cos(T.yaw / 2), math.sin(T.yaw / 2)               # what the node writes
+        back = SE2(T.x, T.y, math.atan2(2 * w * z, 1 - 2 * z * z))     # what a reader decodes (yaw from the quaternion)
+        for p_odom in ((1.0, 0.0), (0.0, 1.0), (2.5, -1.2)):
+            assert np.allclose(back.apply(*p_odom), T.apply(*p_odom), atol=1e-12)
+
+
 def test_refuses_out_of_range_and_across_gaps():
     b = PoseBuffer(horizon_s=1.0, max_gap_s=0.1)
     for k in range(30):

@@ -17,11 +17,13 @@ Two pose sources:
   pose_source:=odometry (the real drone, skybeta)
       nav_msgs/Odometry on odom_topic (default /visual_slam/tracking/odometry): ENU 'odom' = the stack's
       startup frame (x forward at start, y left), FLU body, stamped in ROS time (no mapping).
-      The starting map <- odom is taken from init_topic (geometry_msgs/PoseStamped, frame 'map', transient
-      local: the adapter's T_map_odom computed at INIT on the mark), so both use the SAME start. If
-      init_topic is empty, it is computed here from launch_key and the first odometry pose:
+      The starting map <- odom is taken from init_topic (default /blueraven/map_from_odom_init:
+      geometry_msgs/PoseStamped, frame 'map', transient local, published once by the skybeta adapter at INIT
+      on the mark; pose = the odom origin in the map, yaw about +z CCW), so both use the SAME start. If
+      init_topic is "", it is computed here from launch_key and the first odometry pose:
       T_map_odom = T_map_launch . inv(T_odom_now).
-      Publishes /blueraven/map_odom (geometry_msgs/PoseStamped, frame 'map'): the corrected map <- odom
+      Depth (Task C) and odometry carry the same capture stamp, so the buffer returns the exact sample.
+      Publishes /blueraven/map_from_odom (same message and convention): the full corrected map <- odom
       (x, y, rotation yaw about z). A consumer maps odom poses into the map with it, in place of its INIT T.
 
 Both modes publish only after `min_accepted` accepted fits, stamped with the depth frame's stamp, plus
@@ -83,7 +85,9 @@ class MapAlignNode(Node):
         if self.source not in ("px4", "odometry"):
             raise ValueError("pose_source must be px4 or odometry")
         self.filter = str(p("filter", "kf"))
-        self.init_topic = str(p("init_topic", ""))
+        # drone mode: the skybeta adapter's latched INIT map <- odom (chelsea-claude's interface, agreed on the bus);
+        # "" = compute it here from launch_key and the first odometry pose
+        self.init_topic = str(p("init_topic", "/blueraven/map_from_odom_init" if self.source == "odometry" else ""))
         launch_key = str(p("launch_key", ""))
         if not launch_key and not (self.source == "odometry" and self.init_topic):
             raise ValueError("launch_key is required (launch_sim in the sims, launch on the drone)")
@@ -110,7 +114,7 @@ class MapAlignNode(Node):
             self.create_subscription(Odometry, p("odom_topic", "/visual_slam/tracking/odometry"), self._on_odom, qos_profile_sensor_data)
             if self.init_topic:
                 self.create_subscription(PoseStamped, self.init_topic, self._on_init, LATCHED)
-            self.pub = self.create_publisher(PoseStamped, "/blueraven/map_odom", 10)
+            self.pub = self.create_publisher(PoseStamped, "/blueraven/map_from_odom", 10)
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
         self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         self.pub_status = self.create_publisher(String, "/blueraven/odom_correction/status", 10)
