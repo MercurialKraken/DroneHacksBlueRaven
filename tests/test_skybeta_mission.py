@@ -428,6 +428,50 @@ def test_hover_lands_straight_down_if_px4_holds_somewhere_else():
     assert math.hypot(sim.x - x0, sim.y - y0) < 0.45                   # stopped before it got far
 
 
+class OffsetZSim(Sim):
+    """PX4 settles 12 cm below the commanded height (rangefinder vs VIO z): more than takeoff_tol_m."""
+
+    def apply(self, cmd, t):
+        if cmd.pose is not None:
+            cmd = type(cmd)(**{**vars(cmd), "pose": (cmd.pose[0], cmd.pose[1], cmd.pose[2] - 0.12)})
+        super().apply(cmd, t)
+
+
+class NoClimbSim(Sim):
+    """Props off on the bench: armed and in Offboard, but it never leaves the ground. PX4 disarms 10 s after
+    arming (COM_DISARM_PRFLT)."""
+    t_armed = None
+
+    def apply(self, cmd, t):
+        self.published.append((t, cmd.pose, cmd.twist))
+        if self.armed and self.t_armed is None:
+            self.t_armed = t
+        if self.t_armed is not None and t - self.t_armed >= 10.0:
+            self.armed = self.offboard = False
+
+
+def test_takeoff_with_a_steady_height_offset_still_hovers_and_lands():
+    m, sim = hover(height_m=0.5, hover_s=3.0), OffsetZSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t, cmds = run(m, sim, t, t + 40.0)
+    assert m.phase == "DONE", m.why
+    hover_whys = [c.why for _, c in cmds if c.phase == "HOVER"]
+    assert hover_whys and "off the target height" in hover_whys[0]       # it went on, and said why
+    t_hover = next(tt for tt, c in cmds if c.phase == "HOVER")
+    assert t_hover - t < 0.5 / 0.3 + m.p.takeoff_settle_s + 3.0         # no endless TAKEOFF
+
+
+def test_a_takeoff_that_never_climbs_lands_instead_of_hanging():
+    m, sim = hover(height_m=0.5, hover_s=30.0), NoClimbSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t, cmds = run(m, sim, t, t + 20.0)
+    first_desc = next((tt, c) for tt, c in cmds if c.phase == "DESCEND")
+    assert "climbed only" in first_desc[1].why and first_desc[0] - t < 10.0   # before PX4's own disarm
+    assert m.phase == "DONE", m.why                                       # PX4 disarmed on the ground: done
+
+
 def test_hover_aborts_like_the_course_mission_when_offboard_drops():
     m, sim = hover(), Sim()
     t = to_ready(m, sim)

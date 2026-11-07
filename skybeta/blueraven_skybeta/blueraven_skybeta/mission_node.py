@@ -46,17 +46,21 @@ class SkybetaMissionNode(Node):
     def __init__(self) -> None:
         super().__init__("blueraven_mission")
         dp = self.declare_parameter
+        # dynamic typing for numbers: hover_s:=10 and hover_s:=10.0 both work (a plain declare types the parameter
+        # from its default and rejects an int for a double at start-up); casts below restore the intended types
+        from rcl_interfaces.msg import ParameterDescriptor
+        loose = ParameterDescriptor(dynamic_typing=True)
         sdf = Path(dp("course_map", str(ROOT / "maps" / "course_sdf.npz")).value)
         cfg = Path(dp("course_config", str(ROOT / "maps" / "course.yaml")).value)
         launch_key = dp("launch_key", "launch").value                  # the real mark on the drone
         cp4 = dp("cp4", "gate_b").value                                # "gate_b" | "window"
         # the planner's simplification may lose at most this much of the centred path's clearance (a physical
         # course built of boards and tarp isn't exactly the published one); < 0 = the planner's tight default
-        keep_centre = float(dp("keep_centre_m", 0.02).value)
+        keep_centre = float(dp("keep_centre_m", 0.02, loose).value)
         # the SAME value the flight interface gets: it corrects poses for it, but not twists, so we do
-        self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0).value)
-        rate = float(dp("rate_hz", 20.0).value)
-        params = MissionParams(**{k: type(v)(dp(k, v).value) for k, v in vars(MissionParams()).items()})
+        self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0, loose).value)
+        rate = float(dp("rate_hz", 20.0, loose).value)
+        params = MissionParams(**{k: type(v)(dp(k, v, loose).value) for k, v in vars(MissionParams()).items()})
         if params.mission not in ("hover", "course"):
             raise SystemExit(f"mission must be 'hover' or 'course', not {params.mission!r}")
 

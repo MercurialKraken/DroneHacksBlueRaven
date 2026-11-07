@@ -106,7 +106,9 @@ cd /root/team_ws && team_build.sh --packages-select blueraven_skybeta && source 
 ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
 ```
 
-Pass numbers with a decimal point (`30.0`, not `30`): the parameters are typed from their defaults.
+Our node takes `30` or `30.0`; write **decimals for the flight interface's own arguments**
+(`odom_to_ned_yaw_offset_rad:=0.0`, `max_speed_mps:=1.5`): it types them from their defaults and refuses
+an integer at start-up.
 If the node can't find `nav/`, add `export BLUERAVEN_REPO=/root/team_ws/src/blueraven` before launching.
 
 **Expect** in the log: `mission HOVER: take off to 0.50 m, hold 30 s over the take-off point, land. No
@@ -153,9 +155,11 @@ the data age at PX4 (anything over 200 ms means PX4 stopped trusting vision), dr
    grows with heading is not a constant offset: stop and ask. Write the result down either way.
 3. **Handover.** Safety pilot: arm with the mode switch on **Altitude**, throttle low, then switch to
    **Position**. Expect `offboard_active` true in `/skybeta/state` and `WAIT_OFFBOARD -> TAKEOFF` in the
-   log; motors spin up. With no props it can't climb: PX4 disarms about 10 s after arming
-   (`COM_DISARM_PRFLT`), and the node logs `TAKEOFF -> ABORTED: Offboard ended ...`, calls `/skybeta/hold`
-   once and goes silent. **That is the expected bench result.**
+   log; motors spin up (the interface's 0.3 m floor asks for 0.3 m at once). With no props it can't climb:
+   about 7 s later the node logs `TAKEOFF -> DESCEND: climbed only 0.00 of 0.50 m ...: landing`, and when
+   PX4 disarms (about 10 s after arming, `COM_DISARM_PRFLT`) it logs `DESCEND -> DONE`. If PX4 disarms
+   first, it logs `TAKEOFF -> ABORTED: Offboard ended ...` instead and calls `/skybeta/hold` once. **Either
+   is the expected bench result**; anything else (no TAKEOFF, an error, a crash) is not.
 4. **Take-back practice.** Restart the node (it never re-engages after an abort, by design). Arm, switch
    to Position, then raise the throttle towards centre: Offboard must end, the node must go `ABORTED`.
 5. **Stack restart (optional).** In `WAIT_OFFBOARD`, restart the stack: the node goes back to `INIT`
@@ -168,7 +172,10 @@ and takes over at **any** unexpected motion.
 
 1. Drone still on the launch mark; status `WAIT_OFFBOARD`; recording started.
 2. Pilot arms (Altitude, throttle low), then switches to Position within a few seconds.
-3. Expect: climb to `height_m` at 0.3 m/s; `HOVER` for `hover_s`; `DESCEND` at 0.2 m/s; PX4 detects the
+3. Expect: a jump to the interface's 0.3 m floor as Offboard starts, then the climb to `height_m` at 0.3 m/s.
+   If PX4 settles more than 8 cm off the height, the node waits up to 5 s, then hovers anyway and says by
+   how much (`holding -0.12 m off the target height`); if it climbed less than half way, it lands. Then
+   `HOVER` for `hover_s`; `DESCEND` at 0.2 m/s; PX4 detects the
    touchdown and disarms (about 2 s); `DONE`. If it is on the floor and still armed after about 5 s, the
    pilot disarms it (the node keeps commanding a gentle descent until PX4 reports landed and disarmed).
 4. **If it drifts more than 0.4 m from the take-off point** while climbing or hovering, the node descends

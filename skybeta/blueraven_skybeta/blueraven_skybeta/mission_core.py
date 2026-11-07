@@ -89,6 +89,9 @@ class MissionParams:
     yaw_rate_k: float = 1.0             # curvature speed limit: v <= max_yaw_rate / |k|
     arrive_m: float = 0.10
     takeoff_tol_m: float = 0.08
+    takeoff_settle_s: float = 5.0       # after the climb ramp: wait this long for the height, then go on anyway
+                                        # (PX4 may hold a steady offset: rangefinder vs VIO z). Never hang there
+    min_climb_frac: float = 0.5         # ...but only if it climbed at least this share of the way; else land
     state_stale_s: float = 0.6          # /skybeta/state is 5 Hz
     odom_stale_s: float = 0.5           # 30 Hz, but skybeta-09's bench saw gaps up to ~0.3 s (2026-11-07)
     odom_jump_m: float = 0.15           # a sample this far from the last one AND faster than odom_jump_mps
@@ -145,6 +148,9 @@ class SkybetaMission:
                          if (params.wall_centring and params.mission == "course" and course_map is not None) else None)
         self.poses: list[tuple[float, float, float, float, float]] = []   # (stamp, x, y, z, yaw) in odom
         self.t_hover: float | None = None
+        self.t_ramp_done: float | None = None
+        self.z_takeoff_start: float | None = None
+        self.why_height: str | None = None
         self.land_xy_odom: tuple[float, float] | None = None   # hover: descend over this odom point
         self.hold_xy_on_descent = True      # false after a hold-error: straight down, no xy correction
         self.phase = "INIT"
@@ -372,6 +378,7 @@ class SkybetaMission:
                 x, y, z, _ = self.odom
                 z_target = float(self.T_odom_map[2, 3] + self.z_map) if abs(self.T_odom_map[2, 2] - 1) < 1e-9 else z
                 self.takeoff = (x, y, z_target, z)
+                self.z_takeoff_start, self.t_ramp_done = z, None
                 self._set("TAKEOFF", f"Offboard: climbing to {p.height_m:.2f} m", out)
             else:
                 x, y, z, _ = self.odom
@@ -405,16 +412,34 @@ class SkybetaMission:
             z_ref = min(z_target, z_ref + p.climb_mps * dt)
             self.takeoff = (x0, y0, z_target, z_ref)
             out.pose = (x0, y0, max(z_ref, z))
-            if z_ref >= z_target and abs(z - z_target) < p.takeoff_tol_m:
+            at_height = z_ref >= z_target and abs(z - z_target) < p.takeoff_tol_m
+            if z_ref >= z_target and self.t_ramp_done is None:
+                self.t_ramp_done = t
+            settled_off = (not at_height and self.t_ramp_done is not None
+                           and t - self.t_ramp_done >= p.takeoff_settle_s)
+            if settled_off:
+                need = z_target - self.z_takeoff_start
+                climbed = z - self.z_takeoff_start
+                if need > 0 and climbed < p.min_climb_frac * need:
+                    self.land_xy_odom = (x0, y0)
+                    self._set("DESCEND", f"climbed only {climbed:.2f} of {need:.2f} m in "
+                                         f"{p.takeoff_settle_s:.0f} s after the ramp: landing", out)
+                    out.pose = None
+                    at_height = False
+                else:
+                    self.why_height = f"holding {z - z_target:+.2f} m off the target height (PX4 vs odom z?)"
+                    at_height = True
+            if at_height and self.phase == "TAKEOFF":
+                note = f"; {self.why_height}" if self.why_height else ""
                 if p.mission == "hover":
                     self.t_hover = t
-                    self._set("HOVER", f"at {p.height_m:.2f} m; hovering {p.hover_s:.0f} s", out)
+                    self._set("HOVER", f"at {p.height_m:.2f} m; hovering {p.hover_s:.0f} s{note}", out)
                     out.phase, out.why = self.phase, self.why
                     return out
                 self.s_ref = self.s_proj = self.path.project(self._to_map(x, y, z)[:2], 0.0, 0.5)
                 self._set("FOLLOW", "at flight height; following the route", out)
                 out.pose = None
-            else:
+            elif self.phase == "TAKEOFF":                      # still climbing (a DESCEND falls through)
                 out.phase, out.why = self.phase, self.why
                 return out
 
