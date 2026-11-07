@@ -21,6 +21,9 @@ INTERFACE_ARGS = [
     ('allow_mode_request', 'false', 'enable /skybeta/request_offboard. SIM ONLY'),
     ('auto_offboard_on_arm', 'true', 'enter Offboard once when the pilot arms, then switches to Position'),
     ('odometry_topic', '/visual_slam/tracking/odometry', 'source of the ENU pose'),
+    # the guide's frame caveat (competitor_guide.md section 1): set only once measured on the bench
+    ('anchor_setpoints', 'false', 'express setpoints as a displacement from the vision origin (fixes translation)'),
+    ('odom_to_ned_yaw_offset_rad', '0.0', 'measured constant yaw between vision odom and PX4 (fixes rotation)'),
 ]
 MISSION_ARGS = [
     ('mission', 'hover', "'hover' (take off, hold hover_s, land: first flights) or 'course'"),
