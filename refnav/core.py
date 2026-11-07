@@ -52,6 +52,7 @@ AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold")
 @dataclass
 class Params:
     route: list[tuple[float, float]] = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
+    leg_yaw_off_deg: list = field(default_factory=lambda: [0.0])  # per leg: camera looks this many deg right (+) / left (-) of travel
     height_m: float = 1.2
     speed_mps: float = 0.6
     lead_max_m: float = 1.0                     # the carrot never leads the aircraft by more
@@ -402,10 +403,10 @@ class Mission:
             if now - self.t_phase >= p.hover_s:
                 self._next_leg(now, out, v)
         elif ph == "turn":
-            err = _wrap(self.leg_heading - self.sp[3])
+            err = _wrap(self.leg_yaw - self.sp[3])
             step = math.radians(p.yaw_rate_dps) * dt
             self.sp[3] = _wrap(self.sp[3] + max(-step, min(step, err)))
-            if abs(err) < 1e-3 and abs(_wrap(self.leg_heading - v.heading)) < math.radians(p.face_tol_deg):
+            if abs(err) < 1e-3 and abs(_wrap(self.leg_yaw - v.heading)) < math.radians(p.face_tol_deg):
                 self._set("check", now, out)
         elif ph == "check":
             # a depth frame captured AFTER the turn ended looks along this leg
@@ -457,6 +458,9 @@ class Mission:
         self.leg_start = start
         self.leg_dir = (dn / self.leg_len, de / self.leg_len) if self.leg_len > 1e-6 else (1.0, 0.0)
         self.leg_heading = math.atan2(de, dn) if self.leg_len > 1e-6 else self.sp[3]
+        offs = self.p.leg_yaw_off_deg
+        off = math.radians(offs[self.leg]) if self.leg < len(offs) else 0.0
+        self.leg_yaw = _wrap(self.leg_heading + off)
         self.clr_hist, self.corr_t = [], None
         self._set("turn", now, out, f"leg {self.leg + 1}/{len(self.targets)}")
 
