@@ -25,6 +25,7 @@ from tf2_ros import Buffer, TransformListener
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
 import cuvslam
+from .imu_sync import ImuFrameSync
 from .pose_cov import transform_pose_covariance
 from .stereo_pairing import add_half
 from .vio_evidence import visually_tracked
@@ -87,7 +88,9 @@ class CuvslamLibNode(Node):
         self.tf_listener = TransformListener(self.tf_buf, self)
         self.info: dict[str, CameraInfo | None] = {"l": None, "r": None}
         self.half: dict[int, dict[str, np.ndarray]] = {}                      # stamp ns -> {"l": img, "r": img}
-        self.imu_q: list[tuple[int, list[float], list[float]]] = []                     # (t_ns, accel, gyro), unregistered
+        # Frames wait for IMU coverage (see imu_sync.py): after a tracking stall the executor may hand
+        # over queued images before queued IMU, and tracking at once threw that IMU away.
+        self.sync = ImuFrameSync(wait_s=float(dp("imu_wait_s", 0.08)))
         self.last_imu_ns: int = -1
         self.last_frame_ns: int = -1
         self.tracker: cuvslam.Tracker | None = None
@@ -128,8 +131,10 @@ class CuvslamLibNode(Node):
             # Five samples cover only 10 ms at 500 Hz. SDK work runs in this
             # executor too; retain a bounded second of IMU arrivals through a
             # processing burst. Best effort remains compatible with real drivers.
+            # 2048 samples is about 4 s at the sim's 460-480 Hz: a 1.1 s stall (T4) overflowed 512.
             self.create_subscription(Imu, topics["imu"], self._imu,
-                                     QoSProfile(depth=512, reliability=ReliabilityPolicy.BEST_EFFORT))
+                                     QoSProfile(depth=2048, reliability=ReliabilityPolicy.BEST_EFFORT))
+            self.create_timer(0.02, self._drain)            # releases frames whose IMU wait timed out
         self.create_timer(10.0, self._log)
         self.get_logger().info(f"cuVSLAM library {cuvslam.get_version()} | mode "
                                f"{'Inertial' if self.use_imu else 'Multicamera'} | frames base={self.base_frame} "
@@ -193,10 +198,13 @@ class CuvslamLibNode(Node):
     # ---------------------------------------------------------------- inputs
     def _imu(self, m: Imu) -> None:
         t = _stamp_ns(m.header)
-        self.imu_q.append((t, [m.linear_acceleration.x, m.linear_acceleration.y, m.linear_acceleration.z],
-                           [m.angular_velocity.x, m.angular_velocity.y, m.angular_velocity.z]))
-        if len(self.imu_q) > 5000:
-            del self.imu_q[:1000]
+        self.sync.add_imu(t, [m.linear_acceleration.x, m.linear_acceleration.y, m.linear_acceleration.z],
+                          [m.angular_velocity.x, m.angular_velocity.y, m.angular_velocity.z])
+        self._drain()
+
+    def _drain(self) -> None:
+        for r in self.sync.ready(time.monotonic()):
+            self._track(r.t_ns, r.left, r.right, r.imu)
 
     def _image(self, side: str, m: Image) -> None:
         if m.encoding.lower() not in ("mono8", "8uc1"):
@@ -206,41 +214,40 @@ class CuvslamLibNode(Node):
         h, dropped = add_half(self.half, t, side, img)
         self.n["unpaired"] += dropped
         if h is not None:
-            self._track(t, h["l"], h["r"])
+            if self.use_imu:
+                self.sync.add_frame(t, h["l"], h["r"], time.monotonic())
+                self._drain()
+            else:
+                self._track(t, h["l"], h["r"], [])
 
     # -------------------------------------------------------------- tracking
-    def _track(self, t: int, left: np.ndarray, right: np.ndarray) -> None:
+    def _track(self, t: int, left: np.ndarray, right: np.ndarray, imu: list) -> None:
         started = time.perf_counter()
         self._processing_result: str = "skipped"
         self._processing_details: dict[str, str] = {}
         try:
-            self._track_frame(t, left, right)
+            self._track_frame(t, left, right, imu)
         except BaseException:
             self._processing_result = "exception"
             raise
         finally:
             self._complete(t, self._processing_result, (time.perf_counter()-started)*1000.)
 
-    def _track_frame(self, t: int, left: np.ndarray, right: np.ndarray) -> None:
+    def _track_frame(self, t: int, left: np.ndarray, right: np.ndarray, imu: list) -> None:
         if not self._try_init() or t <= self.last_frame_ns:
             return
-        if self.use_imu:                                   # IMU up to this frame, in order
-            self.imu_q.sort(key=lambda e: e[0])
-            keep = []
+        if self.use_imu:                                   # this frame's IMU, (previous frame, t], in order
             registered = []
-            for e in self.imu_q:
-                if e[0] > t:
-                    keep.append(e)
-                elif e[0] <= self.last_imu_ns or e[0] < self.last_frame_ns:
-                    self.n["imu_dropped"] += 1
-                else:
-                    meas = cuvslam.ImuMeasurement()
-                    meas.timestamp_ns, meas.linear_accelerations, meas.angular_velocities = int(e[0]), e[1], e[2]
-                    self.tracker.register_imu_measurement(0, meas)
-                    self.last_imu_ns = e[0]
-                    self.n["imu"] += 1
-                    registered.append(int(e[0]))
-            self.imu_q = keep
+            for e in imu:
+                if e[0] <= self.last_imu_ns:
+                    self.n["imu_dropped_reg"] = self.n.get("imu_dropped_reg", 0) + 1
+                    continue
+                meas = cuvslam.ImuMeasurement()
+                meas.timestamp_ns, meas.linear_accelerations, meas.angular_velocities = int(e[0]), e[1], e[2]
+                self.tracker.register_imu_measurement(0, meas)
+                self.last_imu_ns = e[0]
+                self.n["imu"] += 1
+                registered.append(int(e[0]))
             # A separate rosbag subscriber may receive samples that this node
             # did not. Preserve the actual SDK input boundary for honest replay.
             # Fixed-width int64 + base64 also bounds a full 5000-sample backlog
@@ -388,6 +395,9 @@ class CuvslamLibNode(Node):
         g = self.tracker.get_last_gravity() if (self.tracker is not None and self.use_imu) else None
         ob = sorted(self.obs_hist[-300:])
         obs = f"features/frame p50 {ob[len(ob) // 2]} min {ob[0]}" if ob else "no frames"
+        if self.use_imu:                                   # late IMU = what the old code called dropped
+            self.n["imu_dropped"] = self.n.get("imu_dropped_reg", 0) + self.sync.n["imu_late"]
+            self.n.update({f"sync_{k}": v for k, v in self.sync.n.items() if k != "imu_late"})
         self.get_logger().info(f"{self.n} | {tm} | {obs} | gravity {'none yet' if g is None else np.round(list(g), 2)}")
 
 
