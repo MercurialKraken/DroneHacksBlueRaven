@@ -99,6 +99,16 @@ build:
       exclude: []                                                                # (cameras see through it)
   plot_heights: [0.3, 0.76, 1.0, 1.5]           # 0.76 m is the window's centre height
 
+# Places where flights run closest to the map's surfaces (from the team's FlyX and T4 runs and the
+# perturbed-course suite). tools/audit_sdf.py reports the map's error against exact geometry here.
+audit_spots:
+  - {name: "M1 north tip",            at: [-1.930, 2.121], radius: 0.5}
+  - {name: "M2 south tip",            at: [-0.813, 1.435], radius: 0.5}
+  - {name: "M3 north tip",            at: [0.305, 2.121],  radius: 0.5}
+  - {name: "first maze turn exit",    at: [-1.94, 2.42],   radius: 0.4}
+  - {name: "Gate B approach",         at: [0.53, -0.95],   radius: 0.4}
+  - {name: "wall end near point 8",   at: [0.57, 2.77],    radius: 0.4}
+
 # Checked through the runtime loader after every build; a failure keeps the previous map file.
 # Expected values come from the OBJ's piece dimensions. Ridge points (midway between two
 # surfaces) read up to ~2.5 cm low because the field is trilinear between 5 cm voxels.

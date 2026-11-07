@@ -48,6 +48,15 @@ The build runs every `sanity` point in `course.yaml` through the runtime loader.
 
 **How it's built.** Each piece is voxelized at a third of the output cell (1.67 cm): its triangles are sampled densely and the enclosed interior is filled. An open tube or a window stays open because it connects to the outside. Two distance transforms then give the signed distance. Zero sits at the centre of the surface voxels, which is within 0.8 cm of the true surface. The result is downsampled exactly to 5 cm.
 
+**Measured accuracy** (`python tools/audit_sdf.py maps/course.yaml --spots-only`, against exact distances to the same mesh, at z 0.7, 1.0 and 1.3 m around the six `audit_spots`: the M1, M2 and M3 tips, the first-turn exit, Gate B, and the wall end near route point 8):
+
+| Where | Worst optimistic error (the map promises room that isn't there) |
+|---|---|
+| At planning clearances, 0.2–0.5 m from a surface | **0.84 cm** (p99 0.78 cm, median 0.20 cm) |
+| Right against a surface, 1–2 cm away | 1.74 cm |
+
+The typical absolute error is 0.37 cm, and the most conservative point (on a corridor centre line) reads 2.9 cm low. **Add 1 cm to any clearance margin planned on this map.** The thin margins in flight come from drift and tracking, not from the map.
+
 **Accuracy.** Expect about ±1 cm near a surface. Midway between two surfaces (a corridor's centre line, the middle of the window) the field reads **2–3 cm low**, because it's interpolated linearly between 5 cm voxels across the ridge. That error is conservative: clearance looks smaller than it really is.
 
 ## Numbers that matter downstream
