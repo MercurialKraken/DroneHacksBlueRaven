@@ -5,7 +5,7 @@ import math
 import pytest
 
 from course_planner import load_map, rasterise
-from course_planner.make_routes import HERE, build
+from course_planner.make_routes import FLYX_SPAWN_XY, HERE, build
 
 pytest.importorskip("scipy", reason="route generation requires scipy; see make_routes.build")
 
@@ -33,14 +33,15 @@ def test_committed_route_files_match_the_generator():
         doc = json.loads((root / "routes" / name).read_text())
         assert doc["params"] == params, name
         assert doc["route"] == [[float("%.3f" % a), float("%.3f" % b)] for a, b in route], name
-    assert json.loads((root / "route.json").read_text()) == json.loads((root / "routes" / "route_v4.json").read_text())
+    assert json.loads((root / "route.json").read_text()) == json.loads((root / "routes" / "route_v5.json").read_text())
 
 
-def test_v4_leg_ends_survive_the_overshoot():
+@pytest.mark.parametrize("name", ["route_v4.json", "route_v5.json"])
+def test_leg_ends_survive_the_overshoot(name):
     m = load_map(HERE / "course_map.json")
     g = rasterise(m, 0.025)
-    L = m["launch_mark_xy"]
-    route, params = build()["route_v4.json"]
+    L = m["launch_mark_xy"] if name == "route_v4.json" else list(FLYX_SPAWN_XY)
+    route, params = build()[name]
     assert params["corridor_half_m"] >= 0.29 and params["stop_m"] > 0.4
     pts = [tuple(L)] + [_xy(L, q) for q in route]
     assert len(pts) == 20
@@ -49,6 +50,15 @@ def test_v4_leg_ends_survive_the_overshoot():
         past = (b[0] + (b[0] - a[0]) / d * 0.13, b[1] + (b[1] - a[1]) / d * 0.13)
         assert g.clearance_at(*past) >= 0.29
     assert math.dist(pts[-1], m["landing_pad"]["centre_xy"]) < 0.05
+
+
+def test_v5_is_v4_flown_from_the_spawn():
+    m = load_map(HERE / "course_map.json")
+    r = build()
+    v4 = [_xy(m["launch_mark_xy"], q) for q in r["route_v4.json"][0]]
+    v5 = [_xy(FLYX_SPAWN_XY, q) for q in r["route_v5.json"][0]]
+    assert len(v4) == len(v5)
+    assert max(math.dist(a, b) for a, b in zip(v4, v5)) < 0.05     # same course points, within pull-back rounding
 
 
 def test_fast_route_keeps_clearance_and_ends_on_pad():

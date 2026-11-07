@@ -8,7 +8,9 @@ Outputs (all for the Gate B route, all from course_map.json, nothing hand-typed)
   route_fast.json  19 legs: v1 with corner vertices merged where the straight line keeps full clearance.
   route_v2.json    route_fast + 30 deg camera offsets on legs 1 and 7. FROZE on leg 1 (run 2): don't use.
   route_v3.json    route_fast + 15 deg offset on leg 7 only + min_corridor_coverage 0.4. Predicted to hit the net.
-  route_v4.json    v3 with leg ends pulled back from walls, plus braking and wider stop checks. Current candidate.
+  route_v4.json    v3 with leg ends pulled back from walls, plus braking and wider stop checks. Assumes take-off at the
+                   0.914 mark.
+  route_v5.json    v4 from the sim's real spawn (-2.5146, 1.1144). Current candidate; route.json.
 
 refnav route format: [[forward_m, left_m], ...] from the take-off point in the drone's take-off heading.
 The drone starts facing north up the first corridor (confirmed by run 1), so forward = north, left = west.
@@ -33,6 +35,7 @@ FAST_PARAMS = dict(BASE_PARAMS, hold_s=0.2, yaw_rate_dps=90.0)
 # from a PX4 model fitted to that bag, which predicts about 0.13 m past a leg end instead of 0.30 m.
 V4_PARAMS = dict(FAST_PARAMS, lead_max_m=0.3, brake_mps2=0.1, stop_m=0.65, end_clear_m=0.35, corridor_half_m=0.35,
                  min_corridor_coverage=0.4)
+FLYX_SPAWN_XY = (-2.5146, 1.1144)   # FlyX environment.json spawn, measured on the T4 replica; NOT the 0.914 mark
 OVERSHOOT_M = 0.13          # past the end of a leg, flying V4_PARAMS
 SAFE_END_M = 0.32           # drone radius 0.29 + 0.03
 
@@ -90,7 +93,7 @@ def _dump(path, route, params):
     s = ('{"route": [\n' + ",\n".join("  [%.3f, %.3f]" % tuple(q) for q in route)
          + '\n ],\n "params": ' + json.dumps(params) + "\n}\n")
     json.loads(s)
-    Path(path).write_text(s)
+    Path(path).write_text(s, newline="\n")       # LF everywhere, so files match whichever OS generated them
 
 
 def build(map_path=HERE / "course_map.json"):
@@ -109,7 +112,17 @@ def build(map_path=HERE / "course_map.json"):
     off_v2 = [0.0] * len(fast); off_v2[0] = 30.0; off_v2[6] = 30.0
     off_v3 = [0.0] * len(fast); off_v3[6] = 15.0
     v4 = _pull_back(fast, m, pl.params.grid_res_m)
+    # v5: same course path, flown from where the sim actually spawns the drone. Routes are relative to the
+    # take-off point, so a spawn 0.2 m north of the mark moves every waypoint 0.2 m north (T4: leg 1 ended
+    # 0.25 m from the net). Same vertex layout as v1, so the keep indices still apply.
+    m5 = dict(m, launch_mark_xy=list(FLYX_SPAWN_XY))
+    pl5 = plan(m5, "gate_b", with_return=False)
+    v1_5 = [tuple(map(float, q)) for q in to_refnav_route(pl5, m5["launch_mark_xy"], math.pi / 2)]
+    if len(v1_5) != len(v1):
+        raise RuntimeError(f"plan from the spawn has {len(v1_5)} vertices, not {len(v1)}: keep indices would be wrong")
+    v5 = _pull_back(_merge_corners(v1_5, m5, pl5.params, keep), m5, pl5.params.grid_res_m)
     return {
+        "route_v5.json": (v5, dict(V4_PARAMS, leg_yaw_off_deg=off_v3)),
         "route_v4.json": (v4, dict(V4_PARAMS, leg_yaw_off_deg=off_v3)),
         "route_v1.json": (v1, BASE_PARAMS),
         "route_fast.json": (fast, FAST_PARAMS),
