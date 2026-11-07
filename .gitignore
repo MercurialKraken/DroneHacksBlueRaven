@@ -1,1 +1,5 @@
 *.pyc
+__pycache__/
+.pytest_cache/
+bags/
+*.tgz
