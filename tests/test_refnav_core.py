@@ -5,6 +5,7 @@ the same decisions."""
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from devsim.world import DEPTH_BORDER_PX  # noqa: E402
 from refnav import core as C  # noqa: E402
 from refnav import depth as D  # noqa: E402
 from refnav import follow as F  # noqa: E402
@@ -100,7 +102,7 @@ class FakePX4:
 
     def vehicle(self) -> C.Vehicle:
         return C.Vehicle(pos=tuple(self.pos), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw),
-                         armed=self.armed, nav_state=self.nav, landed=self.landed, range_m=max(0.0, -float(self.pos[2])))
+                         armed=self.armed, nav_state=self.nav, range_m=max(0.0, -float(self.pos[2])))
 
 
 ROOM = [(0, 15.0, -15.0, 15.0), (0, -15.0, -15.0, 15.0), (1, 15.0, -15.0, 15.0), (1, -15.0, -15.0, 15.0)]
@@ -118,7 +120,7 @@ def fly(params: C.Params, walls: Iterable[Wall] = (), t0: float = 0.0, seconds: 
     on_tick(t, mission) runs before each step (outside requests)."""
     walls = list(walls) + ROOM                         # indoors: a 30 x 30 m room around everything
     if params.depth_border_px == C.Params().depth_border_px:
-        params.depth_border_px = 3                     # the real camera's 24 px border, scaled to this 160 x 100 one
+        params.depth_border_px = DEPTH_BORDER_PX
     m = C.Mission(params)
     px4 = FakePX4(yaw=yaw0)
     log: list[LogRow] = []
@@ -300,8 +302,8 @@ def test_border_crop_removes_edge_rows() -> None:
     img = np.full((H, W), np.nan, np.float32)
     img[0:3, 60:100] = 0.6
     q = (1.0, 0.0, 0.0, 0.0)
-    keep = D.level_points(img, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=1, border_px=0)
-    crop = D.level_points(img, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=1, border_px=4)
+    keep = D.DepthFrame(img, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=1, border_px=0).points()
+    crop = D.DepthFrame(img, K, R_BODY_CAM, T_BODY_CAM, D.level_rotation(q), stride=1, border_px=4).points()
     assert len(keep) == 120 and len(crop) == 0
 
 
@@ -355,7 +357,7 @@ def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind: str
             out[m] = img[m]
             return out
         return img
-    m = C.Mission(C.Params(route=[(6.0, 0.0)], speed_mps=0.5, depth_border_px=3))
+    m = C.Mission(C.Params(route=[(6.0, 0.0)], speed_mps=0.5, depth_border_px=DEPTH_BORDER_PX))
     px4 = FakePX4()
     log, t, next_depth = [], 0.0, 0.0
     while t < 40.0 and m.phase != "done":
@@ -385,7 +387,7 @@ def test_unusable_depth_never_moves_the_aircraft_and_ends_in_a_landing(kind: str
 
 
 def test_a_blank_frame_does_not_refresh_depth_and_says_why() -> None:
-    m = C.Mission(C.Params(route=[(3.0, 0.0)], depth_border_px=3))
+    m = C.Mission(C.Params(route=[(3.0, 0.0)], depth_border_px=DEPTH_BORDER_PX))
     ok = m.on_depth(1.0, render_depth(np.array([0, 0, -1.2]), 0.0, ROOM), K, R_BODY_CAM, T_BODY_CAM, q_yaw(0.0), now=1.0)
     assert ok and m.depth_t == 1.0
     assert not m.on_depth(1.5, np.full((H, W), np.nan, np.float32), K, R_BODY_CAM, T_BODY_CAM, q_yaw(0.0), now=1.5)
@@ -497,10 +499,97 @@ def test_never_forces_a_disarm_in_the_air() -> None:
     m = C.Mission(C.Params(route=ROUTE))
     m.phase, m.t_phase, m.land_auto_seen = "land", 0.0, True
     v = C.Vehicle(pos=(0.0, 0.0, -0.8), heading=0.0, pos_ok=True, q=q_yaw(0.0), armed=True,
-                  nav_state=C.NAV_AUTO_LAND, landed=False, range_m=0.8)
+                  nav_state=C.NAV_AUTO_LAND, range_m=0.8)
     for k in range(200):
         out = m.step(k * 0.05, v)
         assert "disarm_force" not in out.commands
     v.range_m = None                                    # no reading is not a touchdown either
     for k in range(200, 400):
         assert "disarm_force" not in m.step(k * 0.05, v).commands
+
+
+# ---- the path, its params and its route ----------------------------------------------------------
+def test_the_path_is_built_on_the_ground_before_arming(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building takes longer than a tick (and PX4 drops Offboard after 1 s of silence): never in the air."""
+    builds: list[tuple[str, float | None]] = []
+    profile = F.speed_profile
+    mission: list[C.Mission] = []
+
+    def watch(t: float, m: C.Mission) -> None:
+        if not mission:
+            mission.append(m)
+            build = m.path_builder
+            m.path_builder = lambda pts: builds.append(("path", m.phase, m.t_cmd)) or build(pts)
+        if m.phase == "arm":
+            assert m.path is not None and m.speed is not None
+    monkeypatch.setattr(F, "speed_profile", lambda *a, **k: builds.append(("speed", mission[0].phase,
+                                                                         mission[0].t_cmd)) or profile(*a, **k))
+    m, px4, log = fly(C.Params(route=ROUTE), on_tick=watch)
+    assert m.result == "complete", (m.result, m.why)
+    assert builds == [("path", "wait", None), ("speed", "wait", None)]     # once, before any control request
+    assert m.follower.path is m.path
+
+
+def test_a_reversal_route_flies_to_its_point_and_back() -> None:
+    cmds: list[F.Command] = []
+    m, px4, log = fly(C.Params(route=[(2.0, 0.0), (0.0, 0.0)]),
+                      on_tick=lambda t, m: cmds.append(m.cmd) if m.cmd is not None else None)
+    assert m.result == "complete" and m.follower.points_passed == 2, (m.result, m.why)
+    assert min(math.hypot(pos[0] - 2.0, pos[1]) for *_, pos in log) <= m.p.arrive_m
+    assert np.isfinite([[*c.pos, *c.vel, *c.acc, c.yaw] for c in cmds]).all()
+
+
+def _never_armed(log: Sequence[LogRow]) -> bool:
+    return not any("arm" in c for *_, c, _ in log)
+
+
+@pytest.mark.parametrize("bad", ["short", "nan", "raises"])
+def test_a_degenerate_path_refuses_before_arming(bad: str) -> None:
+    def builder(pts: list[tuple[float, float]]) -> F.Path:
+        if bad == "raises":
+            return F.fillet_path([pts[0], pts[0]], 0.3)
+        if bad == "short":
+            return F.fillet_path([pts[0], (pts[0][0] + 0.005, pts[0][1])], 0.3)
+        p = F.fillet_path(pts, 0.3)
+        p.k[3] = math.nan
+        return p
+
+    def swap(t: float, m: C.Mission) -> None:
+        m.path_builder = builder
+    m, px4, log = fly(C.Params(route=ROUTE), on_tick=swap)
+    assert m.result.startswith("refused: "), m.result
+    assert ("no path" if bad == "raises" else "degenerate path") in m.result
+    assert _never_armed(log) and not px4.armed
+
+
+@pytest.mark.parametrize("route, why", [
+    ([(0.005, 0.0), (2.0, 0.0)], "point 1 (0.005, 0.0) is within 1 cm of the take-off point"),
+    ([(2.0, 0.0), (2.0, 0.009)], "point 2 (2.0, 0.009) is within 1 cm of point 1")])
+def test_a_route_with_a_repeated_point_is_refused_at_load(route: list[tuple[float, float]], why: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(why)):
+        C.params_from_doc({"route": route})
+
+
+@pytest.mark.parametrize("lo, hi", [("tight_m", "roomy_m"), ("xtrack_slow_m", "xtrack_stop_m"),
+                                    ("face_tol_deg", "yaw_slow_deg"), ("eph_ok_m", "eph_stop_m")])
+def test_params_that_contradict_each_other_are_refused(lo: str, hi: str) -> None:
+    with pytest.raises(ValueError, match=f"{lo} .* must be less than {hi}"):
+        C.params_from_doc({"route": ROUTE}, {lo: getattr(C.Params(), hi)})
+
+
+def test_aircraft_params_win_over_the_route_file() -> None:
+    doc = {"route": [[1, 0]], "params": {"speed_mps": 0.4, "yaw_rate_dps": 90, "hold_s": 0.2}}
+    prm, unknown = C.params_from_doc(doc, {"yaw_rate_dps": 45.0, "depth_topic": "/x", "min_obstacle_px": 900.0})
+    assert prm.route == [(1.0, 0.0)] and prm.speed_mps == 0.4 and prm.yaw_rate_dps == 45.0
+    assert prm.min_obstacle_px == 900 and isinstance(prm.min_obstacle_px, int)
+    assert unknown == ["hold_s"]                     # the aircraft's other parameters are not the route's business
+
+
+def test_devsim_flies_the_aircraft_params() -> None:
+    from devsim.run import load_params
+    from main import HEIGHT_M, HOVER_S
+    from refnav.launch import flight_params
+    root = Path(__file__).resolve().parents[1]
+    prm = load_params(root / "route.json")
+    assert (prm.height_m, prm.hover_s, prm.depth_border_px) == (HEIGHT_M, HOVER_S, DEPTH_BORDER_PX)
+    assert prm.yaw_rate_dps == flight_params(root)["yaw_rate_dps"]

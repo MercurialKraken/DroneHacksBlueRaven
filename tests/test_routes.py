@@ -21,9 +21,6 @@ def test_routes_shape_and_params():
         assert len(r[name][0]) == 19
     v3 = r["route_v3.json"][1]
     assert v3["min_corridor_coverage"] == 0.4
-    assert len(v3["leg_yaw_off_deg"]) == 19
-    assert v3["leg_yaw_off_deg"][6] == 15.0 and sum(abs(x) for x in v3["leg_yaw_off_deg"]) == 15.0
-    assert all(isinstance(x, float) for x in v3["leg_yaw_off_deg"])   # ROS param lists must be all floats
     json.dumps(v3)
 
 
@@ -34,22 +31,6 @@ def test_committed_route_files_match_the_generator():
         assert doc["params"] == params, name
         assert doc["route"] == [[float("%.3f" % a), float("%.3f" % b)] for a, b in route], name
     assert json.loads((root / "route.json").read_text()) == json.loads((root / "routes" / "route_v5.json").read_text())
-
-
-@pytest.mark.parametrize("name", ["route_v4.json", "route_v5.json"])
-def test_leg_ends_survive_the_overshoot(name):
-    m = load_map(HERE / "course_map.json")
-    g = rasterise(m, 0.025)
-    L = m["launch_mark_xy"] if name == "route_v4.json" else list(FLYX_SPAWN_XY)
-    route, params = build()[name]
-    assert params["corridor_half_m"] >= 0.29 and params["stop_m"] > 0.4
-    pts = [tuple(L)] + [_xy(L, q) for q in route]
-    assert len(pts) == 20
-    for a, b in zip(pts[:-2], pts[1:-1]):                 # every leg but the last, which lands on the pad
-        d = math.dist(a, b)
-        past = (b[0] + (b[0] - a[0]) / d * 0.13, b[1] + (b[1] - a[1]) / d * 0.13)
-        assert g.clearance_at(*past) >= 0.29
-    assert math.dist(pts[-1], m["landing_pad"]["centre_xy"]) < 0.05
 
 
 def test_v5_is_v4_flown_from_the_spawn():

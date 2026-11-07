@@ -6,12 +6,16 @@ import argparse
 import json
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
 from refnav import core as C
 from refnav import follow as F
-from .world import K, R_BODY_CAM, T_BODY_CAM, World, q_yaw
+from refnav.launch import flight_params
+from .world import DEPTH_BORDER_PX, K, R_BODY_CAM, T_BODY_CAM, World, q_yaw
+
+ROOT = Path(__file__).resolve().parents[1]
 
 DT = 1 / 60                     # physics tick; mission every 3 (20 Hz), depth every 4 (15 Hz)
 DEPTH_LATENCY_TICKS = 2         # ~33 ms, the sim models 30 ms
@@ -28,7 +32,7 @@ class PX4:
     def __init__(self, n, e, yaw, drift, rng):
         self.pos, self.vel = np.array([n, e, 0.0]), np.zeros(3)
         self.yaw, self.off = yaw, np.zeros(3)
-        self.armed, self.nav, self.landed = False, 4, True
+        self.armed, self.nav = False, 4
         self.stream_since = None
         self.drift, self.rng = drift, rng
 
@@ -75,11 +79,10 @@ class PX4:
             self.pos[2], self.vel[2] = 0.0, min(self.vel[2], 0.0)
             if self.nav == C.NAV_AUTO_LAND:
                 self.armed, self.vel[:] = False, 0.0
-        self.landed = self.pos[2] > -0.05
 
     def vehicle(self):
         return C.Vehicle(pos=tuple(self.est()), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw), vel=tuple(self.vel[:2]),
-                         armed=self.armed, nav_state=self.nav, landed=self.landed)
+                         armed=self.armed, nav_state=self.nav)
 
 
 def degrade(img, rng):
@@ -90,18 +93,16 @@ def degrade(img, rng):
     return z
 
 
-def load_params(path, height, hover):
+def load_params(path, height=None, hover=None):
+    """The aircraft's params: the route file's, then flight.yaml, then main.py's height and hover (or the CLI's)."""
+    from main import HEIGHT_M, HOVER_S
     with open(path) as f:
         doc = json.load(f)
-    pts = doc["route"] if isinstance(doc, dict) else doc
-    prm = C.Params(route=[(float(a), float(b)) for a, b in pts], height_m=1.2, hover_s=5.0)   # the starter's mission
-    for k, v in (doc.get("params", {}) if isinstance(doc, dict) else {}).items():
-        if hasattr(prm, k):                            # the route generator may carry params this mission no longer has
-            setattr(prm, k, type(getattr(prm, k))(v))
-        else:
-            print(f"ignored route param {k}", file=sys.stderr)
-    prm.height_m = prm.height_m if height is None else height
-    prm.hover_s = prm.hover_s if hover is None else hover
+    over = {**flight_params(ROOT), "height_m": HEIGHT_M if height is None else height,
+            "hover_s": HOVER_S if hover is None else hover, "depth_border_px": DEPTH_BORDER_PX}
+    prm, unknown = C.params_from_doc(doc, over)
+    for k in unknown:
+        print(f"ignored route param {k}", file=sys.stderr)
     return prm
 
 
@@ -172,8 +173,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--world", required=True)
     ap.add_argument("--route", required=True, help="route.json: {route: [[forward, left], ...], params: {...}}")
-    ap.add_argument("--height", type=float, help="override height_m (default: route params, else 1.2)")
-    ap.add_argument("--hover", type=float, help="override hover_s (default: route params, else 5.0)")
+    ap.add_argument("--height", type=float, help="override height_m (default: main.py's HEIGHT_M)")
+    ap.add_argument("--hover", type=float, help="override hover_s (default: main.py's HOVER_S)")
     ap.add_argument("--noise", action="store_true", help="stereo-like depth noise, dropout, 1%% frame drops")
     ap.add_argument("--drift", type=float, default=0.0, help="VIO random walk, m/sqrt(s)")
     ap.add_argument("--seed", type=int, default=0)

@@ -51,5 +51,4 @@ then fly it in the sim with the managed **Run saved file** so it gets a grade.
 
     python3 -m course_planner.make_routes      # -> routes/route_v1.json, route_fast.json, route_v2.json, route_v3.json
 
-refnav flies the route's points as one smooth path (refnav/follow.py); per-leg params in older route files are
-ignored with a warning. Recording analysis: `python3 tools/analyze_bag.py <bag.mcap> --out <name>`.
+refnav flies the route's points as one smooth path (refnav/follow.py). Recording analysis: `python3 tools/analyze_bag.py <bag.mcap> --out <name>`.

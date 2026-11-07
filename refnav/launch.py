@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import Any
 
 
 def params_files(project: str | os.PathLike[str]) -> list[str]:
@@ -16,6 +17,24 @@ def params_files(project: str | os.PathLike[str]) -> list[str]:
     if deployment.is_file():
         args += ["--params-file", str(deployment)]
     return args
+
+
+def flight_params(project: str | os.PathLike[str]) -> dict[str, Any]:
+    """flight.yaml's parameters from its flat `key: scalar` lines, read without pyyaml so devsim needs only numpy."""
+    out: dict[str, Any] = {}
+    for line in (Path(project) / "flight.yaml").read_text(encoding="utf-8").splitlines():
+        key, sep, val = line.split("#", 1)[0].strip().partition(":")
+        val = val.strip().strip("'\"")
+        if not sep or not val:
+            continue
+        out[key] = {"true": True, "false": False}.get(val, val)
+        for cast in (int, float):
+            try:
+                out[key] = cast(val)
+                break
+            except ValueError:
+                pass
+    return out
 
 
 def arguments(project: str | os.PathLike[str], *, height_m: float, hover_s: float,

@@ -19,6 +19,7 @@ PROJECT_BACK_M = 0.25   # the aircraft is matched to the path only this far behi
 PROJECT_AHEAD_M = 0.25  # ...or ahead of the reference, so a U-turn never jumps to the parallel corridor
 SPEED_GRID_M = 0.05     # the speed profile is solved on nodes this far apart
 JERK_WEIGHT = 1.0       # flight time (s) traded for each (m/s3)^2 s of squared jerk
+CUSP_DEG = 170.0        # a sharper corner is a reversal: no arc can turn it and still pass near the point
 LEAD_M, LEAD_MAX_M = 0.03, 0.10  # the reference leads the aircraft by this much: further ahead, PX4's position gain
                                  # pulls straight at it, cutting corners and adding speed the profile never planned
 
@@ -83,39 +84,59 @@ class Path:
         return np.round(np.stack([self.x[::every], self.y[::every]], 1), 3).tolist()
 
 
-def fillet_path(corners: list[tuple[float, float]], radius: float) -> Path:
-    """Straight legs joined by arcs of up to `radius`, each using at most half of either adjacent leg."""
+def arclength(P: np.ndarray) -> np.ndarray:
+    """Distance along the polyline P (N,2) at each of its points."""
+    return np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
+
+
+def resample(s0: np.ndarray, n: int, *values: np.ndarray) -> tuple[np.ndarray, ...]:
+    """n evenly spaced distances over s0 and each of `values` interpolated there."""
+    s = np.linspace(0.0, s0[-1], n)
+    return (s, *(np.interp(s, s0, v) for v in values))
+
+
+def fillet_path(corners: list[tuple[float, float]], radius: float, cut: float = math.inf) -> Path:
+    """Straight legs joined by arcs of up to `radius`, each using at most half of either adjacent leg and passing within
+    `cut` of its corner. A turn sharper than CUSP_DEG stops on its corner and turns back there (speed ~0)."""
     P = [np.asarray(c, float) for c in corners]
     P = [p for i, p in enumerate(P) if i == 0 or np.hypot(*(p - P[i - 1])) > 1e-6]
     if len(P) < 2:
         raise ValueError("a path needs two distinct points")
-    pieces, start = [], P[0]                            # ("line", a, b) | ("arc", centre, r, start_angle, sweep)
+    pieces, start, k0 = [], P[0], 0.0           # ("line", a, b, k at a) | ("arc", centre, r, start_angle, sweep)
     for i in range(1, len(P) - 1):
         u1 = (P[i] - P[i - 1]) / np.hypot(*(P[i] - P[i - 1]))
         u2 = (P[i + 1] - P[i]) / np.hypot(*(P[i + 1] - P[i]))
         turn = math.atan2(u1[0] * u2[1] - u1[1] * u2[0], float(u1 @ u2))     # + = right turn in NED
         if abs(turn) < 1e-3:
             continue
+        if abs(turn) > math.radians(CUSP_DEG):
+            pieces.append(("line", start, P[i], k0))
+            start, k0 = P[i], turn / STEP_M             # the whole turn within one sample: the profile stops there
+            continue
+        half = abs(turn) / 2.0
         room = 0.5 * min(np.hypot(*(P[i] - P[i - 1])), np.hypot(*(P[i + 1] - P[i])))
-        r = min(radius, room / math.tan(abs(turn) / 2.0))
-        t = r * math.tan(abs(turn) / 2.0)
+        r = min(radius, room / math.tan(half), cut * math.cos(half) / (1.0 - math.cos(half)))
+        t = r * math.tan(half)
         a, b = P[i] - u1 * t, P[i] + u2 * t
         c = a + np.array([-u1[1], u1[0]]) * math.copysign(r, turn)          # the centre is on the inside of the turn
-        pieces += [("line", start, a), ("arc", c, r, math.atan2(*(a - c)[::-1]), turn)]
-        start = b
-    pieces.append(("line", start, P[-1]))
+        pieces += [("line", start, a, k0), ("arc", c, r, math.atan2(*(a - c)[::-1]), turn)]
+        start, k0 = b, 0.0
+    pieces.append(("line", start, P[-1], k0))
 
     xs, ys, ps, ks, ds = [], [], [], [], []
     for pc in pieces:
         if pc[0] == "line":
-            _, a, b = pc
+            _, a, b, k_a = pc
             L = float(np.hypot(*(b - a)))
             if L > 1e-6:                                # two arcs sharing a short leg leave a zero-length line
                 m = math.ceil(L / STEP_M)
                 f = np.arange(m) / m
+                if k_a:                                 # out of a cusp between the approach's samples: the aircraft
+                    f = np.r_[0.0, f + 0.5 / m]         # projects onto the leg it is on, never ties with the way in
                 xs.append(a[0] + (b[0] - a[0]) * f); ys.append(a[1] + (b[1] - a[1]) * f)
-                ps.append(np.full(m, math.atan2(b[1] - a[1], b[0] - a[0]))); ks.append(np.zeros(m))
-                ds.append(np.full(m, L / m))
+                ps.append(np.full(len(f), math.atan2(b[1] - a[1], b[0] - a[0])))
+                ks.append(np.r_[k_a, np.zeros(len(f) - 1)])
+                ds.append(np.diff(np.r_[f, 1.0]) * L if k_a else np.full(m, L / m))
         else:
             _, c, r, th0, sweep = pc
             m = math.ceil(abs(sweep) * r / STEP_M)
@@ -131,6 +152,10 @@ def fillet_path(corners: list[tuple[float, float]], radius: float) -> Path:
 def polyline_path(x: np.ndarray, y: np.ndarray) -> Path:
     """A Path along a dense, smooth polyline: curvature of the circle through each three neighbours, heading along
     the chord across each point, resampled every STEP_M."""
+    keep = np.r_[True, np.hypot(np.diff(x), np.diff(y)) > 1e-9]       # a repeated sample has no curvature
+    x, y = np.asarray(x)[keep], np.asarray(y)[keep]
+    if len(x) < 3:
+        raise ValueError("a polyline path needs three distinct samples")
     P = np.stack([x, y], 1)
     a, b, c = P[:-2], P[1:-1], P[2:]
     cross = (b - a)[:, 0] * (c - b)[:, 1] - (b - a)[:, 1] * (c - b)[:, 0]
@@ -138,9 +163,9 @@ def polyline_path(x: np.ndarray, y: np.ndarray) -> Path:
     k = np.r_[k[0], k, k[-1]]
     d = np.vstack([P[1] - P[0], c - a, P[-1] - P[-2]])
     psi = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
-    s0 = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
-    s = np.linspace(0.0, s0[-1], math.ceil(s0[-1] / STEP_M) + 1)
-    return Path(s, np.interp(s, s0, x), np.interp(s, s0, y), wrap(np.interp(s, s0, psi)), np.interp(s, s0, k))
+    s0 = arclength(P)
+    s, xs, ys, psis, ks = resample(s0, math.ceil(s0[-1] / STEP_M) + 1, x, y, psi, k)
+    return Path(s, xs, ys, wrap(psis), ks)
 
 
 def _accel_limit(u: np.ndarray, ds: float, accel: float) -> np.ndarray:
@@ -205,7 +230,7 @@ class Limits:
     yaw_slow: float             # rad: heading error at which forward speed reaches zero
     xtrack_slow: float          # m off the path where speed starts to drop...
     xtrack_stop: float          # ...and reaches zero
-    end_tol: float              # m: the route is complete within this of its last point
+    arrive_m: float             # the route is complete within this of its last point
 
 
 @dataclass
@@ -280,6 +305,6 @@ class Follower:
         a_n = vf * vf * float(P.k[i])                  # + right: towards a right turn's centre
         c, sn = math.cos(P.psi[i]), math.sin(P.psi[i])
         ref = P.point(self.s_ref)
-        done = self.s_ref >= P.length - 1e-6 and math.hypot(pos[0] - ref[0], pos[1] - ref[1]) < L.end_tol
+        done = self.s_ref >= P.length - 1e-6 and math.hypot(pos[0] - ref[0], pos[1] - ref[1]) < L.arrive_m
         return Command(ref, (vf * c, vf * sn), (a_t * c - a_n * sn, a_t * sn + a_n * c), yaw, look, lead, xtrack,
                        scale, done)

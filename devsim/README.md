@@ -5,24 +5,24 @@ camera in a world of boxes. Pure Python + numpy; a flight takes ~1 s on a laptop
 developing routes and avoidance logic, not for qualifying anything.
 
 ```sh
-cd starter
 uv run --with numpy --with matplotlib python -m devsim.run \
   --world devsim/worlds/example_corridor.json --route route.json \
-  [--noise] [--drift 0.01] [--seed N] [--height 1.2] [--hover 5] [--plot out.png]
+  [--noise] [--drift 0.01] [--seed N] [--height 0.8] [--hover 2] [--plot out.png]
 ```
 
 Exit code: 0 = "complete", 1 = any other result (blocked, refused, timeout), 2 = the true
 position came within 0.25 m of a box (crash).
 
 - `--route`: same format as `route.json`: `{"route": [[forward_m, left_m], ...], "params": {...}}`
-  in the takeoff frame. `params` are `refnav.core.Params` fields. Height/hover default to
-  1.2 m / 5 s unless the route params or the CLI set them.
+  in the takeoff frame. `params` are `refnav.core.Params` fields. Params merge as on the aircraft:
+  the route's, then `flight.yaml`'s, then `main.py`'s `HEIGHT_M`/`HOVER_S` (or `--height`/`--hover`).
+  The depth border is scaled to this camera (`devsim/world.py` `DEPTH_BORDER_PX`).
 - `--noise`: depth 1.5 % long (the sim's calibration error), noise growing with z^2,
   40 % pixel dropout, 1 % dropped frames.
 - `--drift`: VIO error as a horizontal random walk in m/sqrt(s). PX4 controls on the estimate,
   so the true aircraft moves away from the plan.
 - Sample routes: `devsim/routes/clear.json` (completes), `blocked.json` (stops at crate A),
-  `hover.json` (empty route, 3 s hover).
+  `hover.json` (empty route: take off, hover, land).
 
 Worlds (`devsim/worlds/*.json`): boxes in PX4 local NED, `min`/`max` = `[n, e, up]` metres,
 plus `start` `{n, e, yaw_deg}`. `example_corridor.json` is a PLACEHOLDER 10 x 10 m room; only

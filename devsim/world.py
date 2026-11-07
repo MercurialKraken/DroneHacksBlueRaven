@@ -10,6 +10,7 @@ import numpy as np
 # The real OAK-D depth is 640x400 with fx ~419 (74.7 deg HFOV); this is the same camera at 1/4 scale.
 W, H, FX = 160, 100, 418.9 / 4
 K = (FX, FX, W / 2, H / 2)
+DEPTH_BORDER_PX = 6        # the real camera's 24 px stereo border at this scale
 R_BODY_CAM = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])   # FLU <- optical
 T_BODY_CAM = np.array([0.116, 0.0, 0.029])                                     # TF base_link -> oak_left
 FLOOR_D = 0.066            # floor below the body origin of a landed aircraft (sim truth)

@@ -71,7 +71,7 @@ class Params:
     depth_lost_land_s: float = 3.0
     stop_m: float = 0.9
     corridor_half_m: float = 0.6
-    band_m: float = 0.4
+    obstacle_band_m: float = 0.4                # depth points within this of flight height can be obstacles
     min_obstacle_px: int = 1200                 # an obstacle covers at least this many image pixels (~35 x 35):
                                                 # a 5 cm pole does out to ~4 m, sparse stereo junk does not
     depth_stride: int = 8                       # every n-th pixel of the depth image is used
@@ -106,6 +106,34 @@ class Params:
     eph_ok_m: float = 0.1                       # PX4 horizontal position std: full speed below this...
     eph_stop_m: float = 0.5                     # ...stopped at this
 
+    def validate(self) -> None:
+        """Raise ValueError for a route or a pair of limits the mission cannot fly."""
+        prev = (0.0, 0.0)
+        for i, q in enumerate(self.route):
+            if math.dist(prev, q) < 0.01:
+                near = "the take-off point" if i == 0 else f"point {i}"
+                raise ValueError(f"route point {i + 1} {tuple(q)} is within 1 cm of {near}")
+            prev = q
+        for lo, hi in (("tight_m", "roomy_m"), ("xtrack_slow_m", "xtrack_stop_m"), ("face_tol_deg", "yaw_slow_deg"),
+                       ("eph_ok_m", "eph_stop_m")):
+            if not getattr(self, lo) < getattr(self, hi):
+                raise ValueError(f"{lo} ({getattr(self, lo):g}) must be less than {hi} ({getattr(self, hi):g})")
+
+
+def params_from_doc(doc: dict[str, Any] | list, overrides: dict[str, Any] | None = None) -> tuple[Params, list[str]]:
+    """Params from a route file ({"route": [[forward, left], ...], "params": {...}} or a bare point list), with
+    `overrides` (the aircraft's parameters: they win) applied over its params. -> (validated Params, the route
+    file's params this mission does not have). Overrides that are not Params are someone else's and are skipped."""
+    pts = doc["route"] if isinstance(doc, dict) else doc
+    prm = Params(route=[(float(a), float(b)) for a, b in pts])
+    given = doc.get("params", {}) if isinstance(doc, dict) else {}
+    defaults = vars(Params())
+    for k, v in {**given, **(overrides or {})}.items():
+        if k in defaults and k != "route":
+            setattr(prm, k, type(defaults[k])(v))
+    prm.validate()
+    return prm, sorted(set(given) - set(defaults))
+
 
 @dataclass
 class Vehicle:
@@ -119,7 +147,6 @@ class Vehicle:
     q: QuatWXYZ | None = None            # attitude, FRD -> NED, (w, x, y, z)
     armed: bool | None = None
     nav_state: int | None = None
-    landed: bool | None = None
 
 
 @dataclass
@@ -181,13 +208,15 @@ class Health:
 class Mission:
     def __init__(self, params: Params, path_builder: Callable[[list[tuple[float, float]]], F.Path] | None = None) -> None:
         self.p: Params = params
-        self.path_builder = path_builder or (lambda corners: F.fillet_path(corners, params.fillet_m))   # NED corners -> path
+        self.path_builder = path_builder or (lambda points: F.fillet_path(points, params.fillet_m, params.arrive_m))
         self.health: Health = Health(params.health_quiet_s, params.health_stale_s)
         self.phase: str = "wait"
         self.why: str = ""
         self.sp: list[float] | None = None    # [n, e, d, yaw]
         self.home: tuple[float, float, float, float] | None = None              # (n, e, d, heading) at the arm request
         self.targets: list[tuple[float, float]] = []             # NED (n, e) of each route point
+        self.path: F.Path | None = None             # through home and the targets, with its speed profile: built on the
+        self.speed: np.ndarray | None = None        # ground before arming, as building it takes longer than a tick
         self.t_phase: float | None = None
         self.t_started: float | None = None         # the first time this mission saw (its clock): where a replay starts
         self.t_last: float | None = None
@@ -196,7 +225,7 @@ class Mission:
         self.land_reason: str | None = None
         self.land_auto_seen: bool = False
         self.t_touch: float | None = None           # since when the rangefinder has shown the aircraft on the ground
-        self.result: str | None = None            # final: "complete" | "blocked" | "landed: <why>" | "refused: <why>" | "yielded: <why>"
+        self.result: str | None = None            # final: "complete" | "landed: <why>" | "refused: <why>" | "yielded: <why>"
         self.depth_ready_since: float | None = None # start of continuously usable depth before control requests
         self.depth_t: float | None = None           # capture stamp of the latest USABLE depth frame (depth alive)
         self.frame: D.DepthFrame | None = None             # that frame (refnav.depth.DepthFrame) and its obstacle points
@@ -285,11 +314,7 @@ class Mission:
         return self.depth_t is not None and now - self.depth_t <= self.p.depth_stale_s
 
     def depth_ready_for_arm(self, now: float) -> bool:
-        """Same quiet interval as estimator health, measured in usable capture history.
-
-        A rare good snapshot among unusable frames cannot authorize motors. This
-        only gates the first control request; airborne/authority policy is unchanged.
-        """
+        """Depth has been continuously usable for health_quiet_s of capture time: one good frame never arms."""
         return (self.depth_fresh(now) and self.depth_ready_since is not None
                 and math.isfinite(self.p.health_quiet_s) and self.p.health_quiet_s >= 0
                 and self.depth_t - self.depth_ready_since >= self.p.health_quiet_s)
@@ -318,7 +343,7 @@ class Mission:
     def _requalify(self, now: float, out: Output, why: str) -> None:
         # Cancel the old priming interval and its held position. The original
         # preflight deadline remains t_started; this cannot renew its budget.
-        self.sp, self.home, self.targets = None, None, []
+        self.sp, self.home, self.targets, self.path, self.speed = None, None, [], None, None
         self._set("wait", now, out, why)
 
     def step(self, now: float, v: Vehicle) -> Output:
@@ -395,7 +420,11 @@ class Mission:
                 self.sp = [n, e, d, v.heading]
                 c, s = math.cos(v.heading), math.sin(v.heading)
                 self.targets = [(n + f * c + l * s, e + f * s - l * c) for f, l in p.route]
-                self._set("arm", now, out)
+                bad = self._build_path()
+                if bad:
+                    self._end(now, out, f"refused: {bad}")
+                else:
+                    self._set("arm", now, out)
         elif ph == "arm":
             ok, why = self.health.arm_ok(now)
             if not ok:
@@ -450,20 +479,36 @@ class Mission:
         out.stream = self.phase in ("arm",) + AIRBORNE or (self.phase == "land" and not self.land_auto_seen)
         return out
 
-    def _start(self, now: float, out: Output, v: Vehicle) -> None:
+    def _build_path(self) -> str | None:
+        """Path and speed profile from home through the targets (the climb never moves north or east).
+        -> why the path cannot be flown, or None."""
         p = self.p
         if not self.targets:
+            return None
+        try:
+            path = self.path_builder([(self.home[0], self.home[1])] + self.targets)
+        except ValueError as e:
+            return f"no path through the route: {e}"
+        if path.length < 0.01 or np.isnan(path.k).any():
+            return f"degenerate path: {path.length:.3f} m long, NaN curvature: {bool(np.isnan(path.k).any())}"
+        speed = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2,
+                                (p.tight_m, p.roomy_m, p.crawl_mps))
+        if np.isnan(speed).any():
+            return "degenerate path: NaN in its speed profile"
+        self.path, self.speed = path, speed
+        return None
+
+    def _start(self, now: float, out: Output, v: Vehicle) -> None:
+        p = self.p
+        if self.path is None:
             self._land(now, out, "route complete")
             return
-        path = self.path_builder([(self.sp[0], self.sp[1])] + self.targets)
-        prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2,
-                               (p.tight_m, p.roomy_m, p.crawl_mps))
         lim = F.Limits(accel=p.accel_mps2, look_min=p.look_min_m, look_s=p.look_s, look_max=p.look_max_m,
                        face_tol=math.radians(p.face_tol_deg), yaw_slow=math.radians(p.yaw_slow_deg),
-                       xtrack_slow=p.xtrack_slow_m, xtrack_stop=p.xtrack_stop_m, end_tol=p.arrive_m)
-        self.follower = F.Follower(path, prof, lim, self.targets)
+                       xtrack_slow=p.xtrack_slow_m, xtrack_stop=p.xtrack_stop_m, arrive_m=p.arrive_m)
+        self.follower = F.Follower(self.path, self.speed, lim, self.targets)
         self.best_s, self.t_best, self.s_limit = 0.0, now, 0.0
-        self._set("follow", now, out, f"path {path.length:.1f} m through {len(self.targets)} points")
+        self._set("follow", now, out, f"path {self.path.length:.1f} m through {len(self.targets)} points")
 
     def _judge_depth(self, v: Vehicle) -> bool:
         """Judge the newest depth frame against the path ahead, once per frame: set s_limit, where the reference must
@@ -478,7 +523,7 @@ class Mission:
         fr = np.stack([dn * c + de * sn, -dn * sn + de * c], 1)          # level heading frame: forward, right
         hits = max(3, round(p.min_obstacle_px / p.depth_stride ** 2))
         # closer than stop_m the view is mostly floor, which stereo often misses: those samples were judged from further back
-        free, obstacle = D.path_clearance(self.frame, self.depth_pts, fr, along, p.corridor_half_m, p.band_m, hits,
+        free, obstacle = D.path_clearance(self.frame, self.depth_pts, fr, along, p.corridor_half_m, p.obstacle_band_m, hits,
                                           p.min_corridor_coverage, blind_m=p.stop_m)
         self.last_clearance = free
         close = obstacle and free < p.stop_m
@@ -521,7 +566,7 @@ class Mission:
 
     def _on_ground(self, now: float, v: Vehicle) -> bool:
         p = self.p
-        level = v.q is not None and 1.0 - 2.0 * (v.q[1] ** 2 + v.q[2] ** 2) >= math.cos(math.radians(p.touchdown_tilt_deg))
+        level = v.q is not None and D.quat_up_cos(*v.q) >= math.cos(math.radians(p.touchdown_tilt_deg))
         low = v.range_m is not None and v.range_m <= p.touchdown_m and now - self.t_phase >= p.touchdown_after_s
         self.t_touch = (self.t_touch if self.t_touch is not None else now) if (low and level) else None
         return self.t_touch is not None and now - self.t_touch >= p.touchdown_s

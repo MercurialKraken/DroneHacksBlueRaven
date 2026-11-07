@@ -60,7 +60,7 @@ def test_the_speed_profile_changes_acceleration_smoothly_for_little_time() -> No
 def _follower(path):
     v = F.speed_profile(path, 0.5, math.radians(45), 0.5, 0.5)
     lim = F.Limits(accel=0.5, look_min=0.3, look_s=1.5, look_max=1.2, face_tol=math.radians(8), yaw_slow=math.radians(35),
-                   xtrack_slow=0.12, xtrack_stop=0.35, end_tol=0.15)
+                   xtrack_slow=0.12, xtrack_stop=0.35, arrive_m=0.15)
     return F.Follower(path, v, lim, [])
 
 
@@ -166,3 +166,30 @@ def test_a_drift_correction_moves_the_flown_track_not_the_path() -> None:
     m, px4, log = fly(C.Params(route=ROUTE), on_tick=lambda t, m: m.on_correction(t, 0.0, 0.3, 0.0))
     assert m.result == "complete", (m.result, m.why)
     assert px4.pos[1] == pytest.approx(-3.0 - 0.3, abs=0.15)
+
+
+@pytest.mark.parametrize("turn_deg", [150.0, 160.0, 169.0])
+def test_a_sharp_corner_still_passes_within_the_cut_of_its_point(turn_deg: float) -> None:
+    a = math.radians(180.0 - turn_deg)
+    p = F.fillet_path([(0, 0), (2, 0), (2 - 2 * math.cos(a), 2 * math.sin(a))], 0.3, 0.15)
+    assert np.hypot(p.x - 2, p.y).min() <= 0.15 + 0.005             # the arc's sampling, not its geometry
+    assert np.isfinite(p.k).all()
+
+
+@pytest.mark.parametrize("back", [(0.0, 0.0), (0.0, 0.17)])         # 180 and ~175 deg
+def test_a_reversal_reaches_its_point_and_stops_there(back: tuple[float, float]) -> None:
+    p = F.fillet_path([(0, 0), (2, 0), back], 0.3, 0.15)
+    apex = int(np.argmin(np.hypot(p.x - 2, p.y)))
+    assert np.hypot(p.x[apex] - 2, p.y[apex]) < 1e-9
+    assert p.length == pytest.approx(2.0 + math.hypot(2.0 - back[0], back[1]), abs=1e-6)
+    v = F.speed_profile(p, 0.6, math.radians(45), 0.25, 0.5)
+    assert v[apex] < 0.02 and v.max() > 0.4 and np.isfinite(v).all()
+
+
+def test_polyline_path_drops_repeated_samples() -> None:
+    x, y = np.array([0.0, 0.5, 1.0, 1.5]), np.array([0.0, 0.1, 0.1, 0.0])
+    a = F.polyline_path(x, y)
+    b = F.polyline_path(np.repeat(x, 2), np.repeat(y, 2))
+    assert np.array_equal(a.s, b.s) and np.array_equal(a.k, b.k) and np.isfinite(b.k).all()
+    with pytest.raises(ValueError):
+        F.polyline_path(np.array([0.0, 0.0, 1.0]), np.array([0.0, 0.0, 0.0]))

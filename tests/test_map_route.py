@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CM = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
 LAUNCH = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
 Z = 0.8 + LAUNCH["z"]
+MAP_MARGIN_M = 0.20            # refnav.node's map_margin_m
 
 
 def _route_ned():
@@ -33,7 +34,7 @@ def _clearance(path: F.Path) -> np.ndarray:
 
 
 def _build() -> F.Path:
-    return M.builder(CM, LAUNCH, Z, 0.48, 0.3)(_route_ned())
+    return M.builder(CM, LAUNCH, Z, M.DRONE_RADIUS_M + MAP_MARGIN_M, 0.3)(_route_ned())
 
 
 def test_the_map_frame_round_trips_and_puts_the_launch_at_the_spawn() -> None:

@@ -31,12 +31,22 @@ def quat_to_mat(w: float, x: float, y: float, z: float) -> np.ndarray:
     ])
 
 
+def quat_yaw(w: float, x: float, y: float, z: float) -> float:
+    """Rotation about the parent frame's vertical axis, rad (PX4's heading for an FRD -> NED attitude)."""
+    return math.atan2(2 * (x * y + z * w), 1 - 2 * (y * y + z * z))
+
+
+def quat_up_cos(w: float, x: float, y: float, z: float) -> float:
+    """Cosine of the tilt: the body's vertical axis against the parent frame's."""
+    return 1.0 - 2.0 * (x * x + y * y)
+
+
 def level_rotation(q_wxyz: Sequence[float]) -> np.ndarray:
     """Rotation taking body-FLU vectors into the LEVEL heading frame (x forward horizontal,
     y right horizontal, z down), i.e. PX4's attitude with its yaw removed. q = PX4's
     vehicle_attitude quaternion (FRD body -> NED), w first."""
     R = quat_to_mat(*q_wxyz)                                   # NED <- FRD
-    yaw = math.atan2(R[1, 0], R[0, 0])
+    yaw = quat_yaw(*q_wxyz)
     c, s = math.cos(yaw), math.sin(yaw)
     Rz_inv = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
     return Rz_inv @ R @ _FLU_TO_FRD
@@ -86,39 +96,13 @@ class DepthFrame:
         return self.origin + self.dirs[sel] * self.z[sel, None]
 
 
-def level_points(depth_m: ArrayLike, K: Intrinsics, R_body_cam: ArrayLike, t_body_cam: ArrayLike,
-                 R_level_body: ArrayLike, stride: int = 8, rmin: float = 0.3, rmax: float = 6.0,
-                 border_px: int = 0) -> np.ndarray:
-    """Depth image -> (N,3) points in the level heading frame relative to the body origin:
-    columns (forward, right, down) in metres. K = (fx, fy, cx, cy). border_px: ignore that many
-    pixels at every image edge, where a stereo matcher has the least support (a real OAK-D and
-    the simulator's SGBM both produce false near matches along the top rows)."""
-    fx, fy, cx, cy = K
-    d = np.array(depth_m, np.float32, copy=True)
-    if border_px > 0:
-        b = int(border_px)
-        d[:b, :] = np.nan
-        d[-b:, :] = np.nan
-        d[:, :b] = np.nan
-        d[:, -b:] = np.nan
-    d = d[::stride, ::stride]
-    vs, us = np.mgrid[0:d.shape[0], 0:d.shape[1]]
-    u = us.astype(np.float32) * stride
-    v = vs.astype(np.float32) * stride
-    ok = np.isfinite(d) & (d > rmin) & (d < rmax)
-    z = d[ok]
-    p_cam = np.stack([(u[ok] - cx) / fx * z, (v[ok] - cy) / fy * z, z], axis=1)
-    p_body = p_cam @ np.asarray(R_body_cam).T + np.asarray(t_body_cam)
-    return p_body @ np.asarray(R_level_body).T
-
-
 def path_clearance(frame: DepthFrame, points: np.ndarray | None, path_fr: np.ndarray, along: np.ndarray,
-                   half_width_m: float, band_m: float, min_hits: int, min_coverage: float,
+                   half_width_m: float, obstacle_band_m: float, min_hits: int, min_coverage: float,
                    blind_m: float = 0.5) -> tuple[float, bool]:
     """Free distance along a path ahead: path_fr (M,2) samples (forward, right) in the level frame, `along` their path
     distances. Ends at the first sample with an obstacle beside it, or one the camera did not observe (the rays
     towards it mostly returned nothing). -> (free distance, True if an obstacle ended it)."""
-    pts = np.empty((0, 3)) if points is None else points[np.abs(points[:, 2]) < band_m]
+    pts = np.empty((0, 3)) if points is None else points[np.abs(points[:, 2]) < obstacle_band_m]
     fwd = frame.dirs[:, 0]
     ahead = fwd > 1e-6
     az = np.arctan2(frame.dirs[:, 1], np.where(ahead, fwd, 1.0))
@@ -129,7 +113,7 @@ def path_clearance(frame: DepthFrame, points: np.ndarray | None, path_fr: np.nda
         d = math.hypot(pf, pr)
         if d < blind_m:
             continue
-        window = ahead & (np.abs(az - math.atan2(pr, pf)) < math.atan2(half_width_m, d)) & (el * d < band_m)
+        window = ahead & (np.abs(az - math.atan2(pr, pf)) < math.atan2(half_width_m, d)) & (el * d < obstacle_band_m)
         if not window.any() or frame.valid[window].mean() < min_coverage:
             return float(s), False
     return float(along[-1]) if len(along) else 0.0, False

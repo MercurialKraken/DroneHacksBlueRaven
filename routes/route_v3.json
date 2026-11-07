@@ -19,5 +19,5 @@
   [-2.087, -1.742],
   [-1.712, -0.467]
  ],
- "params": {"height_m": 0.8, "speed_mps": 0.4, "lead_max_m": 0.5, "arrive_m": 0.15, "corridor_half_m": 0.25, "stop_m": 0.3, "hold_s": 0.2, "yaw_rate_dps": 90.0, "min_corridor_coverage": 0.4, "leg_yaw_off_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+ "params": {"height_m": 0.8, "speed_mps": 0.4, "arrive_m": 0.15, "corridor_half_m": 0.25, "stop_m": 0.3, "min_corridor_coverage": 0.4}
 }

@@ -34,6 +34,7 @@ class MapFrame:
         return -self.s * dx + self.c * dy, self.c * dx + self.s * dy
 
 
+DRONE_RADIUS_M = 0.28  # 7 in props: the airframe's reach from its centre
 BAND_STEP_M = 0.05      # band point spacing
 BAND_BEND = 30.0        # stiffness against bending, relative to the pull towards the constraints
 BAND_ITERS = 300
@@ -43,10 +44,9 @@ def elastic_band(P: np.ndarray, cm: CourseMap, z: float, clear: float, max_shift
     """The route polyline P (map frame, end points fixed) bent as little as it can be (least squared second
     differences) while every point is at least `clear` from the map's surfaces, or on the corridor's centre where
     that is narrower, and within max_shift of its place on P. ADMM: an exact bending solve, then a projection."""
-    seg = np.hypot(*np.diff(P, axis=0).T)
-    s = np.r_[0.0, np.cumsum(seg)]
-    t = np.linspace(0.0, s[-1], max(3, round(s[-1] / BAND_STEP_M) + 1))
-    home = np.stack([np.interp(t, s, P[:, 0]), np.interp(t, s, P[:, 1])], 1)
+    s = F.arclength(P)
+    _, hx, hy = F.resample(s, max(3, round(s[-1] / BAND_STEP_M) + 1), P[:, 0], P[:, 1])
+    home = np.stack([hx, hy], 1)
     n, zs = len(home), np.full(len(home), z)
     D2 = np.diff(np.eye(n), 2, axis=0)
     A = np.eye(n) + BAND_BEND * D2.T @ D2
@@ -73,11 +73,11 @@ def elastic_band(P: np.ndarray, cm: CourseMap, z: float, clear: float, max_shift
 
 def builder(cm: CourseMap, launch: dict[str, float], z: float, clear: float,
             max_shift: float) -> Callable[[list[tuple[float, float]]], F.Path]:
-    """A path builder for refnav.core.Mission: NED route corners in, a NED follow.Path out."""
+    """A path builder for refnav.core.Mission: NED route points in, a NED follow.Path out."""
     frame = MapFrame(launch)
 
-    def build(corners_ned: list[tuple[float, float]]) -> F.Path:
-        C = np.asarray(corners_ned, float)
+    def build(points_ned: list[tuple[float, float]]) -> F.Path:
+        C = np.asarray(points_ned, float)
         band = elastic_band(np.stack(frame.to_map(C[:, 0], C[:, 1]), 1), cm, z, clear, max_shift)
         path = F.polyline_path(*frame.to_ned(band[:, 0], band[:, 1]))
         x, y = frame.to_map(path.x, path.y)
