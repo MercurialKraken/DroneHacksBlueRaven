@@ -109,6 +109,7 @@ class MapAlignNode(Node):
         self.launch_z = self.launch["z"] if self.launch else 0.0
         self.K = None; self.extrinsic = None
         self.t_last = -1e9; self.accepted = 0; self.skips: dict[str, int] = {}; self.times: list[float] = []
+        self.init_stamp = -math.inf
         self.tf_buffer = Buffer(); self.tf_listener = TransformListener(self.tf_buffer, self)
         if self.source == "px4":
             from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
@@ -165,13 +166,22 @@ class MapAlignNode(Node):
             self.get_logger().info(f"map <- odom at INIT (computed here): {self.start}")
 
     def _on_init(self, m: PoseStamped) -> None:
-        if self.start is not None:
-            return
+        """Every NEWER init restarts the filter (chelsea-claude's amendment: the skybeta stack restarts on clock steps,
+        which gives odometry a new origin, and the adapter then re-INITs on the mark). Poses buffered in the old origin
+        are dropped, and nothing is published until the new filter has min_accepted fits again."""
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        if self.start is not None and stamp <= self.init_stamp:
+            return                                                  # the same latched message again, or an older one
         q = m.pose.orientation
+        again = self.start is not None
+        self.init_stamp = stamp
         self.start = SE2(m.pose.position.x, m.pose.position.y, _yaw_of_xyzw((q.x, q.y, q.z, q.w)))
         self.launch_z = float(m.pose.position.z)
+        self.buf = PoseBuffer(self.buf.pos.horizon, self.buf.max_gap_s)
+        self.accepted = 0
+        self.t_last = -1e9
         self._make_filter()
-        self.get_logger().info(f"map <- odom at INIT (from the adapter): {self.start}")
+        self.get_logger().info(f"map <- odom at INIT (from the adapter{', a RE-INIT: filter and pose buffer reset' if again else ''}): {self.start}")
 
     def _pose_at(self, t: float):
         """(odom ENU pose, PX4-style q_wxyz for levelling) at t, or None."""

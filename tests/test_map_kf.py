@@ -155,6 +155,34 @@ def test_an_exact_stamp_returns_that_sample_untouched():
     assert np.array_equal(p, np.array([0.17, 0.5, 1.0])) and np.array_equal(q, np.array([math.sin(0.17), 0.0, 0.0, math.cos(0.17)]))
 
 
+def test_drone_depth_stamps_20us_off_the_odometry_land_on_that_sample():
+    """skybeta-09 walk bag (arnav-claude): depth stamps sit ~20 us from an odometry sample, never bit-identical
+    (0 of 241). Interpolating 20 us into a 33 ms interval must give that sample to well under a millimetre."""
+    b = PoseBuffer()
+    for k in range(60):                                          # 30 Hz odometry, moving 0.5 m/s and turning 90 deg/s
+        t = 200.0 + k / 30.0
+        yaw = math.radians(90.0) * (k / 30.0)
+        b.add_position(t, (0.5 * k / 30.0, 0.0, 1.0)); b.add_attitude(t, (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)))
+    for k, off in ((35, 20e-6), (44, -20e-6), (52, 35e-6)):     # inside the 1 s horizon (the last 30 samples)
+        p, q = b.at(200.0 + k / 30.0 + off)
+        assert abs(p[0] - 0.5 * k / 30.0) < 1e-4                  # 0.5 m/s x 35 us = 0.02 mm
+        yaw = 2 * math.atan2(q[2], q[3])
+        assert abs(yaw - math.radians(90.0) * (k / 30.0)) < math.radians(0.01)
+
+
+def test_a_depth_frame_far_from_any_odometry_is_refused():
+    """The walk bag had one depth frame 3.1 s from any odometry sample: refuse it, whichever side it falls on."""
+    b = PoseBuffer(horizon_s=1.0, max_gap_s=0.1)
+    for k in range(20):
+        t = 300.0 + k / 30.0
+        b.add_position(t, (k, 0, 0)); b.add_attitude(t, (0, 0, 0, 1))
+    newest = 300.0 + 19 / 30.0
+    assert b.at(newest + 3.1) is None                            # odometry stopped (bag edge or a stack restart)
+    assert b.at(300.0 - 3.1) is None                             # before the buffer
+    b.add_position(newest + 3.1, (99, 0, 0)); b.add_attitude(newest + 3.1, (0, 0, 0, 1))
+    assert b.at(newest + 1.5) is None                            # inside a 3.1 s hole between two samples
+
+
 def test_map_from_odom_round_trips_through_the_pose_message_layout():
     """The /blueraven/map_from_odom layout (position x, y; yaw about +z as w = cos(yaw/2), z = sin(yaw/2)) keeps the
     transform and its yaw sign: a point mapped with the decoded transform lands where the original puts it."""

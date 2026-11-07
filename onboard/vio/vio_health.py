@@ -5,8 +5,12 @@ event and the pose coming back is not a second one:
 
 * an isolated bad sample (jump over jump_m, speed over max_speed_mps, non-finite, or a measurement time
   that did not advance) is withheld on its own; the next good sample goes through;
-* a sample whose reported position variance exceeds max_var_m2 is bad (cuVSLAM's covariance jumped from
-  ~4e-4 to 3 m^2 as it degraded near the floor; such poses must never reach PX4);
+* a HIGH-VARIANCE sample (reported position variance over max_var_m2) is NOT withheld for that alone: it is
+  passed on with its variance, which PX4's EKF weighs. Variance only vetoes re-anchoring (a high-variance
+  jump never becomes the new reference) and never counts towards 'broken'. Why (T4, darion-wholestack
+  run 2, 2026-11-07): cuVSLAM's variance rose to 0.053-0.071 m^2 for 0.4 s while its positions stayed
+  accurate; withholding those samples tripped the burst rule, PX4 got no vision for 0.5 s, dropped EV fusion
+  and failsafe-landed. Near-floor garbage (variance up to 3 m^2) is handled by land_freeze instead;
 * bad samples that agree with each other (a new, consistent position, each with sane variance) for
   persist_s are a re-anchor event: the reference moves there, the sample is passed and `rebased` is set
   for that call, so the bridge re-anchors the new track to its last published pose (onboard/vio/anchor.py)
@@ -49,6 +53,7 @@ class VioHealth:
         self.n_bad = 0
         self.n_withheld = 0
         self.n_rebased = 0
+        self.n_high_var = 0                                               # passed despite high variance
 
     def _problem(self, ref: tuple[float, tuple[float, ...]], t: float, pos: tuple[float, ...]) -> str | None:
         t0, p0 = ref
@@ -71,8 +76,6 @@ class VioHealth:
         high_var = var is not None and not (math.isfinite(var) and var <= self.max_var)
         if not finite:
             bad = "non-finite sample"
-        elif high_var:
-            bad = f"position variance {var:.3g} m2 > {self.max_var:g}"
         elif self._good is None:
             bad = None
         else:
@@ -89,12 +92,19 @@ class VioHealth:
                     self.reason = f"recovering ({t - self._quiet_from:.1f}/{self.quiet_s:.0f} s quiet)"
                     return False, self.reason
                 self._broken_since = self._quiet_from = None
-            self.reason = "ok"
+            if high_var:
+                self.n_high_var += 1
+                self.reason = f"ok (variance {var:.3g} m2 > {self.max_var:g}: passed for PX4 to weigh)"
+            else:
+                self.reason = "ok"
             return True, self.reason
 
         self.n_bad += 1
         self._events.append(tb)
         self._quiet_from = None
+        if high_var:
+            bad += f" (variance {var:.3g} m2: never a re-anchor)"
+            self._pending = []                                 # a high-variance jump neither starts nor extends one
         if finite and not high_var and not bad.startswith("measurement time"):
             # a real jump: consecutive bad samples that agree with each other for persist_s
             if self._pending and self._problem(self._pending[-1], t, p) is not None:
@@ -108,7 +118,7 @@ class VioHealth:
                 self.rebased = True
                 self.reason = f"re-anchored after a persistent {bad}"
                 return True, self.reason
-        if (len(self._events) > self.burst_n and not self._pending[1:]) or (high_var and len(self._events) > self.burst_n):
+        if len(self._events) > self.burst_n and not self._pending[1:]:
             self._broken_since = self._broken_since if self._broken_since is not None else tb
         if self._broken_since is not None:
             self.reason = f"broken: {len(self._events)} bad samples in {self.burst_s:.0f} s (last: {bad})"
