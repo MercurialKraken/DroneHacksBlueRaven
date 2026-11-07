@@ -71,3 +71,13 @@ def test_the_built_path_is_in_ned_with_consistent_headings() -> None:
     step = math.atan2(path.y[j] - path.y[i], path.x[j] - path.x[i])
     assert abs(float(F.wrap(step - path.psi[i]))) < math.radians(10)
     assert path.x[0] == pytest.approx(0.0, abs=0.02) and path.y[0] == pytest.approx(0.0, abs=0.02)
+
+
+def test_the_follower_flies_the_whole_map_path() -> None:
+    """End to end on the real map's path: strictly increasing s, and a lagging vehicle reaches the end."""
+    import test_follow as TF
+    path = M.builder(CM, LAUNCH, Z, 0.28, 0.15, 1.0, 0.3)(_route_ned())
+    assert (np.diff(path.s) > 0).all()
+    c, xt, s, t = TF._fly_lagging(path, TF._follower(path), seconds=200.0)
+    assert c.done, (path.length, s[-1])
+    assert xt.max() < 0.2

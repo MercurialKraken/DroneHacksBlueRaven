@@ -262,7 +262,8 @@ class Follower:
         j = min(i + 1, len(self.v) - 1)
         capped = v_cap < float(self.v[i])
         vf = min(float(self.v[i]), v_cap) * scale
-        a_t = 0.0 if capped or j == i else vf * (float(self.v[j]) - float(self.v[i])) * scale / float(P.s[j] - P.s[i])
+        ds = float(P.s[j] - P.s[i])
+        a_t = 0.0 if capped or ds <= 1e-9 else vf * (float(self.v[j]) - float(self.v[i])) * scale / ds
         a_n = vf * vf * (float(P.k[i]) if math.isfinite(P.k[i]) else 0.0)      # + right: towards a right turn's centre
         c, sn = math.cos(P.psi[i]), math.sin(P.psi[i])
         ref = P.point(self.s_ref)
