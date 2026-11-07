@@ -82,6 +82,7 @@ def run(m: SkybetaMission, sim: Sim, t0: float, t1: float, state=True, odom=True
 
 
 def mission(**kw):
+    kw.setdefault("mission", "course")
     return SkybetaMission(MissionParams(**kw), LAUNCH, ROUTE)
 
 
@@ -343,6 +344,20 @@ def test_odometry_jump_in_flight_aborts_with_a_hold():
     assert m.phase == "ABORTED" and "jumped" in m.why and sum(c.call_hold for _, c in cmds) == 1
 
 
+def test_a_delayed_burst_of_odometry_is_not_a_jump():
+    """Fast flight, then 0.3 s of samples delivered at once: captured apart (stamps), received together."""
+    m, sim = mission(), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "FOLLOW")
+    x0, y0, z0, yaw0 = sim.x, sim.y, sim.z, sim.yaw
+    for k in range(1, 10):                                         # 1.5 m/s, 9 samples at 30 Hz
+        m.on_odom(t, x0 + 1.5 * k / 30.0, y0, z0, yaw0, stamp=t - 0.3 + k / 30.0)
+    assert m.odom_jump is None
+    m.on_odom(t + 0.01, x0 + 1.0, y0, z0, yaw0, stamp=t + 0.01)   # a real reset is still caught
+    assert m.odom_jump is not None
+
+
 def test_init_waits_for_px4_to_report_landed():
     m, sim = mission(), Sim()
     sim.landed = False
@@ -355,6 +370,72 @@ def test_corrections_stamped_before_the_latest_init_are_ignored():
     to_ready(m, sim)
     assert m.on_map_from_odom(3.0, m.T_map_odom, stamp=m.t_fixed - 0.1) is not None
     assert m.on_map_from_odom(3.0, m.T_map_odom, stamp=m.t_fixed + 0.1) is None
+
+
+# ------------------------------------------------------------------- HOVER (the first flights)
+class OffsetSim(Sim):
+    """PX4 holding a pose somewhere else than commanded: the guide's EKF-vs-odom frame offset."""
+    offset = (0.6, 0.0)
+
+    def apply(self, cmd, t):
+        if cmd.pose is not None:
+            cmd = type(cmd)(**{**vars(cmd), "pose": (cmd.pose[0] + self.offset[0], cmd.pose[1] + self.offset[1],
+                                                     cmd.pose[2])})
+        super().apply(cmd, t)
+
+
+def hover(**kw):
+    return SkybetaMission(MissionParams(mission="hover", **kw), LAUNCH)    # no route, no map
+
+
+def test_hover_is_the_default_and_needs_no_route():
+    assert MissionParams().mission == "hover"
+    hover()
+    with pytest.raises(ValueError):
+        SkybetaMission(MissionParams(mission="course"), LAUNCH)
+    with pytest.raises(ValueError):
+        SkybetaMission(MissionParams(mission="Hover"), LAUNCH)
+
+
+def test_hover_takes_off_holds_over_the_takeoff_point_and_lands_there():
+    m, sim = hover(height_m=0.5, hover_s=5.0), Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
+    t = to_ready(m, sim)
+    x0, y0 = sim.x, sim.y
+    switch_to_offboard(t, sim)
+    t, cmds = run(m, sim, t, t + 40.0)
+    assert m.phase == "DONE", m.why
+    phases = [c.phase for _, c in cmds]
+    assert [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]] == \
+        ["WAIT_OFFBOARD", "TAKEOFF", "HOVER", "DESCEND", "DONE"]           # state is 5 Hz: a few WAIT ticks
+    held = [(tt, c) for tt, c in cmds if c.phase == "HOVER"]
+    assert held[-1][0] - held[0][0] >= 5.0 - DT                         # hovered hover_s
+    assert all(c.pose is not None and math.hypot(c.pose[0] - x0, c.pose[1] - y0) < 1e-9 for _, c in held)
+    assert max(c.pose[2] for _, c in held) == pytest.approx(0.5, abs=1e-6)   # 0.5 m above the launch point
+    assert math.hypot(sim.x - x0, sim.y - y0) < 0.05                       # landed where it took off
+    assert all(c.pose is None and c.twist is None for c in [c for _, c in cmds if c.phase == "DONE"])
+
+
+def test_hover_lands_straight_down_if_px4_holds_somewhere_else():
+    m, sim = hover(hover_s=10.0), OffsetSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t, cmds = run(m, sim, t, t + 40.0)
+    assert m.phase == "DONE", m.why
+    desc = [c for _, c in cmds if c.phase == "DESCEND"]
+    assert desc and "frame offset" in [e for _, c in cmds for e in c.events if "DESCEND" in e][0]
+    assert all(c.twist is not None and c.twist[0] == 0.0 and c.twist[1] == 0.0 for c in desc)   # no steering
+    x0, y0 = m.takeoff[:2]
+    assert math.hypot(sim.x - x0, sim.y - y0) < 0.45                   # stopped before it got far
+
+
+def test_hover_aborts_like_the_course_mission_when_offboard_drops():
+    m, sim = hover(), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "HOVER")
+    sim.offboard = False
+    _, cmds = run(m, sim, t, t + 1.0)
+    assert m.phase == "ABORTED" and sum(c.call_hold for _, c in cmds) == 1
 
 
 def test_the_package_never_publishes_to_px4_directly():

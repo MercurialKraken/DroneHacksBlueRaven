@@ -3,11 +3,14 @@
 /skybeta/setpoint/pose, /skybeta/setpoint/twist, its own status and (once, latched) the INIT
 map <- odom for map_align; calls /skybeta/hold on abort. Reads map_align's corrected map <- odom.
 
-    ros2 launch blueraven_skybeta blueraven.launch.py launch_key:=launch height_m:=0.7 cruise_mps:=0.3
+    ros2 launch blueraven_skybeta blueraven.launch.py                       # mission:=hover (default)
+    ros2 launch blueraven_skybeta blueraven.launch.py mission:=course launch_key:=launch cp4:=gate_b
 
-Route: built at start-up from the course map by nav.route_planner (Arnav's startup planner), the
-corners in the map frame (.map_xy). A plan with gate problems is refused: the node then never
-publishes, so the interface never enters Offboard. Never arms, never requests a mode.
+mission "hover" (the default, for first flights): take off, hold hover_s over the take-off point,
+land; no route and no course map. mission "course": the route is built at start-up from the course
+map by nav.route_planner (Arnav's startup planner), the corners in the map frame (.map_xy). A plan
+with gate problems is refused: the node then never publishes, so the interface never enters
+Offboard. Never arms, never requests a mode.
 """
 from __future__ import annotations
 
@@ -45,21 +48,30 @@ class SkybetaMissionNode(Node):
         cfg = Path(dp("course_config", str(ROOT / "maps" / "course.yaml")).value)
         launch_key = dp("launch_key", "launch").value                  # the real mark on the drone
         cp4 = dp("cp4", "gate_b").value                                # "gate_b" | "window"
+        # the planner's simplification may lose at most this much of the centred path's clearance (a physical
+        # course built of boards and tarp isn't exactly the published one); < 0 = the planner's tight default
+        keep_centre = float(dp("keep_centre_m", 0.02).value)
         rate = float(dp("rate_hz", 20.0).value)
         params = MissionParams(**{k: type(v)(dp(k, v).value) for k, v in vars(MissionParams()).items()})
+        if params.mission not in ("hover", "course"):
+            raise SystemExit(f"mission must be 'hover' or 'course', not {params.mission!r}")
 
-        course = CourseMap.load(sdf)
         launch = load_launch(cfg, launch_key)
-        try:
+        if params.mission == "hover":
+            self.mission = SkybetaMission(params, launch)
+            self.get_logger().info(f"mission HOVER: take off to {params.height_m:.2f} m, hold "
+                                   f"{params.hover_s:.0f} s over the take-off point, land. No route.")
+            problems = None
+        else:
+            course = CourseMap.load(sdf)
             from nav.route_planner import gate_problems, plan_from_files
-        except ImportError as e:
-            raise SystemExit(f"nav.route_planner is missing ({e}): merge arnav/startup-planner") from None
-        plan = plan_from_files(sdf, cfg, launch_key, params.height_m, cp4)
-        problems = gate_problems(plan)
+            plan = plan_from_files(sdf, cfg, launch_key, params.height_m, cp4,
+                                   keep_centre_m=keep_centre if keep_centre >= 0.0 else None)
+            problems = gate_problems(plan)
         if problems:
             self.get_logger().error(f"route refused, nothing will be published: {problems}")
             self.mission = None
-        else:
+        elif params.mission == "course":
             corners = [tuple(plan.launch_xy)] + [tuple(p) for p in plan.map_xy]   # map_xy starts AFTER launch
             self.mission = SkybetaMission(params, launch, corners, course)
             self.get_logger().info(f"route planned ({launch_key}): {plan.summary()}; path "
@@ -72,7 +84,8 @@ class SkybetaMissionNode(Node):
         self.pub_status = self.create_publisher(String, dp("status_topic", "/blueraven/mission/status").value, 10)
         self.pub_init = self.create_publisher(PoseStamped, MAP_FROM_ODOM_INIT_TOPIC, LATCHED)
         self.hold = self.create_client(Trigger, "/skybeta/hold")
-        self.create_subscription(Odometry, "/visual_slam/tracking/odometry", self._on_odom, 10)
+        self.create_subscription(Odometry, dp("odometry_topic", "/visual_slam/tracking/odometry").value,
+                                 self._on_odom, 10)
         self.create_subscription(String, "/skybeta/state", self._on_state, 10)
         self.create_subscription(PoseStamped, MAP_FROM_ODOM_TOPIC, self._on_map_from_odom, ANY_PUBLISHER)
         self.create_timer(1.0 / rate, self._tick)
@@ -86,7 +99,9 @@ class SkybetaMissionNode(Node):
         if self.mission is None:
             return
         p, q = m.pose.pose.position, m.pose.pose.orientation
-        self.mission.on_odom(self._now(), p.x, p.y, p.z, yaw_from_quaternion(q.x, q.y, q.z, q.w))
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        self.mission.on_odom(self._now(), p.x, p.y, p.z, yaw_from_quaternion(q.x, q.y, q.z, q.w),
+                             stamp=stamp if stamp > 0.0 else None)
 
     def _on_state(self, m: String) -> None:
         if self.mission is None:

@@ -15,7 +15,11 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
                  on clock steps): back to INIT, which fixes map <- odom again and re-sends it.
   TAKEOFF        offboard_active: a pose at the take-off point with z ramped up to the flight
                  height. Poses persist, so a stalled node leaves the drone holding.
-  FOLLOW         a TWIST every tick: the reference's feed-forward velocity plus a P term towards
+  HOVER          (mission "hover", the first flights) the same pose for hover_s, then DESCEND over
+                 the take-off point. In TAKEOFF and HOVER, drifting more than hold_max_err_m from
+                 the take-off point means PX4 holds somewhere else than we command (the guide's
+                 EKF-vs-odom frame offset): DESCEND straight down at once, without steering.
+  FOLLOW         (mission "course") a TWIST every tick: the reference's feed-forward velocity plus a P term towards
                  the reference point, and a yaw rate towards the path heading ahead. Poses are
                  position-only through the interface, so a pose reference would crawl.
   DESCEND        a downward twist (descend_mps), xy held over the end of the route, refreshed every
@@ -64,6 +68,11 @@ from nav.path_geometry import build_path  # noqa: E402
 
 @dataclass
 class MissionParams:
+    mission: str = "hover"              # "hover": take off, hold hover_s over the take-off point, land
+                                        # (first flights: no route, no map needed). "course": fly the route.
+    hover_s: float = 5.0
+    hold_max_err_m: float = 0.40        # TAKEOFF/HOVER: further than this from the take-off point means
+                                        # PX4 isn't holding where we think (frame offset?): land straight down
     height_m: float = 0.70              # flight height above the launch point
     cruise_mps: float = 0.30
     climb_mps: float = 0.30
@@ -112,20 +121,30 @@ def _wrap(a: float) -> float:
 
 
 class SkybetaMission:
-    def __init__(self, params: MissionParams, launch: dict[str, float], corners_map: Any,
+    def __init__(self, params: MissionParams, launch: dict[str, float], corners_map: Any = None,
                  course_map: Any = None) -> None:
         self.p = params
         self.launch = launch
         self.z_map = launch["z"] + params.height_m
-        C = np.asarray(corners_map, dtype=float)
-        self.path = build_path(C[:, :2], course_map, params.drone_radius, params.margin, z=self.z_map,
-                               max_radius=params.max_radius_m)
+        if params.mission not in ("hover", "course"):
+            raise ValueError(f"mission must be 'hover' or 'course', not {params.mission!r}")
+        self.path = None
+        if params.mission == "course":
+            if corners_map is None or len(corners_map) < 2:
+                raise ValueError("mission 'course' needs a route of at least 2 corners")
+            C = np.asarray(corners_map, dtype=float)
+            self.path = build_path(C[:, :2], course_map, params.drone_radius, params.margin, z=self.z_map,
+                                   max_radius=params.max_radius_m)
+        self.t_hover: float | None = None
+        self.land_xy_odom: tuple[float, float] | None = None   # hover: descend over this odom point
+        self.hold_xy_on_descent = True      # false after a hold-error: straight down, no xy correction
         self.phase = "INIT"
         self.why = "waiting for state and odometry"
         self.state: dict[str, Any] | None = None
         self.t_state = -math.inf
         self.odom: tuple[float, float, float, float] | None = None   # (x, y, z, yaw) in odom
         self.t_odom = -math.inf
+        self.s_odom: float | None = None    # its capture stamp
         self.settle: list[tuple[float, tuple[float, float, float, float]]] = []
         self.T_map_odom: np.ndarray | None = None
         self.T_odom_map: np.ndarray | None = None
@@ -147,16 +166,20 @@ class SkybetaMission:
     def on_state(self, t: float, state: dict[str, Any]) -> None:
         self.state, self.t_state = dict(state), float(t)
 
-    def on_odom(self, t: float, x: float, y: float, z: float, yaw: float) -> None:
+    def on_odom(self, t: float, x: float, y: float, z: float, yaw: float, stamp: float | None = None) -> None:
+        """t = receive time (staleness); stamp = the message's capture stamp, which times the jump
+        check (samples delivered in a burst arrive together but were captured apart)."""
         if not all(math.isfinite(v) for v in (x, y, z, yaw)):
             return
-        if self.odom is not None and t > self.t_odom:
-            dt = max(t - self.t_odom, 1.0 / 30.0)
+        s_prev, self.s_odom = self.s_odom, stamp
+        if self.odom is not None:
+            dt = (stamp - s_prev) if (stamp is not None and s_prev is not None and stamp > s_prev) else t - self.t_odom
+            dt = max(dt, 1.0 / 30.0)
             d = math.dist(self.odom[:3], (x, y, z))
             dyaw = abs(_wrap(yaw - self.odom[3]))
             if (d > self.p.odom_jump_m and d / dt > self.p.odom_jump_mps) or (
                     dyaw > math.radians(self.p.odom_jump_deg) and dyaw / dt > math.radians(self.p.odom_jump_dps)):
-                self.odom_jump = (f"odometry jumped {d:.2f} m / {math.degrees(dyaw):.0f} deg in {t - self.t_odom:.2f} s "
+                self.odom_jump = (f"odometry jumped {d:.2f} m / {math.degrees(dyaw):.0f} deg in {dt:.2f} s "
                                   f"(a stack restart resets it)")
         self.odom, self.t_odom = (float(x), float(y), float(z), float(yaw)), float(t)
         if self.phase == "INIT":
@@ -196,8 +219,9 @@ class SkybetaMission:
         if self.T_init is not None and self.odom is not None:
             p = np.array([*self.odom[:3], 1.0])
             moved = round(float(np.linalg.norm((self.T_map_odom @ p - self.T_init @ p)[:2])), 3)
-        return {"phase": self.phase, "why": self.why, "s_ref": round(self.s_ref, 2),
-                "length": round(float(self.path.length), 2), "inits": self.n_init, "map_from_odom": src,
+        return {"mission": self.p.mission, "phase": self.phase, "why": self.why, "s_ref": round(self.s_ref, 2),
+                "length": None if self.path is None else round(float(self.path.length), 2),
+                "inits": self.n_init, "map_from_odom": src,
                 "corr_age_s": None if self.n_corr == 0 else round(t - self.t_corr, 2),
                 "corr_n": self.n_corr, "corr_step_max_m": round(self.corr_step_max_m, 3),
                 "corr_from_init_m": moved}
@@ -316,16 +340,38 @@ class SkybetaMission:
             return self._end("ABORTED", "Offboard ended: the pilot or a failsafe has the vehicle", out, hold=True)
 
         x, y, z, yaw = self.odom
+        if self.phase in ("TAKEOFF", "HOVER"):
+            x0, y0 = self.takeoff[:2]
+            err = math.hypot(x - x0, y - y0)
+            if err > p.hold_max_err_m:          # PX4 isn't holding where we command: don't steer, land
+                self.hold_xy_on_descent = False
+                self._set("DESCEND", f"{err:.2f} m from the take-off point while holding it "
+                                     f"(PX4 frame offset?): landing straight down", out)
         if self.phase == "TAKEOFF":
             x0, y0, z_target, z_ref = self.takeoff
             z_ref = min(z_target, z_ref + p.climb_mps * dt)
             self.takeoff = (x0, y0, z_target, z_ref)
             out.pose = (x0, y0, max(z_ref, z))
             if z_ref >= z_target and abs(z - z_target) < p.takeoff_tol_m:
+                if p.mission == "hover":
+                    self.t_hover = t
+                    self._set("HOVER", f"at {p.height_m:.2f} m; hovering {p.hover_s:.0f} s", out)
+                    out.phase, out.why = self.phase, self.why
+                    return out
                 self.s_ref = self.s_proj = self.path.project(self._to_map(x, y, z)[:2], 0.0, 0.5)
                 self._set("FOLLOW", "at flight height; following the route", out)
                 out.pose = None
             else:
+                out.phase, out.why = self.phase, self.why
+                return out
+
+        if self.phase == "HOVER":
+            x0, y0, z_target, _ = self.takeoff
+            if t - self.t_hover >= p.hover_s:
+                self.land_xy_odom = (x0, y0)
+                self._set("DESCEND", f"hovered {p.hover_s:.0f} s; descending", out)
+            else:
+                out.pose = (x0, y0, z_target)
                 out.phase, out.why = self.phase, self.why
                 return out
 
@@ -363,9 +409,14 @@ class SkybetaMission:
             return out
 
         if self.phase == "DESCEND":
-            end = self.path.point_at(self.path.length)
-            vx, vy = p.kp_xy * (end[0] - pm[0]), p.kp_xy * (end[1] - pm[1])
-            ox, oy = self._vec_to_odom(vx, vy)
+            ox = oy = 0.0
+            if not self.hold_xy_on_descent:
+                pass                                                   # straight down, no steering
+            elif self.land_xy_odom is not None:                        # hover: over the take-off point
+                ox, oy = p.kp_xy * (self.land_xy_odom[0] - x), p.kp_xy * (self.land_xy_odom[1] - y)
+            elif self.path is not None:                                # course: over the route's end
+                end = self.path.point_at(self.path.length)
+                ox, oy = self._vec_to_odom(p.kp_xy * (end[0] - pm[0]), p.kp_xy * (end[1] - pm[1]))
             out.twist = (ox, oy, -p.descend_mps, 0.0)
             out.phase, out.why = self.phase, self.why
             return out

@@ -62,6 +62,10 @@ class PlannerParams:
     snap_m: float = 0.25                # a goal may move this far to the nearest free cell
     simplify_tol_m: float = 0.03        # straight-run tolerance when collapsing a leg
     min_spacing_m: float = 0.05         # consecutive route points at least this far apart
+    keep_centre_m: float | None = None  # None: collapse/shortcut wherever the line keeps `clearance` (tight around
+                                        # wall ends). A number: a straight line may replace part of the centred
+                                        # A* path only if it loses at most this much of that part's clearance
+                                        # (for a physical course that isn't exactly the published one)
 
 
 @dataclass
@@ -194,8 +198,15 @@ def _astar(g: ClearanceGrid, free: list[list[bool]], pen: list[list[int]],
     raise ValueError("no path between two goals: a gap is narrower than the drone plus its margin")
 
 
-def _rdp(g: ClearanceGrid, pts: list[XY], tol: float, need_mm: int) -> list[XY]:
-    """Ramer-Douglas-Peucker, keeping a shortcut only if its straight line stays clear."""
+def _kept(need_mm: int, span_min_mm: int, keep_mm: int | None) -> int:
+    """The clearance a straight line must keep to replace a stretch of path whose own minimum is span_min_mm."""
+    return need_mm if keep_mm is None else max(need_mm, span_min_mm - keep_mm)
+
+
+def _rdp(g: ClearanceGrid, pts: list[XY], tol: float, need_mm: int,
+         cl: list[int] | None = None, keep_mm: int | None = None) -> list[XY]:
+    """Ramer-Douglas-Peucker, keeping a shortcut only if its straight line stays clear (and, with keep_mm, loses at
+    most keep_mm of the replaced points' clearance cl)."""
     if len(pts) <= 2:
         return pts
     a, b = np.asarray(pts[0]), np.asarray(pts[-1])
@@ -206,19 +217,23 @@ def _rdp(g: ClearanceGrid, pts: list[XY], tol: float, need_mm: int) -> list[XY]:
             else np.hypot(P[:, 0] - a[0], P[:, 1] - a[1]))
     i = int(np.argmax(dist))
     if dist[i] <= tol:
-        if g.segment_min(pts[0], pts[-1]) >= need_mm:
+        if g.segment_min(pts[0], pts[-1]) >= _kept(need_mm, min(cl) if cl else need_mm, keep_mm):
             return [pts[0], pts[-1]]
         i = len(pts) // 2
-    return _rdp(g, pts[:i + 1], tol, need_mm)[:-1] + _rdp(g, pts[i:], tol, need_mm)
+    return (_rdp(g, pts[:i + 1], tol, need_mm, cl[:i + 1] if cl else None, keep_mm)[:-1]
+            + _rdp(g, pts[i:], tol, need_mm, cl[i:] if cl else None, keep_mm))
 
 
-def _shortcut(g: ClearanceGrid, pts: list[XY], need_mm: int) -> list[XY]:
-    """Drop corners where the straight line keeps need_mm: open areas only, corridors keep their centred path."""
+def _shortcut(g: ClearanceGrid, pts: list[XY], need_mm: int, keep_mm: int | None = None) -> list[XY]:
+    """Drop corners where the straight line keeps need_mm: open areas only, corridors keep their centred path.
+    With keep_mm, the line must also lose at most keep_mm of the dropped stretch's own clearance."""
+    seg = [g.segment_min(a, b) for a, b in zip(pts, pts[1:])] if keep_mm is not None else []
     out = [pts[0]]
     i = 0
     while i < len(pts) - 1:
         j = len(pts) - 1
-        while j > i + 1 and g.segment_min(pts[i], pts[j]) < need_mm:
+        while j > i + 1 and g.segment_min(pts[i], pts[j]) < _kept(need_mm, min(seg[i:j]) if seg else need_mm,
+                                                                  keep_mm):
             j -= 1
         out.append(pts[j])
         i = j
@@ -323,12 +338,15 @@ def plan_route(cm: CourseMap, checkpoints: list[dict[str, Any]], launch: dict[st
     launch_xy = (float(launch["x"]), float(launch["y"]))
     cur = _snap(g, free, *launch_xy, p.snap_m)
     roomy_mm = clear_mm + int(math.floor(p.roomy_m * MM + 0.5))
+    keep_mm = None if p.keep_centre_m is None else int(math.floor(p.keep_centre_m * MM + 0.5))
     pts: list[XY] = [g.xy(cur)]
     labels = ["launch"]
     for xy, label in goals:
         goal = _snap(g, free, float(xy[0]), float(xy[1]), p.snap_m)
-        leg = [g.xy(c) for c in _astar(g, free, pen, cur, goal)]
-        leg = _shortcut(g, _rdp(g, leg, p.simplify_tol_m, clear_mm), roomy_mm)
+        cells = _astar(g, free, pen, cur, goal)
+        leg = [g.xy(c) for c in cells]
+        cl = [int(g.mm[c]) for c in cells] if keep_mm is not None else None
+        leg = _shortcut(g, _rdp(g, leg, p.simplify_tol_m, clear_mm, cl, keep_mm), roomy_mm, keep_mm)
         for q in leg[1:]:
             pts.append(q)
             labels.append("")
@@ -368,7 +386,7 @@ def gate_problems(plan: RoutePlan) -> list[str]:
 
 
 def plan_from_files(sdf_path: str | Path, yaml_path: str | Path, launch_key: str, height_m: float,
-                    cp4: str = "window") -> RoutePlan:
+                    cp4: str = "window", keep_centre_m: float | None = None) -> RoutePlan:
     """Load the map and course.yaml and plan. Height is above the launch point, as refnav's height_m."""
     import yaml
 
@@ -377,7 +395,8 @@ def plan_from_files(sdf_path: str | Path, yaml_path: str | Path, launch_key: str
     cfg = yaml.safe_load(Path(yaml_path).read_text(encoding="utf-8"))
     lim = cfg["limits"]
     params = PlannerParams(drone_radius_m=float(lim["drone_radius"]),
-                           clearance_m=float(lim["drone_radius"]) + float(lim["clearance_margin"]) + 0.01)
+                           clearance_m=float(lim["drone_radius"]) + float(lim["clearance_margin"]) + 0.01,
+                           keep_centre_m=keep_centre_m)
     launch = load_launch(yaml_path, launch_key)
     return plan_route(CourseMap.load(sdf_path), cfg["checkpoints"], launch, height_m + launch["z"], params, cp4)
 
