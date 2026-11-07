@@ -67,7 +67,7 @@ class EvBridge(Node):
         # freeze_max_age_s is never latched (so a freeze can't hold a pose from before a vision outage).
         from px4_msgs.msg import DistanceSensor, VehicleStatus
         self._DistanceSensor,self._VehicleStatus=DistanceSensor,VehicleStatus
-        self.freeze=LandFreeze(float(declare(self,'land_freeze_m',.25)))
+        self.freeze=LandFreeze(float(declare(self,'land_freeze_m',.7)))
         self.freeze_max_age_s=float(declare(self,'freeze_max_age_s',.3))
         self.nav: int | None = None
         self.armed: bool = False
