@@ -104,7 +104,9 @@ class SkybetaMissionNode(Node):
                                       f"{MAP_FRAME!r}: ignored", throttle_duration_sec=5.0)
             return
         p, q = m.pose.position, m.pose.orientation
-        why = self.mission.on_map_from_odom(self._now(), transform_from_pose_fields(p.x, p.y, p.z, q.x, q.y, q.z, q.w))
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+        why = self.mission.on_map_from_odom(self._now(), transform_from_pose_fields(p.x, p.y, p.z, q.x, q.y, q.z, q.w),
+                                            stamp=stamp if stamp > 0.0 else None)
         if why is not None:
             self.get_logger().info(f"{MAP_FROM_ODOM_TOPIC} ignored: {why}", throttle_duration_sec=5.0)
 

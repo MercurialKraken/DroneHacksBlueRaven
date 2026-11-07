@@ -21,7 +21,8 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
   DESCEND        a downward twist (descend_mps), xy held over the end of the route, refreshed every
                  tick (twists expire after 1 s), until PX4 reports landed and disarmed.
   DONE / ABORTED nothing is ever published again. Abort: offboard_active drops (the pilot or a
-                 failsafe has the vehicle), /skybeta/state or odometry goes stale. On abort the node
+                 failsafe has the vehicle), /skybeta/state or odometry goes stale, or odometry
+                 jumps (a reset: every position it gives is now in another frame). On abort the node
                  also calls /skybeta/hold. Silence means a re-arm cannot hand control back to this
                  node: the interface requires a setpoint from it in the last second.
 

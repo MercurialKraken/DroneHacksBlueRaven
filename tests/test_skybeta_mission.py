@@ -282,6 +282,81 @@ def test_corrections_never_change_the_flight_height():
     assert m.on_map_from_odom(3.1, np.full((4, 4), np.nan)) is not None
 
 
+# ------------------------------------------- stack restarts and odometry gaps (skybeta-09 bench)
+def until(m, sim, t, phase, limit=30.0):
+    t_end = t + limit
+    while m.phase != phase and t < t_end:
+        t, _ = run(m, sim, t, t + DT)
+    assert m.phase == phase, m.why
+    return t
+
+
+def test_a_short_odometry_gap_in_flight_does_not_abort():
+    m, sim = mission(), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "FOLLOW")
+    t, _ = run(m, sim, t, t + 0.35, odom=False)                    # the bench saw gaps up to ~0.3 s
+    t, _ = run(m, sim, t, t + 60.0)
+    assert m.phase == "DONE", m.why
+
+
+def test_stack_restart_before_takeoff_refixes_map_from_odom_and_resends_it():
+    m = mission()
+    sim = Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
+    t = to_ready(m, sim)
+    T1 = m.T_map_odom.copy()
+    sim.armed = True                                               # armed on the mark, not yet Position
+    t_gap = t
+    t, blind = run(m, sim, t, t + 3.0, odom=False)                 # the stack restarts: no odometry...
+    sim.x, sim.y, sim.z, sim.yaw = 0.0, 0.0, 0.0, 0.0              # ...then a new origin, same spot
+    t, after = run(m, sim, t, t + 3.0)
+    assert m.phase == "WAIT_OFFBOARD" and m.n_init == 2
+    assert all(c.pose is None for tt, c in blind if tt - t_gap > m.p.odom_stale_s + DT)   # silent while blind
+    sent = [c.map_from_odom_init for _, c in blind + after if c.map_from_odom_init is not None]
+    assert len(sent) == 1 and not np.allclose(sent[0], T1)        # a new INIT, re-sent to map_align
+    assert np.allclose(sent[0] @ [0, 0, 0, 1], [LAUNCH["x"], LAUNCH["y"], LAUNCH["z"], 1])
+    switch_to_offboard(t, sim)
+    run(m, sim, t, t + 60.0)
+    assert m.phase == "DONE", m.why
+    end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
+    assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15
+
+
+def test_odometry_reset_without_a_gap_before_takeoff_also_refixes():
+    m = mission()
+    sim = Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
+    t = to_ready(m, sim)
+    sim.x, sim.y, sim.z, sim.yaw = 0.0, 0.0, 0.0, 0.0              # instant reset to a new origin
+    t, _ = run(m, sim, t, t + 3.0)
+    assert m.phase == "WAIT_OFFBOARD" and m.n_init == 2
+    assert np.allclose(m.T_map_odom @ [0, 0, 0, 1], [LAUNCH["x"], LAUNCH["y"], LAUNCH["z"], 1])
+
+
+def test_odometry_jump_in_flight_aborts_with_a_hold():
+    m, sim = mission(), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "FOLLOW")
+    sim.x += 1.0                                                   # a reset mid-flight
+    t, cmds = run(m, sim, t, t + 0.5)
+    assert m.phase == "ABORTED" and "jumped" in m.why and sum(c.call_hold for _, c in cmds) == 1
+
+
+def test_init_waits_for_px4_to_report_landed():
+    m, sim = mission(), Sim()
+    sim.landed = False
+    run(m, sim, 0.0, 4.0)
+    assert m.phase == "INIT" and "landed" in m.why
+
+
+def test_corrections_stamped_before_the_latest_init_are_ignored():
+    m, sim = mission(), Sim()
+    to_ready(m, sim)
+    assert m.on_map_from_odom(3.0, m.T_map_odom, stamp=m.t_fixed - 0.1) is not None
+    assert m.on_map_from_odom(3.0, m.T_map_odom, stamp=m.t_fixed + 0.1) is None
+
+
 def test_the_package_never_publishes_to_px4_directly():
     pkg = ROOT / "skybeta" / "blueraven_skybeta"
     for f in list(pkg.rglob("*.py")):
