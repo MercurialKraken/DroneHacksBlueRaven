@@ -88,10 +88,10 @@ class Params:
     land_timeout_s: float = 60.0
     # PX4 disarms only if its land detector agrees, which needs a sane estimate; VIO can die on the pad (camera
     # inches off a blank floor) and the estimate then runs away. Touchdown is judged from the rangefinder instead.
-    touchdown_m: float = 0.12                   # rangefinder at or under this, level, for touchdown_s: force the disarm
+    touchdown_m: float = 0.20                   # rangefinder at or under this, near level, for touchdown_s: force the disarm
     touchdown_s: float = 8.0                    # PX4 confirms and disarms itself well inside this when it can
     touchdown_after_s: float = 2.0              # never sooner than this after the landing began
-    touchdown_tilt_deg: float = 15.0
+    touchdown_tilt_deg: float = 35.0            # a dead estimate on the pad tips and skids the airframe 25 deg+
     stall_s: float = 45.0                       # no progress along the path this long: land
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
     a_lat_mps2: float = 0.25                    # sideways acceleration in turns: PX4 lags tighter ones and cuts the corner
