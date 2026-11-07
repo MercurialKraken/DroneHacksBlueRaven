@@ -9,14 +9,16 @@
 
 ## State estimation
 
-- **[blocker] The IMU never initializes in cuVSLAM.** The log reads `gravity none yet` for 200 s. "Inertial" mode may really be visual-only. `imu_frequency` says 500 Hz while the sim delivers 480, and the noise values are 10× the defaults. See [vio.yaml:10-16](onboard/config/vio.yaml#L10-L16).
+- **The IMU only initializes once the drone moves.** Gravity stays "none yet" on the pad and appears after the first takeoff; tracking time then rises from about 1 to 5 ms. The first seconds of flight run without it. The noise values in [vio.yaml:11-14](onboard/config/vio.yaml#L11-L14) are 10× the sim's IMU model (gyro 2.5–3.4e-4, accel 1.9–2.5e-3). `imu_frequency: 500` is overridden to 480 by the sim deployment.
 - **[blocker] The dark tunnel blinds the cameras.** The OAK-D S2 has no IR, so it gets no features and no depth.
   - With `imu_only_policy: publish`, drifting IMU-only poses go to PX4.
-  - With `withhold`, PX4 loses position and the mission lands.
+  - With `withhold`, PX4 marks position invalid after 1 s without vision (`EKF2_NOAID_TOUT=1`) and descends.
 - **Drift is never corrected.** cuVSLAM runs in odometry-only mode ([cuvslam_lib_node.py:173-187](onboard/slam/cuvslam_lib_node.py#L173-L187)). Nothing matches against the course layout.
-- **Velocity goes to PX4 with variance 0.** It's a finite difference of poses at 15 Hz with no twist covariance ([cuvslam_lib_node.py:360-367](onboard/slam/cuvslam_lib_node.py#L360-L367)), so PX4 uses its minimum noise and may over-trust it.
+- **cuVSLAM is overconfident.** It reports σ ≈ 2–3 mm. PX4 floors that at 5 cm (`EKF2_EVP_NOISE`), but slow drift still passes straight into PX4's position.
+- **Velocity goes to PX4 with variance 0.** It's a finite difference of poses at 15 Hz with no twist covariance ([cuvslam_lib_node.py:360-367](onboard/slam/cuvslam_lib_node.py#L360-L367)). PX4 doesn't fuse vision velocity today (`EKF2_EV_CTRL=9`: position and yaw only), so this only matters if that changes.
 - **IMU-only frames look like good frames.** They're published as normal odometry ([cuvslam_lib_node.py:278-283](onboard/slam/cuvslam_lib_node.py#L278-L283)), and neither the bridge nor PX4 can tell.
-- **We don't know what EKF2 fuses.** `EKF2_EV_CTRL`, `EKF2_HGT_REF`, `EKF2_RNG_CTRL` and `EKF2_EV_DELAY` are unread.
+- **Height comes from the rangefinder** (`EKF2_HGT_REF=2`). On the return, flying over the 68 in barrier will look like the floor rising 1.73 m.
+- **The published camera calibration is deliberately off** (focal +0.5%, baseline +1%, principal point 2 px). cuVSLAM reads its intrinsics from it, so expect a small scale bias. Depth reads about 1.5% long.
 - **Two frames are both called `odom`.** One is cuVSLAM's startup frame ([cuvslam_lib_node.py:332](onboard/slam/cuvslam_lib_node.py#L332)), the other PX4's estimate ([px4_odom.py:65-69](onboard/adapters/px4_odom.py#L65-L69)).
 - **Constraint:** map or SLAM corrections must never go into PX4's vision input. The bridge's 1 m jump check marks health false and the mission lands ([ev_bridge.py:105-106](onboard/vio/ev_bridge.py#L105-L106)).
 - **Constraint:** restarting the bridge means 25 s with no vision input ([ownership.py:22-43](onboard/vio/ownership.py#L22-L43)). Never restart it while armed.
@@ -26,7 +28,7 @@
 - **[blocker] No course map.** The published layout isn't loaded and there's no occupancy grid or distance field.
 - **[blocker] No local obstacle map.** The only check is refnav's "anything within 0.9 m ahead".
 - **Narrow corridors look blocked.** refnav counts anything within ±0.6 m of the flight line as ahead ([core.py:71](refnav/core.py#L71), [depth.py:141](refnav/depth.py#L141)), so corridors under about 1.2 m trip the stop.
-- **No side sensing.** Stereo depth can't see closer than about 0.33 m, so tunnel walls may be invisible.
+- **No side sensing.** Stereo depth can't see closer than 0.40 m, so tunnel walls may be invisible. It's also coarse beyond about 2 m (0.56 m steps at 3 m), and about 64% of pixels are invalid on the pad.
 
 ## Planning
 
@@ -41,7 +43,11 @@
   - Turns in place before each leg, then a 1 s hold at the end of it.
   - No velocity feedforward.
 
+- **PX4 caps horizontal speed at 1.5 m/s and acceleration at 1 m/s²** in the sim (`MPC_XY_VEL_MAX`, `MPC_ACC_HOR`). Faster setpoints get clipped.
+
 ## Mission
+
+- **Cramped start:** 0.31 m to the left wall and 0.50 m behind. Climb before moving sideways.
 
 - **[blocker] Wrong start flow.** refnav arms itself as soon as it's ready, has no start command, and gives up if it sees the drone already armed ([core.py:311](refnav/core.py#L311)).
 - **Lands after 1 s of bad estimator health anywhere** ([core.py:341](refnav/core.py#L341)). In the tunnel that ends the run.

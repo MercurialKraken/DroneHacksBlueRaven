@@ -4,12 +4,10 @@
 
 ## State estimation
 
-- [ ] **Fix IMU initialization.** Fly in sim and check that cuVSLAM's gravity estimate appears after takeoff. If it doesn't, fix the IMU rate (500 vs 480), noise values, timestamps and IMU-to-camera extrinsic in `vio.yaml`.
-- [ ] **Drift evaluator (sim only).** Log cuVSLAM's pose and PX4's estimate against `dronehacks_sim` truth. Report drift per metre.
-- [ ] **Measure variance.** From the evaluator, measure the real pose and velocity error. Set `position_floor`, `orientation_floor` and `velocity_floor` in `vision_bridge.yaml`.
-- [ ] **Velocity covariance.** Fill in cuVSLAM's twist covariance, or stop sending velocity to PX4.
+- [ ] **First data flight** with `tools/sim_eval/` (written, not yet run on the VM). It gives drift, inertial-init timing, latency and tunnel behaviour against truth.
+- [ ] **IMU noise to the sim model.** Set `gyro_noise_density` 3.4e-4 and `accel_noise_density` 2.5e-3, plus the random walks 1.82e-6 / 3.7e-5 once their units are confirmed. A/B against today's 10× values by bag replay (`tools/sim_eval/replay_vio.sh`).
+- [ ] **Measure variance.** If the measured error is above PX4's 5 cm floor, set `position_floor` in `vision_bridge.yaml`.
 - [ ] **Flag IMU-only frames.** Inflate their covariance instead of publishing them as normal.
-- [ ] **Read the EKF2 parameters in sim** (`EV_CTRL`, `HGT_REF`, `RNG_CTRL`, `EV_DELAY`). Set `EV_DELAY` to the measured latency.
 - [ ] **Rename cuVSLAM's frame** to `vio_odom`. TF tree: `map → odom (PX4) → base_link`.
 - [ ] **`map→odom` localization.** Match depth against the map's distance field over (x, y, yaw) and publish the correction. Never feed it into PX4's vision input.
 
@@ -35,7 +33,7 @@
   - Flow: start command → takeoff → maze → tunnel → chicane → land → disarm.
   - Each stage gets its own timeout and health rules.
   - Abort on a land or kill command.
-- [ ] **Tunnel mode.** Center with ToF and dead-reckon for a bounded time. Don't land on bad vision health.
+- [ ] **Tunnel mode.** Keep vision flowing (PX4 descends after 1 s without it). Center with ToF and dead-reckon for a bounded time. Don't land on bad vision health.
 - [ ] **Pad landing.** Approach, descend inside the outer ring, confirm landed and disarmed.
 
 ## Hardware
