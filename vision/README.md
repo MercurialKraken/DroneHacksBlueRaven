@@ -34,7 +34,8 @@ python3 -m pytest -q tests/test_vision_floor_line.py           # offline, no ROS
 # sim (defaults)
 python3 -m vision.line_node --ros-args -p use_sim_time:=true -p polarity:=dark
 
-# drone: inside the skybeta container, only with the team's agreement
+# drone: inside the skybeta container, only with the team's agreement, and NOT in flight until a
+# load test shows it leaves the vision age at PX4 unchanged (camera subscribers can slow cuVSLAM)
 python3 -m vision.line_node --ros-args -p image_topic:=/oak/left/image_raw \
     -p polarity:=dark -p every_nth:=3
 timeout 30s ros2 topic echo /vision/floor_line

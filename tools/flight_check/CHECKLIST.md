@@ -25,14 +25,16 @@ ros2 bag record -s mcap -o ~/team_ws/bags/flight_NN \
   /fmu/in/vehicle_visual_odometry /tf /tf_static
 ```
 
-- **Do not record the raw camera images by default.** One 1024×640 bgr8 camera at 30 Hz is about
-  59 MB/s. Record a short image clip separately only when a flight needs one.
+- **Never record, view or even `ros2 topic hz` the camera images on the drone**
+  (`/oak/*/image_raw/compressed` and friends). Arnav's load test (2026-11-07): one subscriber to
+  the compressed stereo makes the camera driver JPEG-encode 2 x 30 Hz inside the stack, and the
+  vision age at PX4 climbs from about 60 ms to 200–340 ms within about 30 s, past PX4's 200 ms
+  limit. The depth node alone is fine (about +7 ms). Logs: `~/team_ws/bench/load_test_144342`.
 - `/fmu/in/vehicle_visual_odometry` is what PX4 actually receives; the analyzer reads its age
   (`timestamp - timestamp_sample`). Recording it only subscribes.
-- Every extra node and recording costs Jetson CPU. On 2026-11-07 the vision age at PX4 went from
-  75 ms to 200–400 ms under extra load (depth node + compressed stereo + an 18 MB/s recording) and
-  the stack later stopped. Keep optional nodes (depth, floor line) off until the load test says
-  they fit, and check **Data age** in every report.
+- Check **Data age** in every report. Optional nodes that read camera images (for example the
+  floor-line observer, which subscribes to the raw left image) stay off in flight until a load
+  test with them shows the vision age unchanged.
 - Add any team topics that exist by then (for example map-alignment output) and any
   `/fmu/out/*` topics you want. Recording only subscribes; it publishes nothing.
 - Whether the container's rosbag2 has the `mcap` storage plugin is **not confirmed**. If `-s mcap`
