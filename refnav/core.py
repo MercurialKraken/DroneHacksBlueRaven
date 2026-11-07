@@ -18,7 +18,8 @@ Safety behaviour (each one is a test in tests/test_refnav_core.py):
   < min_valid_frac), future-stamped, stale-on-arrival or out-of-order frame refreshes nothing; no
   usable depth for depth_lost_land_s lands;
 * an obstacle closer than stop_m ahead stops the aircraft and ends the route (it lands where it
-  is: route blocked; planning around obstacles is the student's job);
+  is: route blocked), unless avoid is set and refnav.planner finds a way around;
+* no progress toward the current target for stall_s lands, so a frozen carrot cannot hover forever;
 * PX4 leaving Offboard while airborne (a pilot or a failsafe) is never fought: the mission stops
   streaming and commanding and ends ("yielded");
 * PX4 owns the landing: once AUTO_LAND is observed the mission stops streaming setpoints (PX4's
@@ -34,7 +35,10 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from . import depth as D
+from . import planner as P
 
 if TYPE_CHECKING:
     from typing import Any
@@ -47,6 +51,7 @@ if TYPE_CHECKING:
 NAV_OFFBOARD = 14
 NAV_AUTO_LAND = 18
 AIRBORNE = ("climb", "hover", "turn", "check", "go", "hold")
+LEG_PHASES = ("turn", "check", "go")
 
 
 @dataclass
@@ -87,6 +92,20 @@ class Params:
     arm_wait_s: float = 30.0
     cmd_resend_s: float = 1.0
     land_timeout_s: float = 60.0
+    stall_s: float = 45.0                       # no progress toward the current target this long on a leg: land
+    avoid: bool = False                         # True: legs steer around obstacles (refnav.planner) instead of landing
+    gap_fan_deg: float = 35.0                   # bearings tried either side of the nose; the camera sees about +-37
+    gap_step_deg: float = 5.0
+    gap_half_m: float = 0.4                     # half-width that must be clear: airframe radius 0.25 plus margin
+    gap_stop_m: float = 0.7                     # usable clearance a bearing needs
+    gap_look_m: float = 3.0                     # clearance beyond this earns nothing: stereo is coarse past 2 m
+    gap_trust: float = 0.05                     # range discount per metre squared of measured clearance
+    gap_turn_cost: float = 0.3                  # score lost per radian of change from the current bearing
+    gap_min_hits: int = 6                       # points that make an obstacle; a corridor grazing a corner sees few
+    gap_memory_s: float = 3.0                   # how long depth points count after they leave the camera's view
+    gap_view_deg: float = 34.0                  # half view inside which live depth replaces remembered points
+    look_step_deg: float = 30.0                 # yaw this far when no bearing is clear, then look again
+    look_tries: int = 3
 
 
 @dataclass
@@ -188,16 +207,23 @@ class Mission:
         self.leg_dir: tuple[float, float] | None = None
         self.leg_len: float = 0.0
         self.leg_heading: float = 0.0
-        self.leg_yaw: float = 0.0                   # heading held on this leg: leg_heading + its camera offset
+        self.leg_yaw: float = 0.0                   # heading held on this leg: leg_heading + camera offset, or a look direction
         self.s: float = 0.0
         self.counts: dict[str, int] = {"depth_frames": 0, "obstacle_stops": 0, "depth_holds": 0, "unconfirmed_obstacles": 0,
                        "depth_unusable": 0, "depth_future": 0, "depth_stale": 0, "depth_out_of_order": 0,
-                       "corridor_unobserved": 0}
+                       "corridor_unobserved": 0, "stalls": 0, "looks": 0}
         self.clr_hist: list[tuple[float, float]] = []            # [(depth stamp, clearance)] along the current leg, newest last
         self.last_clearance: float | None = None
         self.land_request: str | None = None      # why an outside landing request was made (request_land), until acted on
         self.depth_reject: tuple[str, str] | None = None      # (key, detail): why the latest refused depth frame was refused
         self.last_valid_frac: float | None = None   # fraction of pixels returning depth in the latest decoded frame
+        self.best_dist: float = math.inf            # closest this leg has come to its target
+        self.t_best: float = 0.0                    # when that was
+        self.gap_heading: float | None = None       # world heading of the bearing being flown
+        self.gap_clear: float = 0.0
+        self.gap_t: float | None = None             # the depth frame that bearing was chosen from
+        self.looks: int = 0
+        self.memory: P.PointMemory = P.PointMemory(params.gap_memory_s)
 
     def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
@@ -349,6 +375,9 @@ class Mission:
             elif self.depth_t is None or now - self.depth_t > p.depth_lost_land_s:
                 self._land(now, out, f"depth silent for more than {p.depth_lost_land_s:.0f} s")
 
+        if self.phase in LEG_PHASES and self._stalled(now, v):
+            self.counts["stalls"] += 1
+            self._land(now, out, f"no progress for {p.stall_s:.0f} s on leg {self.leg + 1}")
         ph = self.phase
         if ph == "wait":
             ok, why = self.health.arm_ok(now)
@@ -407,14 +436,14 @@ class Mission:
             if now - self.t_phase >= p.hover_s:
                 self._next_leg(now, out, v)
         elif ph == "turn":
-            err = _wrap(self.leg_yaw - self.sp[3])
-            step = math.radians(p.yaw_rate_dps) * dt
-            self.sp[3] = _wrap(self.sp[3] + max(-step, min(step, err)))
+            err = self._slew_yaw(self.leg_yaw, dt)
             if abs(err) < 1e-3 and abs(_wrap(self.leg_yaw - v.heading)) < math.radians(p.face_tol_deg):
                 self._set("check", now, out)
+        elif ph == "check" and p.avoid:
+            if self._frame_since_phase_start(now):
+                self._set("go", now, out)
         elif ph == "check":
-            # a depth frame captured AFTER the turn ended looks along this leg
-            if self.depth_t is not None and self.depth_t >= self.t_phase and self.depth_fresh(now):
+            if self._frame_since_phase_start(now):
                 if self.clr_hist and self.clr_hist[0][0] < self.t_phase:
                     self.clr_hist, self.corr_t = [], None    # frames from before the turn ended look elsewhere
                 clr = self._clearance(v)                     # None: not enough observed frames yet, wait
@@ -466,6 +495,8 @@ class Mission:
         off = math.radians(offs[self.leg]) if self.leg < len(offs) else 0.0
         self.leg_yaw = _wrap(self.leg_heading + off)
         self.clr_hist, self.corr_t = [], None
+        self.best_dist, self.t_best = math.inf, now
+        self.gap_heading, self.looks = None, 0
         self._set("turn", now, out, f"leg {self.leg + 1}/{len(self.targets)}")
 
     def _clearance(self, v: Vehicle) -> float | None:
@@ -494,7 +525,76 @@ class Mission:
             self.counts["unconfirmed_obstacles"] += 1
         return confirmed
 
+    def _frame_since_phase_start(self, now: float) -> bool:
+        """A depth frame captured AFTER the turn ended looks along this leg."""
+        return self.depth_t is not None and self.depth_t >= self.t_phase and self.depth_fresh(now)
+
+    def _slew_yaw(self, target: float, dt: float) -> float:
+        err = _wrap(target - self.sp[3])
+        step = math.radians(self.p.yaw_rate_dps) * dt
+        self.sp[3] = _wrap(self.sp[3] + max(-step, min(step, err)))
+        return err
+
+    def _target_dist(self, v: Vehicle) -> float:
+        tn, te = self.targets[self.leg]
+        return math.hypot(v.pos[0] - tn, v.pos[1] - te)
+
+    def _stalled(self, now: float, v: Vehicle) -> bool:
+        d = self._target_dist(v)
+        if d < self.best_dist - 0.1:
+            self.best_dist, self.t_best = d, now
+        return now - self.t_best > self.p.stall_s
+
+    def _look(self, now: float, out: Output, v: Vehicle, goal: float) -> None:
+        """Nothing in view is clear: turn toward the goal side and look again before giving up."""
+        self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
+        if self.looks >= self.p.look_tries:
+            self.counts["obstacle_stops"] += 1
+            self._land(now, out, f"route blocked: no clear bearing after {self.looks} looks on leg {self.leg + 1}")
+            return
+        self.looks += 1
+        self.counts["looks"] += 1
+        self.leg_yaw = _wrap(v.heading + math.copysign(math.radians(self.p.look_step_deg), goal))
+        self.gap_heading = None
+        self._set("turn", now, out, f"look {self.looks}/{self.p.look_tries}: no clear bearing")
+
+    def _go_gap(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
+        """One tick of a leg flown by gap picking: choose on each new frame, fly the choice in between."""
+        p = self.p
+        tn, te = self.targets[self.leg]
+        dn, de = tn - v.pos[0], te - v.pos[1]
+        if self._target_dist(v) < p.arrive_m:
+            self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
+            self._set("hold", now, out, f"arrived leg {self.leg + 1}")
+            return
+        if not self.depth_fresh(now):
+            self.counts["depth_holds"] += 1                  # no live evidence: the setpoint waits
+            return
+        if self.gap_heading is None or self.gap_t != self.depth_t:
+            self.gap_t = self.depth_t
+            goal = _wrap(math.atan2(de, dn) - v.heading)
+            last = goal if self.gap_heading is None else _wrap(self.gap_heading - v.heading)
+            near = self.depth_pts[np.abs(self.depth_pts[:, 2]) < p.band_m]    # clearance ignores the rest anyway
+            self.memory.add(now, near, v.pos, v.heading)
+            points = self.memory.merged(near, v.pos, v.heading, math.radians(p.gap_view_deg))
+            gap = P.choose_gap(self.frame, points, goal, last, p)
+            if gap is None:
+                self._look(now, out, v, goal)
+                return
+            self.gap_heading, self.gap_clear, self.looks = _wrap(v.heading + gap.bearing), gap.clear_m, 0
+        self._slew_yaw(self.gap_heading, dt)
+        self.sp[0] += math.cos(self.gap_heading) * p.speed_mps * dt
+        self.sp[1] += math.sin(self.gap_heading) * p.speed_mps * dt
+        lead = math.hypot(self.sp[0] - v.pos[0], self.sp[1] - v.pos[1])
+        cap = min(p.lead_max_m, max(self.gap_clear - p.gap_stop_m, 0.1))
+        if lead > cap:
+            self.sp[0] = v.pos[0] + (self.sp[0] - v.pos[0]) * cap / lead
+            self.sp[1] = v.pos[1] + (self.sp[1] - v.pos[1]) * cap / lead
+
     def _go(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
+        if self.p.avoid:
+            self._go_gap(now, dt, out, v)
+            return
         p = self.p
         n0, e0 = self.leg_start
         un, ue = self.leg_dir
