@@ -9,7 +9,6 @@ Read-only by construction: nothing here talks to ROS, PX4 or the drone.
 
 from __future__ import annotations
 
-import math
 import struct
 from dataclasses import dataclass
 
@@ -48,6 +47,9 @@ class Cdr:
 
     def u32(self) -> int:
         return self._take("<I", 4)[0]
+
+    def u64(self) -> int:
+        return self._take("<Q", 8)[0]
 
     def f64s(self, n: int) -> tuple[float, ...]:
         return self._take("<%dd" % n, 8)
@@ -99,6 +101,10 @@ def decode(schema: str, data: bytes) -> dict | None:
         return {"stamp": 0.0, "frame": "", "lin": r.f64s(3), "ang": r.f64s(3)}
     if s == "std_msgs/String":
         return {"data": r.string()}
+    if s == "px4_msgs/VehicleOdometry":
+        # first two fields: uint64 timestamp, uint64 timestamp_sample (microseconds)
+        ts, sample = r.u64(), r.u64()
+        return {"px4_timestamp_us": ts, "px4_sample_us": sample}
     return None
 
 
@@ -112,6 +118,7 @@ class Thresholds:
     jump_speed_mps: float = 3.0  # implied speed above this = a jump (twists are capped at 1.5)
     freeze_s: float = 0.5  # identical position for at least this long while messages arrive
     hold_s: float = 1.0  # a setpoint older than this is not compared against
+    latency_s: float = 0.2  # older data than this is not fused by PX4 (organizers' EKF2_DELAY_MAX)
 
 
 def topic_stats(times: np.ndarray, gap_s: float) -> dict:
@@ -160,14 +167,28 @@ def vio_events(t: np.ndarray, p: np.ndarray, th: Thresholds = Thresholds()) -> l
                     "step_m": round(step, 3),
                 }
             )
-        speed = step / max(dt, 0.01) if dt >= 0 else math.inf  # floor: stamp jitter
-        if step > th.jump_m or (step > 0 and speed > th.jump_speed_mps):
+        if dt < 0:  # stamps went backwards: report it, but don't call it a jump unless far
+            ev.append(
+                {"t": round(float(t[b]), 3), "kind": "stamp_backwards", "dt_s": round(float(dt), 3)}
+            )
+            if step > th.jump_m:
+                ev.append(
+                    {
+                        "t": round(float(t[b]), 3),
+                        "kind": "jump",
+                        "step_m": round(step, 3),
+                        "speed_mps": None,
+                    }
+                )
+            continue
+        speed = step / max(dt, 0.01)  # floor: stamp jitter
+        if step > th.jump_m or speed > th.jump_speed_mps:
             ev.append(
                 {
                     "t": round(float(t[b]), 3),
                     "kind": "jump",
                     "step_m": round(step, 3),
-                    "speed_mps": None if math.isinf(speed) else round(speed, 2),
+                    "speed_mps": round(speed, 2),
                 }
             )
     # freezes: runs of bit-identical positions spanning freeze_s (tracking stopped, output held)
@@ -275,3 +296,32 @@ def state_changes(times, texts) -> list[dict]:
             out.append({"t": round(float(t), 3), "state": s})
             last = s
     return out
+
+
+def latency(t: np.ndarray, age_s: np.ndarray, limit_s: float = 0.2) -> dict:
+    """Per-message data age (s) at times t (s) -> summary, fraction over limit_s, and the onset:
+    the first 1 s window whose median age exceeds limit_s (the overload signature: age jumps and
+    stays high). Ages can come from arrival minus header stamp, or PX4's own timestamp minus
+    timestamp_sample."""
+    t = np.asarray(t, float)
+    a = np.asarray(age_s, float)
+    ok = np.isfinite(a) & np.isfinite(t)
+    t, a = t[ok], a[ok]
+    if a.size == 0:
+        return {"n": 0}
+    onset = None
+    bins = np.floor(t - t[0]).astype(int)
+    for b in np.unique(bins):
+        if np.median(a[bins == b]) > limit_s:
+            onset = round(float(t[bins == b][0]), 3)
+            break
+    pct = lambda q: round(float(np.percentile(a, q)) * 1e3, 1)  # noqa: E731
+    return {
+        "n": int(a.size),
+        "median_ms": pct(50),
+        "p90_ms": pct(90),
+        "max_ms": round(float(a.max()) * 1e3, 1),
+        "over_limit_fraction": round(float(np.mean(a > limit_s)), 3),
+        "limit_ms": round(limit_s * 1e3, 1),
+        "first_slow_second_t": onset,
+    }

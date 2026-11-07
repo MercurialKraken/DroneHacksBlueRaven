@@ -22,11 +22,17 @@ rules.
 ```bash
 ros2 bag record -s mcap -o ~/team_ws/bags/flight_NN \
   /visual_slam/tracking/odometry /skybeta/setpoint/pose /skybeta/setpoint/twist /skybeta/state \
-  /tf /tf_static /vision/floor_line
+  /fmu/in/vehicle_visual_odometry /tf /tf_static
 ```
 
 - **Do not record the raw camera images by default.** One 1024×640 bgr8 camera at 30 Hz is about
   59 MB/s. Record a short image clip separately only when a flight needs one.
+- `/fmu/in/vehicle_visual_odometry` is what PX4 actually receives; the analyzer reads its age
+  (`timestamp - timestamp_sample`). Recording it only subscribes.
+- Every extra node and recording costs Jetson CPU. On 2026-11-07 the vision age at PX4 went from
+  75 ms to 200–400 ms under extra load (depth node + compressed stereo + an 18 MB/s recording) and
+  the stack later stopped. Keep optional nodes (depth, floor line) off until the load test says
+  they fit, and check **Data age** in every report.
 - Add any team topics that exist by then (for example map-alignment output) and any
   `/fmu/out/*` topics you want. Recording only subscribes; it publishes nothing.
 - Whether the container's rosbag2 has the `mcap` storage plugin is **not confirmed**. If `-s mcap`
@@ -39,8 +45,9 @@ ros2 bag record -s mcap -o ~/team_ws/bags/flight_NN \
 python3 tools/flight_check/analyze_flight.py bags/flight_NN --out flight_NN
 ```
 
-Read three things first: **VIO events** (any jump or freeze), **dropouts** on odometry and
-setpoints, and **tracking error** (pose) or **speed error** (twist). Write the numbers on the log
+Read four things first: **VIO events** (any jump or freeze), **data age** (anything over
+200 ms means PX4 stopped trusting vision), **dropouts** on odometry and setpoints, and
+**tracking error** (pose) or **speed error** (twist). Write the numbers on the log
 sheet. Change one thing at a time between flights.
 
 ## Suggested order

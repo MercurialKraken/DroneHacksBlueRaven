@@ -80,6 +80,14 @@ def twist(t, v, frame="base_link"):
     return bytes(w.b)
 
 
+def px4_odom(ts_us, sample_us):
+    w = W()
+    w._al(8)
+    w.b += struct.pack("<QQ", ts_us, sample_us)
+    w.b += bytes(64)  # the rest of VehicleOdometry is not read
+    return bytes(w.b)
+
+
 def string(txt):
     w = W()
     w.s(txt)
@@ -225,17 +233,20 @@ def _flight(tmp_path, jump=False, frame_sp="odom"):
             (
                 A.DEFAULTS["odom"],
                 "nav_msgs/msg/Odometry",
-                [(100 + a, odom(1000 + a, b)) for a, b in zip(t, p)],
+                [(100 + a, odom(100 + a - 0.05, b)) for a, b in zip(t, p)],
             ),
             (
                 A.DEFAULTS["pose_sp"],
                 "geometry_msgs/msg/PoseStamped",
-                [(100 + a, pose(1000 + a, (0.3 * a + 0.1, 0.0, 0.7), frame_sp)) for a in sp_t],
+                [
+                    (100 + a, pose(100 + a - 0.05, (0.3 * a + 0.1, 0.0, 0.7), frame_sp))
+                    for a in sp_t
+                ],
             ),
             (
                 A.DEFAULTS["twist_sp"],
                 "geometry_msgs/msg/TwistStamped",
-                [(100 + a, twist(1000 + a, (0.3, 0.0, 0.0))) for a in sp_t],
+                [(100 + a, twist(100 + a - 0.05, (0.3, 0.0, 0.0))) for a in sp_t],
             ),
             (
                 A.DEFAULTS["state"],
@@ -247,6 +258,19 @@ def _flight(tmp_path, jump=False, frame_sp="odom"):
                 ],
             ),
             ("/oak/left/image_raw", "sensor_msgs/msg/Image", [(100.0, string("x"))]),
+            (
+                "/fmu/in/vehicle_visual_odometry",
+                "px4_msgs/msg/VehicleOdometry",
+                [
+                    (
+                        100 + a,
+                        px4_odom(
+                            int((5 + a) * 1e6), int((5 + a - (0.075 if a < 3 else 0.3)) * 1e6)
+                        ),
+                    )
+                    for a in t[::2]
+                ],
+            ),
         ],
     )
     return path
@@ -260,6 +284,12 @@ def test_end_to_end_clean_flight(tmp_path):
     assert [s["state"] for s in rep["state_changes"]] == ["ARMED", "OFFBOARD"]
     assert rep["topics"]["/oak/left/image_raw"]["count"] == 1
     assert rep["frames"]["odom"] == ["odom"] and rep["notes"] == []
+    lat = rep["latency"]
+    assert lat[A.DEFAULTS["odom"]]["median_ms"] == pytest.approx(50, abs=1)
+    assert lat[A.DEFAULTS["odom"]]["first_slow_second_t"] is None
+    ev = lat["/fmu/in/vehicle_visual_odometry"]
+    assert ev["kind"].startswith("px4") and ev["first_slow_second_t"] == pytest.approx(3, abs=1.01)
+    assert ev["over_limit_fraction"] == pytest.approx(0.5, abs=0.05)
 
 
 def test_end_to_end_jump_and_frame_warning_and_files(tmp_path):
@@ -291,3 +321,44 @@ def test_thresholds_are_sane():
     th = F.Thresholds()
     assert th.jump_speed_mps > 1.5  # above the skybeta twist cap, so real flight never trips it
     assert 0 < th.gap_s < 1 and math.isfinite(th.hold_s)
+
+
+def test_px4_vehicle_odometry_age_decoding():
+    m = F.decode("px4_msgs/msg/VehicleOdometry", px4_odom(10_300_000, 10_225_000))
+    assert m["px4_timestamp_us"] - m["px4_sample_us"] == 75_000
+
+
+def test_latency_finds_overload_onset():
+    t = np.arange(0, 40, 1 / 30)
+    age = np.where(t < 21, 0.075, 0.3)  # Arnav's field bag shape: 75 ms, then 200-400 ms
+    r = F.latency(t, age, limit_s=0.2)
+    assert r["median_ms"] == pytest.approx(75, abs=1)  # 21 of 40 s at 75 ms
+    assert r["first_slow_second_t"] == pytest.approx(21, abs=1.01)
+    assert r["over_limit_fraction"] == pytest.approx(19 / 40, abs=0.01)
+    assert F.latency(t, np.full_like(t, 0.075))["first_slow_second_t"] is None
+    assert F.latency([], [])["n"] == 0
+
+
+def test_clock_mismatch_is_noted_not_reported(tmp_path):
+    path = tmp_path / "c.mcap"
+    mcap(
+        path,
+        [
+            (
+                A.DEFAULTS["odom"],
+                "nav_msgs/msg/Odometry",
+                [(100 + i / 30, odom(5000 + i / 30, (0, 0, 0.7))) for i in range(60)],
+            )
+        ],
+    )
+    rep = A.analyze(A.load(path), dict(A.DEFAULTS), F.Thresholds())
+    assert A.DEFAULTS["odom"] not in rep["latency"]
+    assert any("different clocks" in n for n in rep["notes"])
+
+
+def test_backwards_stamps_are_reported_but_not_a_jump():
+    t = np.arange(0, 2, 1 / 30)
+    t[30:] -= 0.2  # delivery got slower; stamps step back once
+    p = np.c_[0.01 * np.arange(t.size), np.zeros_like(t), np.full_like(t, 0.7)]
+    kinds = [e["kind"] for e in F.vio_events(t, p)]
+    assert kinds == ["stamp_backwards"]

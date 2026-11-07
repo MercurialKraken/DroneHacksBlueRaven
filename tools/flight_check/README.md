@@ -14,9 +14,10 @@ It reads one `.mcap` file or a ros2 bag folder and writes `flight_03_report.txt`
 | Section | What it means |
 |---|---|
 | Topics | count, rate and dropouts per topic. A dropout is a gap longer than `--gap-s` (0.25 s) *and* 3× the topic's own normal period |
-| VIO events | `jump`: one step moved more than `--jump-m` (0.30 m) or faster than `--jump-speed-mps` (3 m/s, above the 1.5 m/s twist cap); `gap`: odometry stopped; `freeze`: the exact same position for at least `--freeze-s` (0.5 s), i.e. tracking stopped but output was held; `non_finite`: NaN/inf |
+| VIO events | `jump`: one step moved more than `--jump-m` (0.30 m) or faster than `--jump-speed-mps` (3 m/s, above the 1.5 m/s twist cap); `gap`: odometry stopped; `freeze`: the exact same position for at least `--freeze-s` (0.5 s), i.e. tracking stopped but output was held; `non_finite`: NaN/inf; `stamp_backwards`: header time went back (reported, not counted as a jump) |
 | Pose tracking | distance from each odometry sample to the pose setpoint in force then (horizontal and vertical; median, p95, max). **Assumes setpoint and odometry are in the same frame**; it warns when their frame ids differ |
 | Twist tracking | commanded vs flown horizontal speed and vertical speed. Speed *magnitudes* do not depend on whether the twist is in a body or world frame, so no frame assumption is needed |
+| Data age | how old each message already was: recording time minus header stamp, and for PX4 `VehicleOdometry` topics (e.g. the vision input) PX4's own `timestamp - timestamp_sample`. Reports median/p90/max, the fraction older than `--latency-s` (0.2 s, the organizers' `EKF2_DELAY_MAX`: older vision is not fused), and the first 1 s window whose median is over it. This is the Jetson-overload signature seen on the 2026-11-07 field bag (75 ms, then 200–400 ms) |
 | State changes | `/skybeta/state` transitions, if it is a `std_msgs/String`; otherwise only its rate |
 
 Topics default to the skybeta interface (`/visual_slam/tracking/odometry`, `/skybeta/setpoint/pose`,
@@ -25,12 +26,13 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 
 ## How it was checked
 
-- `python3 -m pytest -q tests/test_flight_check.py`: 15 tests with hand-encoded CDR messages in a
+- `python3 -m pytest -q tests/test_flight_check.py`: 19 tests with hand-encoded CDR messages in a
   minimal MCAP file (decoders, dropouts, jumps, freezes, tracking maths, missing topics,
   read-only source check).
 - Cross-checked once against an **independent** writer (the `mcap` + `mcap-ros2-support` packages,
   zstd-compressed chunks like rosbag2): frame ids, positions, a planted 12 m jump at t = 5 s and the
-  state changes all came back exactly.
+  state changes all came back exactly. A second file with data age 75 ms, then 300 ms from
+  t = 21 s, on both the odometry and a PX4 `VehicleOdometry` topic: both onsets found at 21.0 s.
 
 ## Not yet known
 

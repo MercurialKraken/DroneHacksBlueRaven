@@ -80,6 +80,30 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
         if name not in topics:
             rep["notes"].append(f"{key}: topic {name} was not recorded")
 
+    # data age: how stale each message already was when recorded (header topics), or when PX4
+    # stamped it (px4 VehicleOdometry, e.g. the vision input). Jetson overload shows up here.
+    rep["latency"] = {}
+    rep.setdefault("_series", {})["latency"] = {}
+    for name, e in sorted(topics.items()):
+        ms = e["msgs"]
+        if ms and all(m and "px4_sample_us" in m for m in ms):
+            age = np.array([(m["px4_timestamp_us"] - m["px4_sample_us"]) / 1e6 for m in ms])
+            kind = "px4 timestamp - timestamp_sample"
+        elif ms and all(m and m.get("stamp", 0) > 0 for m in ms):
+            age = e["t"] - np.array([m["stamp"] for m in ms])
+            kind = "recorded - header stamp"
+            if abs(float(np.median(age))) > 10:
+                rep["notes"].append(
+                    f"{name}: header stamps and recording clock differ by "
+                    f"{float(np.median(age)):.0f} s (different clocks?); "
+                    "latency not reported"
+                )
+                continue
+        else:
+            continue
+        rep["latency"][name] = {"kind": kind, **F.latency(e["t"] - t0, age, th.latency_s)}
+        rep["_series"]["latency"][name] = (e["t"] - t0, age)
+
     odo = topics.get(names["odom"])
     good = [m for m in (odo["msgs"] if odo else []) if m and "pos" in m]
     if not good:
@@ -96,7 +120,7 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
         "path_length_m": round(float(np.nansum(np.linalg.norm(np.diff(op, axis=0), axis=1))), 3),
         "z_range_m": [round(float(np.nanmin(op[:, 2])), 3), round(float(np.nanmax(op[:, 2])), 3)],
     }
-    rep["_series"] = {"odom_t": ot, "odom_p": op}
+    rep["_series"].update(odom_t=ot, odom_p=op)
 
     sp = topics.get(names["pose_sp"])
     if sp:
@@ -152,6 +176,18 @@ def text(rep: dict) -> str:
         ]
         if len(v["events"]) > 40:
             L.append(f"  ... {len(v['events']) - 40} more in the JSON")
+    if rep.get("latency"):
+        L += [
+            "",
+            "Data age (PX4 fuses vision only if younger than %.0f ms)"
+            % (rep["thresholds"]["latency_s"] * 1e3),
+        ]
+        for n, x in rep["latency"].items():
+            L.append(
+                f"  {n:42s} median {x.get('median_ms')} ms  p90 {x.get('p90_ms')} ms  "
+                f"over limit {x.get('over_limit_fraction')}  first slow second t="
+                f"{x.get('first_slow_second_t')}   [{x['kind']}]"
+            )
     for key in ("pose_tracking", "twist_tracking"):
         if key in rep:
             L += ["", f"{key}: {json.dumps(rep[key])}"]
@@ -173,9 +209,9 @@ def plot(rep: dict, png: str) -> bool:
     except ImportError:
         return False
     s = rep.get("_series")
-    if not s:
+    if not s or "odom_p" not in s:
         return False
-    fig, ax = plt.subplots(1, 3, figsize=(16, 5))
+    fig, ax = plt.subplots(1, 4, figsize=(21, 5))
     ax[0].plot(s["odom_p"][:, 0], s["odom_p"][:, 1], lw=1, label="VIO odometry")
     if "sp_p" in s:
         ax[0].plot(s["sp_p"][:, 0], s["sp_p"][:, 1], ".", ms=2, label="pose setpoints")
@@ -200,6 +236,12 @@ def plot(rep: dict, png: str) -> bool:
         ax[2].plot(s["twist"]["t"], s["twist"]["fly_h"], lw=1, label="flown")
         ax[2].legend()
     ax[2].set(title="horizontal speed", xlabel="s", ylabel="m/s")
+    for n, (lt, age) in s.get("latency", {}).items():
+        ax[3].plot(lt, np.asarray(age) * 1e3, lw=1, label=n)
+    ax[3].axhline(rep["thresholds"]["latency_s"] * 1e3, color="r", ls="--", lw=1)
+    if s.get("latency"):
+        ax[3].legend(fontsize=7)
+    ax[3].set(title="data age (red = PX4 fusion limit)", xlabel="s", ylabel="ms")
     fig.tight_layout()
     fig.savefig(png, dpi=110)
     return True
