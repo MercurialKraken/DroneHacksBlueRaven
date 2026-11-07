@@ -9,7 +9,7 @@
 
 ## State estimation
 
-- **The IMU only initializes once the drone moves.** Gravity stays "none yet" on the pad and appears after the first takeoff; tracking time then rises from about 1 to 5 ms. The first seconds of flight run without it. The noise values in [vio.yaml:11-14](onboard/config/vio.yaml#L11-L14) are 10× the sim's IMU model (gyro 2.5–3.4e-4, accel 1.9–2.5e-3). `imu_frequency: 500` is overridden to 480 by the sim deployment.
+- **(Sim only: the drone's cuVSLAM doesn't use the IMU.) The IMU only initializes once the drone moves.** Gravity stays "none yet" on the pad and appears after the first takeoff; tracking time then rises from about 1 to 5 ms. The first seconds of flight run without it. The noise values in [vio.yaml:11-14](onboard/config/vio.yaml#L11-L14) are 10× the sim's IMU model (gyro 2.5–3.4e-4, accel 1.9–2.5e-3). `imu_frequency: 500` is overridden to 480 by the sim deployment.
 - **[blocker] The dark tunnel blinds the cameras.** The OAK-D S2 has no IR, so it gets no features and no depth.
   - With `imu_only_policy: publish`, drifting IMU-only poses go to PX4.
   - With `withhold`, PX4 marks position invalid after 1 s without vision (`EKF2_NOAID_TOUT=1`) and descends.
@@ -54,8 +54,34 @@
 
 ## Hardware
 
-- **[blocker] No OAK driver launch.** The sim provides `/stereo/*`, `/stereo/imu` and `/camera/depth/*`; on the drone we have to remap the driver's topics to those names.
-- **[blocker] No static TF** from `base_link` to the `oak_*` frames for the real airframe.
-- **cuVSLAM is unverified on the Jetson.** It's ARM, ROS Humble on Python 3.10; the sim is x86, Jazzy on 3.12.
-- **Hard-coded `_v1` PX4 topic names** ([refnav/node.py:110-112](refnav/node.py#L110-L112)). They may differ on the drone's firmware.
-- **Unsupported images are dropped silently.** cuVSLAM ignores anything that isn't `mono8` without a word ([cuvslam_lib_node.py:202-203](onboard/slam/cuvslam_lib_node.py#L202-L203)), and it assumes rectified images.
+The organizers' `skybeta` stack (v0.3.2) already runs on the drone from boot, in Docker. It covers the OAK driver, NVIDIA's Isaac ROS cuVSLAM, the PX4 bridge, and `skybeta_flight_interface`. The guide is `~/skybeta/docs/competitor_guide.md` on the drone.
+
+- **The drone's camera-only tracking breaks when the scene moves.** Bench test on 2026-11-06:
+  - With people moving in view, or a laptop over the lens, it jumped 10–30 m while the drone sat still.
+  - Facing a still scene, it drifted about 1–2 cm per minute and tracked a hand move in the right direction.
+  - Risks on the course: people outside the net, the see-through netting, and the dark tunnel.
+- **[blocker] The sim and the drone run different estimators.** Sim and drift numbers don't carry over.
+
+  | | Sim | Drone |
+  |---|---|---|
+  | cuVSLAM | our `onboard/` wrapper | NVIDIA Isaac ROS |
+  | IMU | used | **not used** (pure stereo) |
+  | Camera | 640×400 at 15 Hz | 1024×640 at 30 Hz |
+  | IMU chip | BMI270 | BNO086 |
+
+- **[blocker] On the drone, flight code must use the skybeta interface.**
+  - Read position from `/visual_slam/tracking/odometry` (ENU, startup frame).
+  - Send targets on `/skybeta/setpoint/pose` or `/skybeta/setpoint/twist`.
+  - Watch `/skybeta/state`.
+  - Never publish `/fmu/in/*` there. refnav does, so it can't run on the drone as is.
+- **The start flow is fixed.**
+  1. The safety pilot arms in Altitude mode.
+  2. The pilot switches to Position.
+  3. The interface enters Offboard, and our code flies, including the takeoff.
+
+  Each arming gets one attempt.
+- **The flight interface can't land with position targets.** It clamps every pose to at least 0.3 m and has no land command. Velocity commands aren't clamped by height, so descend with a slow downward twist (about 0.2 m/s). PX4 should detect the touchdown and disarm itself after 2 s (`COM_DISARM_LAND=2`). Untested; it's checkpoint 5.
+- **The return bonus is probably impossible.** The interface never arms and only the pilot can, but the return requires taking off again with no team input. Don't plan for it.
+- **No depth images on the drone today.** Its camera config disables depth to save USB bandwidth. Live obstacles and drift correction there need depth computed on the Jetson from the two camera images.
+- **PX4's speed limit on the drone is 12 m/s** (1.5 in sim). A far-away pose target flies fast, so send short steps, or twists (capped at 1.5 m/s).
+- **Team code lives in `~/team_ws/src`** as a ROS 2 package, built inside the container. Point `COMPETITOR_PKG` in `/etc/skybeta/drone.env` at it.
