@@ -83,6 +83,8 @@ class FakePX4:
                 self.armed = True
             elif c == "land":
                 self.nav = C.NAV_AUTO_LAND
+            elif c == "disarm_force" and self.landed:
+                self.armed = False
         if self.armed and self.nav == C.NAV_OFFBOARD and out.setpoint is not None:
             n, e, d, yaw = out.setpoint
             step = np.array([n, e, d]) - self.pos
@@ -98,7 +100,7 @@ class FakePX4:
 
     def vehicle(self) -> C.Vehicle:
         return C.Vehicle(pos=tuple(self.pos), heading=self.yaw, pos_ok=True, q=q_yaw(self.yaw),
-                         armed=self.armed, nav_state=self.nav, landed=self.landed)
+                         armed=self.armed, nav_state=self.nav, landed=self.landed, range_m=max(0.0, -float(self.pos[2])))
 
 
 ROOM = [(0, 15.0, -15.0, 15.0), (0, -15.0, -15.0, 15.0), (1, 15.0, -15.0, 15.0), (1, -15.0, -15.0, 15.0)]
@@ -466,3 +468,39 @@ def test_too_little_depth_never_arms_and_says_how_much_there_was() -> None:
 def test_no_depth_at_all_is_said_as_such() -> None:
     m, px4, log = fly(C.Params(route=[], wait_s=5.0), depth_on=lambda t: False, seconds=10.0)
     assert m.result == "refused: waiting for live depth: no depth frame has arrived after 5 s", m.result
+
+
+class StuckPX4(FakePX4):
+    """PX4 whose land detector never agrees (its estimate ran away on the pad): it only disarms when forced."""
+
+    def apply(self, t: float, out: C.Output, dt: float) -> None:
+        armed = self.armed
+        super().apply(t, out, dt)
+        if armed and not self.armed and "disarm_force" not in out.commands:
+            self.armed = True
+
+
+def test_touchdown_on_the_rangefinder_disarms_when_px4_will_not() -> None:
+    import test_refnav_core as T
+    real = T.FakePX4
+    T.FakePX4 = StuckPX4
+    try:
+        m, px4, log = fly(C.Params(route=ROUTE))
+    finally:
+        T.FakePX4 = real
+    assert m.result == "complete", (m.result, m.why)
+    forced = [t for t, p, s, c, pos in log if "disarm_force" in c]
+    assert forced and all(-pos[2] < 0.05 for t, p, s, c, pos in log if "disarm_force" in c)
+
+
+def test_never_forces_a_disarm_in_the_air() -> None:
+    m = C.Mission(C.Params(route=ROUTE))
+    m.phase, m.t_phase, m.land_auto_seen = "land", 0.0, True
+    v = C.Vehicle(pos=(0.0, 0.0, -0.8), heading=0.0, pos_ok=True, q=q_yaw(0.0), armed=True,
+                  nav_state=C.NAV_AUTO_LAND, landed=False, range_m=0.8)
+    for k in range(200):
+        out = m.step(k * 0.05, v)
+        assert "disarm_force" not in out.commands
+    v.range_m = None                                    # no reading is not a touchdown either
+    for k in range(200, 400):
+        assert "disarm_force" not in m.step(k * 0.05, v).commands

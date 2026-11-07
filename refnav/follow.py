@@ -17,6 +17,8 @@ STEP_M = 0.02           # path sample spacing
 MIN_SPEED = 0.05        # the reference creeps at least this fast when allowed to move, so v=0 samples never stall it
 PROJECT_BACK_M = 0.25   # the aircraft is matched to the path only this far behind its last match...
 PROJECT_AHEAD_M = 0.25  # ...or ahead of the reference, so a U-turn never jumps to the parallel corridor
+TURN_WINDOW_M = 0.2    # speed in turns is set by the heading change over this much path
+KINK_RAD = math.radians(30)  # a sharp corner turning less than this is flown through, as a curve of the same turn
 LEAD_M, LEAD_MAX_M = 0.03, 0.10  # the reference leads the aircraft by this much: further ahead, PX4's position gain
                                  # pulls straight at it, cutting corners and adding speed the profile never planned
 
@@ -81,6 +83,20 @@ class Path:
         return np.round(np.stack([self.x[::every], self.y[::every]], 1), 3).tolist()
 
 
+def soften_kinks(s: np.ndarray, psi: np.ndarray, k: np.ndarray) -> tuple[np.ndarray, list[float]]:
+    """Sharp samples (k = inf) that turn less than KINK_RAD get the curvature of their turn over one sample,
+    so speed_profile slows for them instead of stopping. -> (k, s of the corners that stay sharp)."""
+    k, sharp = k.copy(), []
+    for i in np.flatnonzero(~np.isfinite(k)):
+        turn = float(wrap(psi[min(i + 1, len(psi) - 1)] - psi[max(i - 1, 0)]))
+        ds = max(float(s[min(i + 1, len(s) - 1)] - s[max(i - 1, 0)]), 2 * STEP_M)   # samples can bunch at a corner
+        if abs(turn) < KINK_RAD:
+            k[i] = turn / ds
+        else:
+            sharp.append(float(s[i]))
+    return k, sharp
+
+
 def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: float = 0.05) -> Path:
     """Straight legs joined by arcs of up to `radius`, each using at most half of either adjacent leg. A corner with
     no room for an arc of min_radius stays sharp."""
@@ -133,15 +149,22 @@ def fillet_path(corners: list[tuple[float, float]], radius: float, min_radius: f
     s = np.concatenate([[0.0], np.cumsum(np.concatenate(ds))])
     k = np.concatenate(ks)
     k[[min(i, len(k) - 1) for i in sharp_n]] = math.inf
-    return Path(s, np.concatenate(xs), np.concatenate(ys), wrap(np.concatenate(ps)), k, [float(s[i]) for i in sharp_n])
+    psi = wrap(np.concatenate(ps))
+    k, sharp = soften_kinks(s, psi, k)
+    return Path(s, np.concatenate(xs), np.concatenate(ys), psi, k, sharp)
 
 
 def speed_profile(path: Path, v_max: float, yaw_rate: float, a_lat: float, a_acc: float, a_brake: float) -> np.ndarray:
     """Fastest speed at each sample: turn rate and lateral acceleration on curves, zero at sharp corners and the ends,
     then limited by braking (backward pass) and speeding up (forward pass)."""
-    k = np.abs(path.k)
+    # the turn over the next few cm, not one sample's curvature: a 1 cm arc turning 12 deg is a gentle kink
+    psi_u = np.unwrap(path.psi)
+    lo, hi = np.searchsorted(path.s, path.s - TURN_WINDOW_M / 2), np.searchsorted(path.s, path.s + TURN_WINDOW_M / 2)
+    hi = np.minimum(hi, len(path.s) - 1)
+    k = np.abs(psi_u[hi] - psi_u[lo]) / np.maximum(path.s[hi] - path.s[lo], STEP_M)
     with np.errstate(divide="ignore"):
         v = np.minimum.reduce([np.full(len(k), v_max), yaw_rate / k, np.sqrt(a_lat / k)])
+    v[path.index(np.asarray(path.corners))] = 0.0 if path.corners else v[0]
     v[0] = v[-1] = 0.0
     ds = np.diff(path.s)
     for i in range(len(v) - 2, -1, -1):

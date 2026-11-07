@@ -41,6 +41,7 @@ from . import depth as D
 from . import follow as F
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Any
 
     Intrinsics = tuple[float, float, float, float]      # pinhole (fx, fy, cx, cy) in pixels
@@ -84,6 +85,12 @@ class Params:
     arm_wait_s: float = 30.0
     cmd_resend_s: float = 1.0
     land_timeout_s: float = 60.0
+    # PX4 disarms only if its land detector agrees, which needs a sane estimate; VIO can die on the pad (camera
+    # inches off a blank floor) and the estimate then runs away. Touchdown is judged from the rangefinder instead.
+    touchdown_m: float = 0.12                   # rangefinder at or under this, level, for touchdown_s: force the disarm
+    touchdown_s: float = 8.0                    # PX4 confirms and disarms itself well inside this when it can
+    touchdown_after_s: float = 2.0              # never sooner than this after the landing began
+    touchdown_tilt_deg: float = 15.0
     stall_s: float = 45.0                       # no progress along the path this long: land
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
     a_lat_mps2: float = 0.25                    # sideways acceleration in turns: PX4 lags tighter ones and cuts the corner
@@ -104,6 +111,7 @@ class Vehicle:
     heading: float | None = None      # rad
     pos_ok: bool = False              # xy_valid and z_valid and a heading (good for control, or PX4 yaw-aligned)
     vel: tuple[float, float] = (0.0, 0.0)  # NED m/s (vehicle_local_position vx, vy)
+    range_m: float | None = None      # downward rangefinder (distance_sensor), independent of the estimate
     eph: float = 0.0                  # PX4's horizontal position standard deviation, m
     q: QuatWXYZ | None = None            # attitude, FRD -> NED, (w, x, y, z)
     armed: bool | None = None
@@ -168,8 +176,9 @@ class Health:
 
 
 class Mission:
-    def __init__(self, params: Params) -> None:
+    def __init__(self, params: Params, path_builder: Callable[[list[tuple[float, float]]], F.Path] | None = None) -> None:
         self.p: Params = params
+        self.path_builder = path_builder or (lambda corners: F.fillet_path(corners, params.fillet_m))   # NED corners -> path
         self.health: Health = Health(params.health_quiet_s, params.health_stale_s)
         self.phase: str = "wait"
         self.why: str = ""
@@ -183,6 +192,7 @@ class Mission:
         self.offboard_seen: bool = False
         self.land_reason: str | None = None
         self.land_auto_seen: bool = False
+        self.t_touch: float | None = None           # since when the rangefinder has shown the aircraft on the ground
         self.result: str | None = None            # final: "complete" | "blocked" | "landed: <why>" | "refused: <why>" | "yielded: <why>"
         self.depth_ready_since: float | None = None # start of continuously usable depth before control requests
         self.depth_t: float | None = None           # capture stamp of the latest USABLE depth frame (depth alive)
@@ -423,6 +433,8 @@ class Mission:
                 self.land_auto_seen = True
             if not self.land_auto_seen and self._resend(now):
                 out.commands.append("land")
+            if self.land_auto_seen and v.armed and self._on_ground(now, v) and self._resend(now):
+                out.commands.append("disarm_force")         # on the ground for touchdown_s: PX4 may never agree
             if self.land_auto_seen and v.armed is False:
                 why = self.land_reason or ""
                 self._end(now, out, "complete" if why == "route complete" else f"landed: {why}")
@@ -440,7 +452,7 @@ class Mission:
         if not self.targets:
             self._land(now, out, "route complete")
             return
-        path = F.fillet_path([(self.sp[0], self.sp[1])] + self.targets, p.fillet_m)
+        path = self.path_builder([(self.sp[0], self.sp[1])] + self.targets)
         prof = F.speed_profile(path, p.speed_mps, math.radians(p.yaw_rate_dps), p.a_lat_mps2, p.accel_mps2, p.accel_mps2)
         lim = F.Limits(accel=p.accel_mps2, look_min=p.look_min_m, look_s=p.look_s, look_max=p.look_max_m,
                        face_tol=math.radians(p.face_tol_deg), yaw_slow=math.radians(p.yaw_slow_deg),
@@ -502,6 +514,13 @@ class Mission:
             self._land(now, out, f"no progress along the path for {p.stall_s:.0f} s at {fol.s_hat:.1f} m")
         elif self.cmd.done:
             self._land(now, out, "route complete")
+
+    def _on_ground(self, now: float, v: Vehicle) -> bool:
+        p = self.p
+        level = v.q is not None and 1.0 - 2.0 * (v.q[1] ** 2 + v.q[2] ** 2) >= math.cos(math.radians(p.touchdown_tilt_deg))
+        low = v.range_m is not None and v.range_m <= p.touchdown_m and now - self.t_phase >= p.touchdown_after_s
+        self.t_touch = (self.t_touch if self.t_touch is not None else now) if (low and level) else None
+        return self.t_touch is not None and now - self.t_touch >= p.touchdown_s
 
     def _slew_yaw(self, target: float, dt: float) -> None:
         step = math.radians(self.p.yaw_rate_dps) * dt

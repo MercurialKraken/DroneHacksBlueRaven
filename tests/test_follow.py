@@ -31,7 +31,9 @@ def test_no_room_for_an_arc_is_a_sharp_corner_with_zero_speed() -> None:
 def test_speed_respects_turn_rate_and_braking() -> None:
     p = F.fillet_path(U_TURN, 0.5)
     v = F.speed_profile(p, 0.6, math.radians(45), 0.5, 0.5, 0.3)
-    assert (v * np.abs(np.where(np.isfinite(p.k), p.k, 0)) <= math.radians(45) + 1e-9).all()
+    arc = np.abs(p.k) > 0                                          # arc samples, 0.5 m radius
+    mid = arc & np.roll(arc, 6) & np.roll(arc, -6)                 # away from the ends, where speed blends in
+    assert (v[mid] <= math.radians(45) * 0.5 + 1e-6).all()
     dv2 = np.diff(v ** 2) / F.STEP_M
     assert dv2.min() >= -2 * 0.3 - 1e-9 and dv2.max() <= 2 * 0.5 + 1e-9
 
@@ -144,3 +146,12 @@ def test_a_drift_correction_moves_the_flown_track_not_the_path() -> None:
     m, px4, log = fly(C.Params(route=ROUTE), on_tick=lambda t, m: m.on_correction(t, 0.0, 0.3, 0.0))
     assert m.result == "complete", (m.result, m.why)
     assert px4.pos[1] == pytest.approx(-3.0 - 0.3, abs=0.15)
+
+
+def test_a_small_kink_is_flown_through_slowly_not_stopped_at() -> None:
+    p = F.fillet_path([(0, 0), (1, 0), (2, 0.07)], 0.0)            # a 4 deg kink with no room for an arc
+    assert p.corners == []
+    v = F.speed_profile(p, 0.5, math.radians(45), 0.5, 0.5, 0.5)
+    assert v[p.index(1.0)] > 0.1
+    q = F.fillet_path([(0, 0), (1, 0), (1, 1)], 0.0)               # a 90 deg corner still stops and turns
+    assert q.corners == [pytest.approx(1.0)]

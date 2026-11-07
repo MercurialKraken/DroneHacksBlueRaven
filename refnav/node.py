@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -68,6 +69,28 @@ def load_route(node: Node) -> tuple[list[tuple[float, float]], dict[str, Any]]:
 
 
 class RefNav(Node):
+    def _map_builder(self, prm: C.Params):
+        """With the course map: the route nudged into clear space and smoothed against it. Without: plain arcs."""
+        root = Path(__file__).resolve().parents[1]
+        path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
+        course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value
+        key = self.declare_parameter("launch_key", "launch_sim").value      # the real course: launch
+        margin = float(self.declare_parameter("map_margin_m", 0.15).value)
+        shift = float(self.declare_parameter("map_max_shift_m", 0.3).value)
+        if not path:
+            return None
+        from nav.course_map import CourseMap
+        from nav.frames import load_launch
+
+        from . import map_route
+        try:
+            cm, launch = CourseMap.load(path), load_launch(course, key)
+        except (OSError, KeyError, ValueError) as e:
+            self.get_logger().warn(f"no course map ({e}): the route is flown as plain arcs")
+            return None
+        self.get_logger().info(f"course map {path}, launch {key}: route corners kept {0.28 + margin:.2f} m clear")
+        return map_route.builder(cm, launch, prm.height_m + launch["z"], 0.28, margin, 1.0, shift)
+
     def __init__(self) -> None:
         super().__init__("refnav")
         route, doc = load_route(self)
@@ -81,7 +104,7 @@ class RefNav(Node):
             default = doc.get("params", {}).get(k, v)
             val = self.declare_parameter(k, default).value
             setattr(prm, k, type(v)(val))
-        self.mission: C.Mission = C.Mission(prm)
+        self.mission: C.Mission = C.Mission(prm, self._map_builder(prm))
         self.depth_topic: str = self.declare_parameter("depth_topic", "/camera/depth/image_raw").value
         info = self.declare_parameter("depth_info_topic", "").value
         self.info_topic: str = info or self.depth_topic.rsplit("/", 1)[0] + "/camera_info"
@@ -100,8 +123,9 @@ class RefNav(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        from px4_msgs.msg import (EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint, VehicleAttitude,
-                                  VehicleCommand, VehicleLandDetected, VehicleLocalPosition, VehicleStatus)
+        from px4_msgs.msg import (DistanceSensor, EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint,
+                                  VehicleAttitude, VehicleCommand, VehicleLandDetected, VehicleLocalPosition,
+                                  VehicleStatus)
         self._OCM, self._TSP, self._CMD = OffboardControlMode, TrajectorySetpoint, VehicleCommand
         self.pub_ocm = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", PX4_QOS)
         self.pub_sp = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", PX4_QOS)
@@ -114,6 +138,7 @@ class RefNav(Node):
         self.create_subscription(VehicleAttitude, "/fmu/out/vehicle_attitude", self._on_att, PX4_QOS)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self._on_status, PX4_QOS)
         self.create_subscription(VehicleLandDetected, "/fmu/out/vehicle_land_detected", self._on_land, PX4_QOS)
+        self.create_subscription(DistanceSensor, "/fmu/out/distance_sensor", self._on_range, PX4_QOS)
         self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
         self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
         self.create_subscription(Bool, self.health_topic, self._on_health, 10)
@@ -170,6 +195,10 @@ class RefNav(Node):
 
     def _on_land(self, m: VehicleLandDetected) -> None:
         self.v.landed = bool(m.landed)
+
+    def _on_range(self, m) -> None:
+        # signal_quality 0 is a reported failure; -1 (unknown) is what the sim reports, including 0.0 on the floor
+        self.v.range_m = float(m.current_distance) if m.signal_quality != 0 else None
 
     def _on_health(self, m: Bool) -> None:
         self.mission.on_health(self._now(), m.data)
@@ -291,6 +320,8 @@ class RefNav(Node):
                 self._command(CMD_LAND)
             elif c == "disarm":
                 self._command(CMD_ARM, 0.0)                 # param2 0: PX4 refuses it in the air
+            elif c == "disarm_force":
+                self._command(CMD_ARM, 0.0, 21196.0)        # only ever sent once the rangefinder shows touchdown
         if out.phase == "done" and self.done_at is None:
             self.done_at = now
             self.get_logger().info(f"mission done: {self.mission.result}")
