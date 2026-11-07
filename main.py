@@ -12,6 +12,7 @@ Read onboard/README.md for perception bringup and native ROS examples.
 """
 HEIGHT_M = 0.8      # metres above the take-off point
 HOVER_S = 2.0       # seconds to hold at that height before landing
+MAP_ALIGN = True    # run nav/map_align_node beside the flight: corrects drift by aligning depth to the course map
 
 from importlib.util import find_spec  # noqa: E402
 from pathlib import Path              # noqa: E402
@@ -25,9 +26,23 @@ if (flight_package is None or flight_package.origin is None
 
 if __name__ == "__main__":
     import sys
+    import signal
+    import subprocess
     from refnav import node  # the editable package in this run's snapshot
-    from refnav.launch import arguments
+    from refnav.launch import arguments, params_files
     print(f"Flight source: {Path(node.__file__).parent} (this run's project)", flush=True)
-    # Standard ROS parameter files. This project runs without runtime.program,
-    # FLYX_PROFILE or a cloud CLI on a normally configured physical companion.
-    node.main(arguments(PROJECT, height_m=HEIGHT_M, hover_s=HOVER_S, ros_args=sys.argv[1:]))
+    helper = None
+    if MAP_ALIGN:   # one start command starts both; the flight never waits on it (no correction = PX4's estimate)
+        helper = subprocess.Popen([sys.executable, "-m", "nav.map_align_node", "--ros-args", *params_files(PROJECT)],
+                                  cwd=PROJECT)
+    try:
+        # Standard ROS parameter files. This project runs without runtime.program,
+        # FLYX_PROFILE or a cloud CLI on a normally configured physical companion.
+        node.main(arguments(PROJECT, height_m=HEIGHT_M, hover_s=HOVER_S, ros_args=sys.argv[1:]))
+    finally:
+        if helper is not None and helper.poll() is None:
+            helper.send_signal(signal.SIGINT)
+            try:
+                helper.wait(10)
+            except subprocess.TimeoutExpired:
+                helper.kill()
