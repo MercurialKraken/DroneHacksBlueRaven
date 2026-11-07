@@ -17,6 +17,18 @@ from typing import Any
 
 import numpy as np
 
+# The real-drone frames interface between the skybeta adapter (blueraven_skybeta) and map_align
+# (pose_source:=odometry), agreed on the team bus on 2026-11-07. Both nodes import these names.
+# Message: geometry_msgs/PoseStamped, header.frame_id MAP_FRAME, position = the odom origin in the
+# map (the translation of map <- odom), orientation = map <- odom's yaw, counter-clockwise about +z
+# (pose_msg_fields / transform_from_pose_fields convert).
+MAP_FRAME = "map"
+MAP_FROM_ODOM_INIT_TOPIC = "/blueraven/map_from_odom_init"   # adapter -> map_align: once, at INIT;
+                                                             # reliable + transient local, depth 1
+MAP_FROM_ODOM_TOPIC = "/blueraven/map_from_odom"             # map_align -> adapter: the full corrected
+                                                             # map <- odom, ~5 Hz, only while valid
+MAP_FROM_ODOM_STALE_S = 1.0     # older than this: the adapter keeps the last one (never reverts to INIT)
+
 
 def load_launch(config: str | Path, key: str = "launch") -> dict[str, float]:
     """{x, y, yaw_deg, z} of a launch entry in course.yaml: 'launch' (the published mark, real
@@ -57,6 +69,18 @@ def map_from_startup_odom(launch: dict[str, float], odom_now: tuple[float, float
     ignored), so a slightly tilted pad doesn't tilt the map."""
     T_map_launch = pose_xyz_yaw(launch["x"], launch["y"], launch["z"], math.radians(launch["yaw_deg"]))
     return T_map_launch @ np.linalg.inv(pose_xyz_yaw(*odom_now))
+
+
+def pose_msg_fields(T: np.ndarray) -> tuple[float, float, float, float, float, float, float]:
+    """(px, py, pz, qx, qy, qz, qw) of a heading-only transform, as the MAP_FROM_ODOM topics carry it."""
+    yaw = math.atan2(T[1, 0], T[0, 0])
+    return (float(T[0, 3]), float(T[1, 3]), float(T[2, 3])) + quaternion_z(yaw)
+
+
+def transform_from_pose_fields(px: float, py: float, pz: float,
+                               qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    """Inverse of pose_msg_fields: the 4x4 map <- odom (yaw only) from a MAP_FROM_ODOM message."""
+    return pose_xyz_yaw(px, py, pz, yaw_from_quaternion(qx, qy, qz, qw))
 
 
 def correction_in_odom(x_north: float, y_east: float, yaw_cw: float) -> np.ndarray:

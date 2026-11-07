@@ -25,6 +25,10 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
 
 Frames: odom is the stack's ENU startup frame. The route and the course map are in `map` (the
 course frame, maps/course.yaml). map <- odom is yaw + translation (nav.frames.map_from_startup_odom).
+Drift: INIT's map <- odom is handed to map_align once (Command.map_from_odom_init, published latched
+on nav.frames.MAP_FROM_ODOM_INIT_TOPIC); map_align starts from it and publishes the corrected
+map <- odom (MAP_FROM_ODOM_TOPIC), which on_map_from_odom takes in place of INIT's. When those stop,
+the last one stays in use: drift since then is uncorrected, but nothing jumps back.
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def _repo_root() -> Path:
 
 if str(_repo_root()) not in sys.path:
     sys.path.insert(0, str(_repo_root()))
-from nav.frames import map_from_startup_odom  # noqa: E402
+from nav.frames import MAP_FROM_ODOM_STALE_S, map_from_startup_odom, pose_xyz_yaw  # noqa: E402
 from nav.path_geometry import build_path  # noqa: E402
 
 
@@ -77,6 +81,7 @@ class MissionParams:
     settle_s: float = 2.0               # the drone must sit still this long before map <- odom is fixed
     settle_tol_m: float = 0.02
     settle_tol_deg: float = 1.0
+    corr_stale_s: float = MAP_FROM_ODOM_STALE_S   # map_align's map <- odom older than this is reported stale
     drone_radius: float = 0.28
     margin: float = 0.10
     max_radius_m: float = 1.0           # largest corner arc; 0 makes every corner a stop-and-turn
@@ -90,6 +95,7 @@ class Command:
     pose_yaw: float | None = None                            # odom ENU yaw; None = hold heading
     twist: tuple[float, float, float, float] | None = None   # odom ENU (vx, vy, vz, yaw_rate)
     call_hold: bool = False                                  # call /skybeta/hold (once, on abort)
+    map_from_odom_init: np.ndarray | None = None             # publish once, latched (the tick INIT ends)
     why: str = ""
     events: list[str] = field(default_factory=list)
 
@@ -116,7 +122,11 @@ class SkybetaMission:
         self.settle: list[tuple[float, tuple[float, float, float, float]]] = []
         self.T_map_odom: np.ndarray | None = None
         self.T_odom_map: np.ndarray | None = None
+        self.T_init: np.ndarray | None = None
         self.yaw_off = 0.0                  # map yaw = odom yaw + yaw_off
+        self.t_corr = -math.inf             # last map_align correction taken
+        self.n_corr = 0
+        self.corr_step_max_m = 0.0          # largest move of the drone's map position by one correction
         self.takeoff: tuple[float, float, float, float] | None = None   # (x, y, z_target, z_ref) odom
         self.s_ref = 0.0
         self.s_proj = 0.0
@@ -136,7 +146,47 @@ class SkybetaMission:
             while self.settle and t - self.settle[0][0] > 2.0 * self.p.settle_s:
                 self.settle.pop(0)
 
+    def on_map_from_odom(self, t: float, T: Any) -> str | None:
+        """map_align's corrected map <- odom (MAP_FROM_ODOM_TOPIC), used from the next tick on.
+        Takes x, y and yaw; z stays INIT's (map_align corrects only those three, and this way a bad z
+        can't move the flight height). Ignored until INIT has fixed its own, which map_align starts
+        from. map_align gates its own updates; the largest step is reported. Returns why a message
+        was ignored, or None if it was taken."""
+        if self.T_map_odom is None:
+            return "before INIT fixed map <- odom"
+        T = np.asarray(T, dtype=float)
+        if T.shape != (4, 4) or not np.all(np.isfinite(T)):
+            return "not a finite 4x4 transform"
+        T_new = pose_xyz_yaw(T[0, 3], T[1, 3], self.T_map_odom[2, 3], math.atan2(T[1, 0], T[0, 0]))
+        if self.odom is not None:
+            p = np.array([*self.odom[:3], 1.0])
+            step = float(np.linalg.norm((T_new @ p - self.T_map_odom @ p)[:2]))
+            self.corr_step_max_m = max(self.corr_step_max_m, step)
+        self._set_T(T_new)
+        self.t_corr, self.n_corr = float(t), self.n_corr + 1
+        return None
+
+    def status(self, t: float) -> dict[str, Any]:
+        """For /blueraven/mission/status: phase, progress, and which map <- odom is in use."""
+        src = None
+        if self.T_map_odom is not None:
+            src = "init" if self.n_corr == 0 else ("live" if t - self.t_corr <= self.p.corr_stale_s else "stale")
+        moved = None
+        if self.T_init is not None and self.odom is not None:
+            p = np.array([*self.odom[:3], 1.0])
+            moved = round(float(np.linalg.norm((self.T_map_odom @ p - self.T_init @ p)[:2])), 3)
+        return {"phase": self.phase, "why": self.why, "s_ref": round(self.s_ref, 2),
+                "length": round(float(self.path.length), 2), "map_from_odom": src,
+                "corr_age_s": None if self.n_corr == 0 else round(t - self.t_corr, 2),
+                "corr_n": self.n_corr, "corr_step_max_m": round(self.corr_step_max_m, 3),
+                "corr_from_init_m": moved}
+
     # --------------------------------------------------------------- helpers
+    def _set_T(self, T: np.ndarray) -> None:
+        self.T_map_odom = T
+        self.T_odom_map = np.linalg.inv(T)
+        self.yaw_off = math.atan2(T[1, 0], T[0, 0])
+
     def _fresh(self, t: float) -> tuple[bool, str]:
         if self.state is None or t - self.t_state > self.p.state_stale_s:
             return False, "/skybeta/state stale"
@@ -191,9 +241,9 @@ class SkybetaMission:
             elif not self._settled(t):
                 self.why = f"waiting for the drone to sit still for {p.settle_s:.0f} s on the launch mark"
             else:
-                self.T_map_odom = map_from_startup_odom(self.launch, self.odom)
-                self.T_odom_map = np.linalg.inv(self.T_map_odom)
-                self.yaw_off = math.atan2(self.T_map_odom[1, 0], self.T_map_odom[0, 0])
+                self._set_T(map_from_startup_odom(self.launch, self.odom))
+                self.T_init = self.T_map_odom.copy()
+                out.map_from_odom_init = self.T_init.copy()
                 self._set("WAIT_OFFBOARD", "map <- odom fixed; streaming a hold at the current position", out)
             out.phase, out.why = self.phase, self.why
             if self.phase == "INIT":

@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skybeta" / "blueraven_skybeta"))
 from blueraven_skybeta.mission_core import MissionParams, SkybetaMission  # noqa: E402
+from nav.frames import pose_xyz_yaw  # noqa: E402  (mission_core put the repo on sys.path)
 
 DT = 0.05                                    # the node's 20 Hz tick
 LAUNCH = {"x": 1.0, "y": 2.0, "yaw_deg": 90.0, "z": 0.07}   # mark at (1, 2), facing course north
@@ -208,6 +209,77 @@ def test_sharp_corners_stop_and_turn_in_place_then_carry_on():
     assert near, "never stopped to turn at the sharp corner"
     end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
     assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15
+
+
+# ---------------------------------------------------------------- map_align's map <- odom (drift)
+def drift(t: float, t0: float) -> np.ndarray:
+    """odom's drift from the truth since t0: 3 cm/s sideways creep and 0.6 deg/s of yaw, about the
+    odom origin. truth map pose = T_init . D(t) . odom pose. Twists act in odom, as PX4's do (its
+    estimator runs on the same drifting VIO)."""
+    a = max(0.0, t - t0)
+    return pose_xyz_yaw(0.0, -0.03 * a, 0.0, math.radians(0.6 * a))
+
+
+def fly_with_drift(correct: bool, stop_corrections_at: float | None = None):
+    m, sim = mission(), Sim()
+    t = to_ready(m, sim)
+    T_init = m.T_map_odom.copy()
+    t0 = t
+    switch_to_offboard(t, sim)
+
+    truth = {}
+
+    def hook(tt, s):
+        if correct and round(tt / DT) % 4 == 0 and (stop_corrections_at is None or tt - t0 < stop_corrections_at):
+            assert m.on_map_from_odom(tt, T_init @ drift(tt, t0)) is None    # map_align at 5 Hz
+        if not s.landed:                    # the model's drift moves a flying drone; measure at touchdown
+            truth["xy"] = (T_init @ drift(tt, t0) @ [s.x, s.y, s.z, 1])[:2]
+    t, _ = run(m, sim, t, t + 60.0, hook=hook)
+    return m, float(np.hypot(*(truth["xy"] - np.array(ROUTE[-1])))), t
+
+
+def test_init_hands_map_from_odom_to_map_align_exactly_once():
+    m, sim = mission(), Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
+    _, cmds = run(m, sim, 0.0, 4.0)
+    sent = [c.map_from_odom_init for _, c in cmds if c.map_from_odom_init is not None]
+    assert len(sent) == 1 and np.allclose(sent[0], m.T_map_odom)
+    assert np.allclose(sent[0] @ [0.8, -1.1, 0.0, 1], [LAUNCH["x"], LAUNCH["y"], LAUNCH["z"], 1])
+
+
+def test_corrections_before_init_are_ignored():
+    m, sim = mission(), Sim()
+    run(m, sim, 0.0, 0.5)
+    assert m.on_map_from_odom(0.5, np.eye(4)) is not None and m.T_map_odom is None
+
+
+def test_drift_corrections_keep_the_flight_on_the_course():
+    m, err_corrected, t = fly_with_drift(correct=True)
+    assert m.phase == "DONE", m.why
+    assert err_corrected < 0.15
+    _, err_raw, _ = fly_with_drift(correct=False)
+    assert err_raw > 0.3, "the drift model is too weak to show anything"
+    st = m.status(t)
+    assert st["map_from_odom"] == "live" and st["corr_n"] > 20 and st["corr_step_max_m"] < 0.05
+
+
+def test_stale_corrections_keep_the_last_transform_not_init():
+    m, _, t = fly_with_drift(correct=True, stop_corrections_at=6.0)
+    T_last = m.T_map_odom.copy()
+    assert not np.allclose(T_last, m.T_init)                    # still the last correction, not INIT's
+    st = m.status(t)
+    assert st["map_from_odom"] == "stale" and st["corr_age_s"] > 1.0 and st["corr_from_init_m"] > 0.05
+
+
+def test_corrections_never_change_the_flight_height():
+    m, sim = mission(), Sim()
+    to_ready(m, sim)
+    z0 = m.T_map_odom[2, 3]
+    T = m.T_map_odom.copy()
+    T[2, 3] += 0.5                                              # a bad z from map_align
+    T[0, 3] += 0.1
+    assert m.on_map_from_odom(3.0, T) is None
+    assert m.T_map_odom[2, 3] == pytest.approx(z0) and m.T_map_odom[0, 3] == pytest.approx(T[0, 3])
+    assert m.on_map_from_odom(3.1, np.full((4, 4), np.nan)) is not None
 
 
 def test_the_package_never_publishes_to_px4_directly():

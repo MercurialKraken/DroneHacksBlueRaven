@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ROS 2 (Humble) wrapper of mission_core for the organizers' skybeta stack. Publishes only
-/skybeta/setpoint/pose, /skybeta/setpoint/twist and its own status; calls /skybeta/hold on abort.
+/skybeta/setpoint/pose, /skybeta/setpoint/twist, its own status and (once, latched) the INIT
+map <- odom for map_align; calls /skybeta/hold on abort. Reads map_align's corrected map <- odom.
 
     ros2 launch blueraven_skybeta blueraven.launch.py launch_key:=launch height_m:=0.7 cruise_mps:=0.3
 
@@ -19,6 +20,7 @@ import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -28,7 +30,11 @@ ROOT = _repo_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from nav.course_map import CourseMap  # noqa: E402
-from nav.frames import load_launch, quaternion_z, yaw_from_quaternion  # noqa: E402
+from nav.frames import (MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC, load_launch,  # noqa: E402
+                        pose_msg_fields, quaternion_z, transform_from_pose_fields, yaw_from_quaternion)
+
+LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+ANY_PUBLISHER = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)   # matches reliable or not
 
 
 class SkybetaMissionNode(Node):
@@ -54,16 +60,21 @@ class SkybetaMissionNode(Node):
             self.get_logger().error(f"route refused, nothing will be published: {problems}")
             self.mission = None
         else:
-            self.mission = SkybetaMission(params, launch, plan.map_xy, course)
-            self.get_logger().info(f"route {len(plan.map_xy)} corners, {self.mission.path.length:.2f} m "
-                                   f"(digest {getattr(plan, 'digest', '?')}); launch {launch_key} {launch}")
+            corners = [tuple(plan.launch_xy)] + [tuple(p) for p in plan.map_xy]   # map_xy starts AFTER launch
+            self.mission = SkybetaMission(params, launch, corners, course)
+            self.get_logger().info(f"route planned ({launch_key}): {plan.summary()}; path "
+                                   f"{self.mission.path.length:.2f} m from launch {launch}")
+            for w in getattr(plan, "warnings", []) or []:
+                self.get_logger().warning(f"planner: {w}")
 
         self.pub_pose = self.create_publisher(PoseStamped, "/skybeta/setpoint/pose", 10)
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.pub_status = self.create_publisher(String, dp("status_topic", "/blueraven/mission/status").value, 10)
+        self.pub_init = self.create_publisher(PoseStamped, MAP_FROM_ODOM_INIT_TOPIC, LATCHED)
         self.hold = self.create_client(Trigger, "/skybeta/hold")
         self.create_subscription(Odometry, "/visual_slam/tracking/odometry", self._on_odom, 10)
         self.create_subscription(String, "/skybeta/state", self._on_state, 10)
+        self.create_subscription(PoseStamped, MAP_FROM_ODOM_TOPIC, self._on_map_from_odom, ANY_PUBLISHER)
         self.create_timer(1.0 / rate, self._tick)
         self.create_timer(0.5, self._status)
         self.last = None
@@ -85,6 +96,18 @@ class SkybetaMissionNode(Node):
         except ValueError:
             self.get_logger().warning("unparseable /skybeta/state ignored", throttle_duration_sec=5.0)
 
+    def _on_map_from_odom(self, m: PoseStamped) -> None:
+        if self.mission is None:
+            return
+        if m.header.frame_id != MAP_FRAME:
+            self.get_logger().warning(f"{MAP_FROM_ODOM_TOPIC} in frame {m.header.frame_id!r}, not "
+                                      f"{MAP_FRAME!r}: ignored", throttle_duration_sec=5.0)
+            return
+        p, q = m.pose.position, m.pose.orientation
+        why = self.mission.on_map_from_odom(self._now(), transform_from_pose_fields(p.x, p.y, p.z, q.x, q.y, q.z, q.w))
+        if why is not None:
+            self.get_logger().info(f"{MAP_FROM_ODOM_TOPIC} ignored: {why}", throttle_duration_sec=5.0)
+
     def _tick(self) -> None:
         if self.mission is None:
             return
@@ -93,6 +116,14 @@ class SkybetaMissionNode(Node):
         for e in cmd.events:
             self.get_logger().info(e)
         stamp = self.get_clock().now().to_msg()
+        if cmd.map_from_odom_init is not None:                          # once; latched for map_align
+            msg = PoseStamped()
+            msg.header.stamp, msg.header.frame_id = stamp, MAP_FRAME
+            (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z, msg.pose.orientation.x,
+             msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w) = pose_msg_fields(
+                cmd.map_from_odom_init)
+            self.pub_init.publish(msg)
+            self.get_logger().info(f"published {MAP_FROM_ODOM_INIT_TOPIC}: {pose_msg_fields(cmd.map_from_odom_init)}")
         if cmd.pose is not None:
             msg = PoseStamped()
             msg.header.stamp, msg.header.frame_id = stamp, "odom"
@@ -118,9 +149,7 @@ class SkybetaMissionNode(Node):
 
     def _status(self) -> None:
         m = self.mission
-        st = {"phase": None if m is None else m.phase, "why": "route refused" if m is None else m.why,
-              "s_ref": None if m is None else round(m.s_ref, 2),
-              "length": None if m is None else round(m.path.length, 2)}
+        st = {"phase": None, "why": "route refused"} if m is None else m.status(self._now())
         self.pub_status.publish(String(data=json.dumps(st)))
 
 

@@ -10,8 +10,9 @@ import pytest
 
 pytest.importorskip("yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nav.frames import (correction_in_odom, load_launch, map_from_odom, map_from_startup_odom,  # noqa: E402
-                        pose_xyz_yaw, quaternion_z, yaw_from_quaternion)
+from nav.frames import (MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC, correction_in_odom,  # noqa: E402
+                        load_launch, map_from_odom, map_from_startup_odom, pose_msg_fields, pose_xyz_yaw,
+                        quaternion_z, transform_from_pose_fields, yaw_from_quaternion)
 
 
 @pytest.fixture
@@ -81,6 +82,21 @@ def test_startup_odom_started_elsewhere_still_puts_the_drone_on_the_mark():
     later = pose_xyz_yaw(*now) @ pose_xyz_yaw(0.5, 0.0, 0.7, 0.0)          # flown 0.5 m forward, 0.7 m up
     assert np.allclose((T @ later)[:3, 3], [-2.5, 1.4, 0.77])
     assert np.allclose(np.linalg.inv(T) @ T, np.eye(4))                    # round trip
+
+
+def test_map_from_odom_message_layout_round_trips_and_pins_the_yaw_sign():
+    """The drone-frames interface (adapter <-> map_align): position = the odom origin in the map,
+    orientation = yaw counter-clockwise about +z. Both nodes go through these two functions."""
+    assert MAP_FROM_ODOM_INIT_TOPIC == "/blueraven/map_from_odom_init"
+    assert MAP_FROM_ODOM_TOPIC == "/blueraven/map_from_odom"
+    T = map_from_startup_odom(LAUNCH_N, (1.2, -0.4, 0.03, math.radians(30.0)))
+    f = pose_msg_fields(T)
+    assert np.allclose(f[:3], (T @ [0, 0, 0, 1])[:3])                       # the odom origin, in map
+    assert np.allclose(transform_from_pose_fields(*f), T)                     # round trip
+    # yaw sign: a frame rotated +90 deg (CCW) maps odom +x onto map +y
+    g = pose_msg_fields(pose_xyz_yaw(0.0, 0.0, 0.0, math.radians(90.0)))
+    assert np.allclose(transform_from_pose_fields(*g) @ [1, 0, 0, 1], [0, 1, 0, 1])
+    assert g[5] > 0 and g[6] > 0                                              # qz, qw: +90 deg about +z
 
 
 def test_yaw_from_quaternion():
