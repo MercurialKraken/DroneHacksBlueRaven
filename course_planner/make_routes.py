@@ -94,6 +94,12 @@ def _dump(path, route, params):
 
 
 def build(map_path=HERE / "course_map.json"):
+    # geometry.py's chamfer fallback is about 2 % off, enough to move almost every waypoint and change route_v1
+    # from 29 legs to 28. Route files must not depend on what happens to be installed.
+    try:
+        import scipy.ndimage  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError("generating routes needs scipy: without it they differ from routes/ (pip install scipy)") from e
     m = load_map(map_path)
     pl = plan(m, "gate_b", with_return=False)
     v1 = [tuple(map(float, q)) for q in to_refnav_route(pl, m["launch_mark_xy"], math.pi / 2)]
