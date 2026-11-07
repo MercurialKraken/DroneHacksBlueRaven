@@ -13,6 +13,10 @@ and nothing is commanded. Two live layers run side by side on every depth frame:
 
     python3 tools/sim_eval/replay_live_map.py ~/bags/<run> --out runs/live_<run>
 
+  corrected the estimate with nav.map_align_node's drift correction (/blueraven/odom_correction,
+            the latest one at or before each frame) applied between odom and the camera, exactly as
+            nav/live_map_node.py does. Only when the bag carries that topic.
+
 Outputs in --out: frames.csv (one row per depth frame: both modes' counts, misfit, gate decision,
 camera position error estimate - truth), obstacles_truth.npz and obstacles_estimate.npz (obstacle
 voxel centres), summary.txt, and top-down PNGs when matplotlib is available.
@@ -31,12 +35,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from nav.course_map import CourseMap  # noqa: E402
-from nav.frames import load_launch, map_from_odom  # noqa: E402
+from nav.frames import correction_in_odom, load_launch, map_from_odom, yaw_from_quaternion  # noqa: E402
 from nav.live_map import LiveObstacleLayer, LiveParams, PoseGate  # noqa: E402
 from refnav.depth import decode_depth, quat_to_mat  # noqa: E402
 
 DEPTH, INFO = "/camera/depth/image_raw", "/camera/depth/camera_info"
 TRUTH, HEALTH = "/sim/truth/odometry", "/estimator/healthy"
+CORRECTION = "/blueraven/odom_correction"
 
 
 def stamp_s(header) -> float:
@@ -85,6 +90,8 @@ def main() -> int:
     params = LiveParams(depth_scale=args.depth_scale)
     live = {"truth": LiveObstacleLayer(course, params=params), "estimate": LiveObstacleLayer(course, params=params)}
     gate = PoseGate()
+    gate_cor = PoseGate()
+    C = None                                                  # latest drift correction, in odom
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -132,7 +139,15 @@ def main() -> int:
             truth_t.append(stamp_s(m.header))
             truth_T.append(T)
         elif topic == HEALTH:
-            gate.on_health(t_bag, bool(deserialize_message(data, cls[topic]).data))
+            ok_h = bool(deserialize_message(data, cls[topic]).data)
+            gate.on_health(t_bag, ok_h)
+            gate_cor.on_health(t_bag, ok_h)
+        elif topic == CORRECTION:
+            m = deserialize_message(data, cls[topic])
+            o = m.pose.orientation
+            C = correction_in_odom(m.pose.position.x, m.pose.position.y, yaw_from_quaternion(o.x, o.y, o.z, o.w))
+            if "corrected" not in live:
+                live["corrected"] = LiveObstacleLayer(course, params=params)
         elif topic == INFO:
             m = deserialize_message(data, cls[topic])
             if m.k[0] > 0:
@@ -179,6 +194,16 @@ def main() -> int:
                            est_rejected=st.rejected, est_obstacles=st.obstacles, est_trusted=live["estimate"].trusted)
             else:
                 skips["gated"] = skips.get("gated", 0) + 1
+            if C is not None:                                 # estimate + drift correction, as the node does
+                T_cor = T_mo @ C @ np.linalg.inv(T_mo) @ T_est
+                ok_c, why_c = gate_cor.check(t_bag, T_cor[:3, 3])
+                row["cor_gate"] = why_c
+                if T_true is not None:
+                    row["cor_err_m"] = round(float(np.linalg.norm(T_cor[:3, 3] - T_true[:3, 3])), 3)
+                if ok_c:
+                    st = live["corrected"].integrate(depth, K, T_cor)
+                    row.update(cor_explained=st.explained, cor_unexplained=st.unexplained, cor_misfit=st.misfit,
+                               cor_rejected=st.rejected, cor_obstacles=st.obstacles)
             rows.append(row)
 
     keys = sorted({k for r in rows for k in r}, key=lambda k: (k != "t", k))
@@ -195,16 +220,21 @@ def main() -> int:
 
     lines = [f"bag {args.bag}: {msgs} messages, {len(rows)} depth frames used (max {args.max_rate_hz} Hz)",
              f"skips {skips}"]
-    for mode, pre in (("truth", "truth"), ("estimate", "est")):
+    for mode, pre in (("truth", "truth"), ("estimate", "est"), ("corrected", "cor")):
+        if mode not in live:
+            lines.append("corrected: the bag has no /blueraven/odom_correction")
+            continue
         fr = [x for x in (frac(r, pre) for r in rows) if x is not None]
         mf = [r[f"{pre}_misfit"] for r in rows if r.get(f"{pre}_misfit") is not None]
         lines.append(f"{mode:8s}: frames {len(fr)}, unexplained share median {np.median(fr) if fr else float('nan'):.3f} "
                      f"p95 {np.percentile(fr, 95) if fr else float('nan'):.3f}; misfit median "
                      f"{np.median(mf) if mf else float('nan'):.3f} max {max(mf) if mf else float('nan'):.3f}; "
                      f"final obstacle voxels {len(live[mode].obstacle_voxels())}, trusted {live[mode].trusted}")
-    errs = [r["est_err_m"] for r in rows if "est_err_m" in r]
-    if errs:
-        lines.append(f"camera position error, estimate vs truth: median {np.median(errs):.3f} m, max {max(errs):.3f} m")
+    for key, label in (("est_err_m", "estimate"), ("cor_err_m", "corrected")):
+        errs = [r[key] for r in rows if key in r]
+        if errs:
+            lines.append(f"camera position error, {label} vs truth: median {np.median(errs):.3f} m, "
+                         f"p95 {np.percentile(errs, 95):.3f} m, max {max(errs):.3f} m")
     paused = [r["t"] for r in rows if r.get("gate", "ok") != "ok"]
     if paused:
         lines.append(f"gate paused {len(paused)} frames, first at t={paused[0]}, last at t={paused[-1]}")
@@ -224,7 +254,7 @@ def main() -> int:
     xs, ys = np.arange(lo[0], hi[0], 0.025), np.arange(lo[1], hi[1], 0.025)
     X, Y = np.meshgrid(xs, ys)
     Dm = course.distance(np.stack([X.ravel(), Y.ravel(), np.full(X.size, 1.0)], 1)).reshape(X.shape)
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
+    fig, axes = plt.subplots(1, len(live), figsize=(6.5 * len(live), 6.5))
     for ax, (mode, layer) in zip(axes, live.items()):
         ax.contour(X, Y, Dm, levels=[0.02], colors="k", linewidths=0.7)
         P = layer.obstacle_points()

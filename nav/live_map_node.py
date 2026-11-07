@@ -11,6 +11,10 @@ Inputs (all standard ROS):
                map -> odom (this node, from maps/course.yaml, until Task 2 publishes a corrected one)
                -> base_link (onboard/adapters/px4_odom.py, PX4's estimate) -> camera (static TF)
   health       std_msgs/Bool, true = the estimator feeding PX4 is healthy        health_topic
+  correction   geometry_msgs/PoseStamped from nav.map_align_node (Task 2): the SE2 drift correction
+               in PX4 local NED. Applied between odom and the camera, so obstacles land where the
+               corrected pose says. Latest value is kept when it goes stale (as refnav does).
+               correction_topic:='' disables; require_correction:=true maps nothing until one arrives.
 
 Outputs:
   /blueraven/live_obstacles   sensor_msgs/PointCloud2 (x, y, z float32) in `map`: obstacle voxel
@@ -41,7 +45,7 @@ from typing import Any
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -54,9 +58,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from nav.course_map import CourseMap  # noqa: E402
-from nav.frames import load_launch, map_from_odom, quaternion_z  # noqa: E402
+from nav.frames import (correction_in_odom, load_launch, map_from_odom, quaternion_z,  # noqa: E402
+                        yaw_from_quaternion)
 from nav.live_map import LiveObstacleLayer, LiveParams, PoseGate  # noqa: E402
 from refnav.depth import decode_depth, quat_to_mat  # noqa: E402
+
+
+def tf_to_matrix(tf: TransformStamped) -> np.ndarray:
+    r, p = tf.transform.rotation, tf.transform.translation
+    T = np.eye(4)
+    T[:3, :3] = quat_to_mat(r.w, r.x, r.y, r.z)
+    T[:3, 3] = (p.x, p.y, p.z)
+    return T
 
 
 def cloud(points: np.ndarray, frame: str, stamp: Any) -> PointCloud2:
@@ -92,6 +105,11 @@ class LiveMapNode(Node):
         self.live = LiveObstacleLayer(self.course, params=params)
         self.gate = PoseGate(recover_s=float(dp("recover_s", 3.0).value),
                              max_speed_mps=float(dp("max_speed_mps", 2.5).value))
+        correction_topic = dp("correction_topic", "/blueraven/odom_correction").value
+        self.require_correction = bool(dp("require_correction", False).value)
+        self.correction_stale_s = float(dp("correction_stale_s", 2.0).value)
+        self.correction: tuple[float, np.ndarray, dict[str, float]] | None = None   # (receipt time, C, values)
+        self.T_map_odom: np.ndarray | None = None
         self.K: np.ndarray | None = None
         self.last_integrate = -math.inf
         self.used = 0
@@ -122,6 +140,8 @@ class LiveMapNode(Node):
         self.pub_cloud = self.create_publisher(PointCloud2, dp("obstacles_topic", "/blueraven/live_obstacles").value, 10)
         self.pub_status = self.create_publisher(String, dp("status_topic", "/blueraven/live_map/status").value, 10)
         self.create_subscription(Bool, health_topic, self._on_health, 10)
+        if correction_topic:
+            self.create_subscription(PoseStamped, correction_topic, self._on_correction, 10)
         self.create_subscription(CameraInfo, info_topic, self._on_info, qos_profile_sensor_data)
         self.create_subscription(Image, depth_topic, self._on_depth, qos_profile_sensor_data)
         self.create_timer(0.5, self._publish_status)
@@ -141,6 +161,15 @@ class LiveMapNode(Node):
     def _on_health(self, m: Bool) -> None:
         self.gate.on_health(self._now(), bool(m.data))
 
+    def _on_correction(self, m: PoseStamped) -> None:
+        o = m.pose.orientation
+        yaw = yaw_from_quaternion(o.x, o.y, o.z, o.w)              # clockwise from north (PX4 sense)
+        x, y = float(m.pose.position.x), float(m.pose.position.y)
+        if not all(math.isfinite(v) for v in (x, y, yaw)):
+            return self._skip("bad_correction", "non-finite correction ignored")
+        self.correction = (self._now(), correction_in_odom(x, y, yaw),
+                           {"x_north": round(x, 3), "y_east": round(y, 3), "yaw_deg": round(math.degrees(yaw), 2)})
+
     def _on_info(self, m: CameraInfo) -> None:
         if m.k[0] > 0 and m.k[4] > 0:
             self.K = np.array(m.k, dtype=float).reshape(3, 3)
@@ -151,16 +180,19 @@ class LiveMapNode(Node):
             return                                            # before /clock, or rate-limited: not a fault
         if self.K is None:
             return self._skip("no_camera_info", "no CameraInfo yet")
+        if self.require_correction and self.correction is None:
+            return self._skip("no_correction", "waiting for the first drift correction")
         try:
-            tf = self.tf_buffer.lookup_transform(self.map_frame, m.header.frame_id, Time.from_msg(m.header.stamp),
-                                                 timeout=self.tf_timeout)
+            if self.T_map_odom is None:                       # static: look it up once
+                self.T_map_odom = tf_to_matrix(self.tf_buffer.lookup_transform(
+                    self.map_frame, self.odom_frame, Time(), timeout=self.tf_timeout))
+            T_odom_cam = tf_to_matrix(self.tf_buffer.lookup_transform(
+                self.odom_frame, m.header.frame_id, Time.from_msg(m.header.stamp), timeout=self.tf_timeout))
         except Exception as e:                                # not on the TF tree yet, or not at that time
-            return self._skip("no_tf", f"no TF {self.map_frame} <- {m.header.frame_id} at the image time "
-                                       f"({type(e).__name__})")
-        r, p = tf.transform.rotation, tf.transform.translation
-        T = np.eye(4)
-        T[:3, :3] = quat_to_mat(r.w, r.x, r.y, r.z)
-        T[:3, 3] = (p.x, p.y, p.z)
+            return self._skip("no_tf", f"no TF {self.map_frame} <- {self.odom_frame} <- {m.header.frame_id} "
+                                       f"at the image time ({type(e).__name__})")
+        C = self.correction[1] if self.correction is not None else np.eye(4)
+        T = self.T_map_odom @ C @ T_odom_cam
         ok, why = self.gate.check(now, T[:3, 3])
         if not ok:
             return self._skip("pose", why)
@@ -178,9 +210,13 @@ class LiveMapNode(Node):
         self.pub_cloud.publish(cloud(self.live.obstacle_points(), self.map_frame, m.header.stamp))
 
     def _publish_status(self) -> None:
+        corr = None
+        if self.correction is not None:
+            age = self._now() - self.correction[0]
+            corr = {**self.correction[2], "age_s": round(age, 2), "stale": age > self.correction_stale_s}
         status = {"frames_mapped": self.used, "skipped": self.skips, "last_reason": self.last_reason,
                   "obstacles": int(len(self.live.obstacle_voxels())), "trusted": self.live.trusted,
-                  "launch_key": self.launch_key, "last_frame": self.last_stats}
+                  "launch_key": self.launch_key, "correction": corr, "last_frame": self.last_stats}
         self.pub_status.publish(String(data=json.dumps(status)))
 
 

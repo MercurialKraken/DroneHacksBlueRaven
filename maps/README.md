@@ -96,6 +96,7 @@ python3 -m nav.live_map_node --ros-args -p use_sim_time:=true -p launch_key:=lau
 ```
 
 - **Pose:** TF map ← depth camera, at each image's timestamp. The node publishes a static map → odom from `course.yaml` (`launch_key`: `launch` for the real drone, `launch_sim` for the simulator's spawn point; see `nav/frames.py`). `px4_odom.py` supplies odom → base_link. When the drift correction (Task 2) publishes its own map → odom, set `publish_map_to_odom:=false`; two publishers would fight.
+- **Drift correction:** the node applies Darion's `/blueraven/odom_correction` from `nav/map_align_node.py` between odom and the camera, so obstacles land where the *corrected* pose says. If the correction goes quiet, it keeps the last value and reports its age in the status. `correction_topic:=''` turns this off. `require_correction:=true` holds off mapping until the first correction arrives.
 - **Pauses mapping** while `/estimator/healthy` is false or silent, for 3 s afterwards (`recover_s`), after a pose jump faster than 2.5 m/s, and on any frame refused for misfit.
 - **Publishes:**
   - `/blueraven/live_obstacles`: a PointCloud2 in `map`. Rebuild the combined map in another node with `CombinedMap(course, ObstacleCloud(course, points))`.
