@@ -1,0 +1,87 @@
+{
+  "schema": "flyx-onboard-processes/1",
+  "token": "aeae698c3a5d5ca41e1bcf3a45311eaa",
+  "project": "/var/lib/flyx-lab/workspace",
+  "mode": "vio",
+  "world_token": "5c99d203b47c1d1758c53ccf2f6ae222",
+  "created_at": 1794016411.7110977,
+  "sources": {
+    "onboard/README.md": "484fc8804d9e7b7a0a4e7f121dfa258bf5e6e85a920c53cacf52ff74dce67d3b",
+    "onboard/__init__.py": "07c372d3f6b167f7d571eca2bb05e52dfd9eace7db7e67b1aae61a97a2af28b3",
+    "onboard/adapters/__init__.py": "07c372d3f6b167f7d571eca2bb05e52dfd9eace7db7e67b1aae61a97a2af28b3",
+    "onboard/adapters/geometry.py": "f4827e273ae6cd4dfb6a52a21b5777e51ea66c5555f96c6b201934dd27661580",
+    "onboard/adapters/px4_health.py": "b1cadd2a5aa73381e9af27cd1fd90a44150b56830a322e78e5712770de84921a",
+    "onboard/adapters/px4_odom.py": "4e6b21bec7a92e32163830824e2c1b809f1984c56d31351e07508bc483ec38f5",
+    "onboard/config/common.yaml": "5504024889684dcb94a378769fd8f8c429ea9463b89cfea70a8549a5b41ab99d",
+    "onboard/config/services.json": "b7772650ab4286a6b115b3ba79be3b1c1a20581e049460c36f4da96fd8c9ccb9",
+    "onboard/config/vio.yaml": "f041c9d6742994ce31bc6a6592c68ecef698cb3dcbe583ad2ef8d819f88c37a4",
+    "onboard/config/vision_bridge.yaml": "1989e9aca4a9679fb39b3fa0a17fa7615a2030d559224ffa75fe80ec54fec6a4",
+    "onboard/examples/takeoff_land.py": "79cd3a60b76311af8500aca87183a79160acc5203875da916bee9a74f53e6490",
+    "onboard/services.py": "15a429f72b118a6a4ac5fabbb5c335ebeb89e3e42364db93bcd2035bc4afaf77",
+    "onboard/slam/__init__.py": "e77c4b94ede5e58ce7dab1aabc9eeeb9e399b60d08e1cbdad318ec808ffa8015",
+    "onboard/slam/cuvslam_lib_node.py": "7136ad2a210c83ed56918c99584146b082cb15b19c6826470ba42220ecb6ac3e",
+    "onboard/slam/pose_cov.py": "8caf9d68e2752bc7ba89d175ef3e0bf70bd9fd7df1f7b15341726322fc17cd11",
+    "onboard/slam/stereo_pairing.py": "caae1f96d5dba0fec31a56e6bcfe3cfead7e53a1bddbfdf9367956ed7a00a327",
+    "onboard/slam/vio_evidence.py": "ae1743548820dc7645d53802f7e4f1991c0f3bc75b51d8a6a8db402a058701bd",
+    "onboard/vio/__init__.py": "e77c4b94ede5e58ce7dab1aabc9eeeb9e399b60d08e1cbdad318ec808ffa8015",
+    "onboard/vio/ev_bridge.py": "f953ded2d9205f448cab9dc4c85e86be8648d2e922bf324cc3f589fd889d4e59",
+    "onboard/vio/frames.py": "bd3b546277b099095df34d2a2288ce3d40b3c4ae96702e0dc4337c7c55dedcad",
+    "onboard/vio/ownership.py": "edc581d35a9db2db2f8e24cbc7254276bd61d952c2485fca978019013f4fad2b",
+    "onboard/vio/ros_common.py": "a47e203aae715c9a0556e4562ff1818b66d2e6920768b038b3710bc9b14525ac",
+    "onboard/vio/validation.py": "e050e97d980477ac4ea380b3dc2386490d522e16c9e4efa2e2b052da8d5a4e9d",
+    "onboard/vio/vio_health.py": "3b33733d134a122d969ba2a94e133e8667f4e1052af9752bbcb9182af0e3f39e"
+  },
+  "processes": [
+    {
+      "name": "cuvslam",
+      "argv": [
+        "python3",
+        "-m",
+        "onboard.slam.cuvslam_lib_node",
+        "--ros-args",
+        "--params-file",
+        "/var/lib/flyx-lab/workspace/onboard/config/vio.yaml",
+        "--params-file",
+        "/etc/flyx/onboard.yaml"
+      ],
+      "pid": 399,
+      "start": 45103,
+      "log": "/var/lib/flyx-lab/workspace/.onboard/aeae698c3a5d5ca41e1bcf3a45311eaa/cuvslam.log"
+    },
+    {
+      "name": "vision_bridge",
+      "argv": [
+        "python3",
+        "-m",
+        "onboard.vio.ev_bridge",
+        "--ros-args",
+        "--params-file",
+        "/var/lib/flyx-lab/workspace/onboard/config/vision_bridge.yaml",
+        "--params-file",
+        "/etc/flyx/onboard.yaml"
+      ],
+      "pid": 400,
+      "start": 45104,
+      "log": "/var/lib/flyx-lab/workspace/.onboard/aeae698c3a5d5ca41e1bcf3a45311eaa/vision_bridge.log"
+    },
+    {
+      "name": "px4_odometry",
+      "argv": [
+        "python3",
+        "/var/lib/flyx-lab/workspace/onboard/adapters/px4_odom.py",
+        "--ros-args",
+        "--params-file",
+        "/var/lib/flyx-lab/workspace/onboard/config/common.yaml",
+        "--params-file",
+        "/etc/flyx/onboard.yaml"
+      ],
+      "pid": 401,
+      "start": 45104,
+      "log": "/var/lib/flyx-lab/workspace/.onboard/aeae698c3a5d5ca41e1bcf3a45311eaa/px4_odometry.log"
+    }
+  ],
+  "deployment": {
+    "path": "/etc/flyx/onboard.yaml",
+    "sha256": "24c4d79541f48dd7a96660071c69ddc3897000ba948311354dcb584ebb22b7c0"
+  }
+}

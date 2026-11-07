@@ -1,0 +1,150 @@
+{
+  "schema": "flyx-flight-source/1",
+  "note": "Initial baseline only; Run records your current source.",
+  "files": {
+    "refnav/__init__.py": {
+      "source": "reference/refnav/__init__.py",
+      "sha256": "1f9f5ece97932ab4ec987d46c70c6c6c67d5aff9510ad6568c3323ecd89b09c4"
+    },
+    "refnav/core.py": {
+      "source": "reference/refnav/core.py",
+      "sha256": "5db8ef4e1527e902c50dcdcc2d56d2985a64d8d4c0066a2006bd8cf27b585fea"
+    },
+    "refnav/depth.py": {
+      "source": "reference/refnav/depth.py",
+      "sha256": "9d5154470380e251ea16849128d327c6a77bc78f1aa8c332d9ac319ac8f242bf"
+    },
+    "refnav/node.py": {
+      "source": "reference/refnav/node.py",
+      "sha256": "1cf5627a1c2a76407df12d60cfe6331137c58f84dba236800cef4db9b1df73fb"
+    },
+    "refnav/launch.py": {
+      "source": "reference/refnav/launch.py",
+      "sha256": "cbc032f71837a8e308158734d48c3443cce4d4f17c28f79eb77de09c256c8578"
+    },
+    "refnav/gps.py": {
+      "source": "reference/refnav/gps.py",
+      "sha256": "1298a67ca31f9a4ae04b84ef249322c2782a10d0a4c67e8bea16ddba49749d8c"
+    },
+    "onboard/__init__.py": {
+      "source": "onboard/__init__.py",
+      "sha256": "07c372d3f6b167f7d571eca2bb05e52dfd9eace7db7e67b1aae61a97a2af28b3"
+    },
+    "onboard/services.py": {
+      "source": "onboard/services.py",
+      "sha256": "15a429f72b118a6a4ac5fabbb5c335ebeb89e3e42364db93bcd2035bc4afaf77"
+    },
+    "onboard/README.md": {
+      "source": "onboard/README.md",
+      "sha256": "484fc8804d9e7b7a0a4e7f121dfa258bf5e6e85a920c53cacf52ff74dce67d3b"
+    },
+    "onboard/slam/__init__.py": {
+      "source": "onboard/slam/__init__.py",
+      "sha256": "e77c4b94ede5e58ce7dab1aabc9eeeb9e399b60d08e1cbdad318ec808ffa8015"
+    },
+    "onboard/slam/pose_cov.py": {
+      "source": "onboard/slam/pose_cov.py",
+      "sha256": "8caf9d68e2752bc7ba89d175ef3e0bf70bd9fd7df1f7b15341726322fc17cd11"
+    },
+    "onboard/slam/cuvslam_lib_node.py": {
+      "source": "onboard/slam/cuvslam_lib_node.py",
+      "sha256": "7136ad2a210c83ed56918c99584146b082cb15b19c6826470ba42220ecb6ac3e"
+    },
+    "onboard/slam/stereo_pairing.py": {
+      "source": "onboard/slam/stereo_pairing.py",
+      "sha256": "caae1f96d5dba0fec31a56e6bcfe3cfead7e53a1bddbfdf9367956ed7a00a327"
+    },
+    "onboard/slam/vio_evidence.py": {
+      "source": "onboard/slam/vio_evidence.py",
+      "sha256": "ae1743548820dc7645d53802f7e4f1991c0f3bc75b51d8a6a8db402a058701bd"
+    },
+    "onboard/vio/__init__.py": {
+      "source": "onboard/vio/__init__.py",
+      "sha256": "e77c4b94ede5e58ce7dab1aabc9eeeb9e399b60d08e1cbdad318ec808ffa8015"
+    },
+    "onboard/vio/ownership.py": {
+      "source": "onboard/vio/ownership.py",
+      "sha256": "edc581d35a9db2db2f8e24cbc7254276bd61d952c2485fca978019013f4fad2b"
+    },
+    "onboard/vio/validation.py": {
+      "source": "onboard/vio/validation.py",
+      "sha256": "e050e97d980477ac4ea380b3dc2386490d522e16c9e4efa2e2b052da8d5a4e9d"
+    },
+    "onboard/vio/vio_health.py": {
+      "source": "onboard/vio/vio_health.py",
+      "sha256": "3b33733d134a122d969ba2a94e133e8667f4e1052af9752bbcb9182af0e3f39e"
+    },
+    "onboard/vio/ros_common.py": {
+      "source": "onboard/vio/ros_common.py",
+      "sha256": "a47e203aae715c9a0556e4562ff1818b66d2e6920768b038b3710bc9b14525ac"
+    },
+    "onboard/vio/frames.py": {
+      "source": "onboard/vio/frames.py",
+      "sha256": "bd3b546277b099095df34d2a2288ce3d40b3c4ae96702e0dc4337c7c55dedcad"
+    },
+    "onboard/vio/ev_bridge.py": {
+      "source": "onboard/vio/ev_bridge.py",
+      "sha256": "f953ded2d9205f448cab9dc4c85e86be8648d2e922bf324cc3f589fd889d4e59"
+    },
+    "onboard/examples/takeoff_land.py": {
+      "source": "onboard/examples/takeoff_land.py",
+      "sha256": "79cd3a60b76311af8500aca87183a79160acc5203875da916bee9a74f53e6490"
+    },
+    "onboard/config/vio.yaml": {
+      "source": "onboard/config/vio.yaml",
+      "sha256": "f041c9d6742994ce31bc6a6592c68ecef698cb3dcbe583ad2ef8d819f88c37a4"
+    },
+    "onboard/config/common.yaml": {
+      "source": "onboard/config/common.yaml",
+      "sha256": "5504024889684dcb94a378769fd8f8c429ea9463b89cfea70a8549a5b41ab99d"
+    },
+    "onboard/config/services.json": {
+      "source": "onboard/config/services.json",
+      "sha256": "b7772650ab4286a6b115b3ba79be3b1c1a20581e049460c36f4da96fd8c9ccb9"
+    },
+    "onboard/config/vision_bridge.yaml": {
+      "source": "onboard/config/vision_bridge.yaml",
+      "sha256": "1989e9aca4a9679fb39b3fa0a17fa7615a2030d559224ffa75fe80ec54fec6a4"
+    },
+    "onboard/adapters/__init__.py": {
+      "source": "onboard/__init__.py",
+      "sha256": "07c372d3f6b167f7d571eca2bb05e52dfd9eace7db7e67b1aae61a97a2af28b3"
+    },
+    "onboard/adapters/px4_odom.py": {
+      "source": "reference/adapters/px4_odom.py",
+      "sha256": "4e6b21bec7a92e32163830824e2c1b809f1984c56d31351e07508bc483ec38f5"
+    },
+    "onboard/adapters/px4_health.py": {
+      "source": "reference/adapters/px4_health.py",
+      "sha256": "b1cadd2a5aa73381e9af27cd1fd90a44150b56830a322e78e5712770de84921a"
+    },
+    "onboard/adapters/geometry.py": {
+      "source": "reference/adapters/geometry.py",
+      "sha256": "f4827e273ae6cd4dfb6a52a21b5777e51ea66c5555f96c6b201934dd27661580"
+    },
+    "tests/test_refnav_core.py": {
+      "source": "reference/tests/test_refnav_core.py",
+      "sha256": "4169d09e0e404cd08b906d6a615f64eb0f7677b6f270e3b6cac101faafb3074f"
+    },
+    "FLIGHT_CODE.md": {
+      "source": "examples/takeoff_land/FLIGHT_CODE.md",
+      "sha256": "9b9b878b29b4cb411576bfef906bfc040a9a1703d144b5fa6e73e132056754ae"
+    },
+    "README.md": {
+      "source": "examples/takeoff_land/README.md",
+      "sha256": "ebb2162488093b0446636686dec5401b0f9df8608570948eae1165194301421a"
+    },
+    "main.py": {
+      "source": "examples/takeoff_land/main.py",
+      "sha256": "a24d3861578e60e2eba45e37d9b449be96d0f0adcc89f0a655c3dd480cbacbd0"
+    },
+    "flight.yaml": {
+      "source": "examples/takeoff_land/flight.yaml",
+      "sha256": "5aa199c4ac7a414ec48f5b012b5b227e617daefdde9b192ebd07a16cf3ef32cb"
+    },
+    "route.json": {
+      "source": "examples/takeoff_land/route.json",
+      "sha256": "e891fd1c4ad9e21383cd7ab3a76d29c82f4fc8d15a2ac5452d55eeaf92cdae39"
+    }
+  }
+}
