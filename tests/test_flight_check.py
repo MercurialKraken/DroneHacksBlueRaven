@@ -362,3 +362,42 @@ def test_backwards_stamps_are_reported_but_not_a_jump():
     p = np.c_[0.01 * np.arange(t.size), np.zeros_like(t), np.full_like(t, 0.7)]
     kinds = [e["kind"] for e in F.vio_events(t, p)]
     assert kinds == ["stamp_backwards"]
+
+
+def test_wall_clock_and_marks(tmp_path):
+    # recording starts 2026-11-07 15:52:00 Los Angeles = 23:52:00 UTC; a 12 m jump 2 s in
+    start = 1794095520.0
+    t = np.arange(0, 6, 1 / 30)
+    p = np.c_[0.1 * t, np.zeros_like(t), np.full_like(t, 0.7)]
+    p[60:, 1] += 12.0
+    path = tmp_path / "w.mcap"
+    mcap(
+        path,
+        [
+            (
+                A.DEFAULTS["odom"],
+                "nav_msgs/msg/Odometry",
+                [(start + a, odom(start + a - 0.07, b)) for a, b in zip(t, p)],
+            )
+        ],
+    )
+    out = tmp_path / "w"
+    assert (
+        A.main(
+            [str(path), "--out", str(out), "--mark", "liftoff=15:52:02", "--mark", "late=15:52:30"]
+        )
+        == 0
+    )
+    txt = Path(f"{out}_report.txt").read_text()
+    assert "Recording starts at 15:52:00.0" in txt
+    assert "[15:52:02.0]" in txt  # the jump, on the wall clock
+    rep = json.loads(Path(f"{out}_report.json").read_text())
+    lift, late = rep["marks"]
+    assert lift["t"] == pytest.approx(2.0) and [e["kind"] for e in lift["events"]] == ["jump"]
+    assert lift["median_age_ms"][A.DEFAULTS["odom"]] == pytest.approx(70, abs=1)
+    assert late["events"] == [] and late["odom_extent_m"] is None
+
+
+def test_missing_bag_is_a_clear_message(tmp_path):
+    with pytest.raises(SystemExit, match="not found"):
+        A.load(tmp_path / "walk3")

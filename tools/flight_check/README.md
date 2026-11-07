@@ -8,6 +8,17 @@
 python3 tools/flight_check/analyze_flight.py bags/flight_03 --out flight_03
 ```
 
+With the wall-clock times someone noted during the test, add marks. Each one gets the VIO
+events, how far the odometry moved and the median data age within ±5 s (`--mark-window-s`):
+
+```bash
+python3 tools/flight_check/analyze_flight.py walk3 --out walk3 \
+    --mark liftoff=15:52:10 --mark net=15:54:30 --mark pad=15:57:05
+```
+
+Every time in the report is also shown as wall clock (`--tz`, default America/Los_Angeles),
+taken from the recording computer's clock: with NTP off it can be a few seconds off.
+
 It reads one `.mcap` file or a ros2 bag folder and writes `flight_03_report.txt`,
 `flight_03_report.json` and `flight_03.png` (if matplotlib is installed). It reports:
 
@@ -26,7 +37,7 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 
 ## How it was checked
 
-- `python3 -m pytest -q tests/test_flight_check.py`: 19 tests with hand-encoded CDR messages in a
+- `python3 -m pytest -q tests/test_flight_check.py`: 21 tests with hand-encoded CDR messages in a
   minimal MCAP file (decoders, dropouts, jumps, freezes, tracking maths, missing topics,
   read-only source check).
 - Cross-checked once against an **independent** writer (the `mcap` + `mcap-ros2-support` packages,

@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -39,6 +41,8 @@ DEFAULTS = {
 
 def load(path: Path) -> dict[str, dict]:
     """-> {topic: {"schema": name, "t": [log s], "msgs": [decoded or None]}}, time-ordered."""
+    if not path.exists():
+        raise SystemExit(f"not found: {path} (copy the bag folder there first)")
     files = sorted(path.glob("*.mcap")) if path.is_dir() else [path]
     if not files:
         raise SystemExit(f"no .mcap file in {path}")
@@ -73,7 +77,13 @@ def _times(e: dict, use_header: bool) -> np.ndarray:
 
 def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
     t0 = min(float(e["t"][0]) for e in topics.values() if len(e["t"]))
-    rep: dict = {"thresholds": th.__dict__, "topics": {}, "frames": {}, "notes": []}
+    rep: dict = {
+        "thresholds": th.__dict__,
+        "topics": {},
+        "frames": {},
+        "notes": [],
+        "start_unix_s": t0,
+    }
     for name, e in sorted(topics.items()):
         rep["topics"][name] = {"schema": e["schema"], **F.topic_stats(e["t"] - t0, th.gap_s)}
     for key, name in names.items():
@@ -157,8 +167,61 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
     return rep
 
 
-def text(rep: dict) -> str:
-    L = ["Topics (count, rate, longest gap, gaps > %.2f s)" % rep["thresholds"]["gap_s"]]
+def clock(rep: dict, t: float | None, tz: str = "America/Los_Angeles") -> str:
+    """Report time t (s after the recording's first message) -> wall clock HH:MM:SS.s in tz,
+    using the recording computer's clock (with NTP off it may be off by a few seconds)."""
+    if t is None or "start_unix_s" not in rep:
+        return "-"
+    d = datetime.fromtimestamp(rep["start_unix_s"] + t, ZoneInfo(tz))
+    return d.strftime("%H:%M:%S.") + f"{d.microsecond // 100000}"
+
+
+def parse_clock(rep: dict, hhmmss: str, tz: str = "America/Los_Angeles") -> float:
+    """Wall-clock 'HH:MM[:SS]' on the recording's day -> report time t (s)."""
+    start = datetime.fromtimestamp(rep["start_unix_s"], ZoneInfo(tz))
+    parts = [int(x) for x in hhmmss.split(":")] + [0]
+    when = start.replace(hour=parts[0], minute=parts[1], second=parts[2], microsecond=0)
+    return when.timestamp() - rep["start_unix_s"]
+
+
+def marks_report(rep: dict, marks: list[tuple[str, float]], window_s: float = 5.0) -> list[dict]:
+    """For each named moment: VIO events and data age within +-window_s."""
+    out = []
+    s = rep.get("_series", {})
+    for name, t in marks:
+        ev = [e for e in rep.get("vio", {}).get("events", []) if abs(e["t"] - t) <= window_s]
+        age = {}
+        for topic, (lt, a) in s.get("latency", {}).items():
+            m = np.abs(np.asarray(lt) - t) <= window_s
+            if m.any():
+                age[topic] = round(float(np.median(np.asarray(a)[m])) * 1e3, 1)
+        move = None
+        if "odom_t" in s:
+            m = np.abs(s["odom_t"] - t) <= window_s
+            if m.sum() > 1:
+                p = s["odom_p"][m]
+                move = round(float(np.linalg.norm(np.nanmax(p, 0) - np.nanmin(p, 0))), 3)
+        out.append(
+            {
+                "mark": name,
+                "t": round(t, 3),
+                "events": ev,
+                "median_age_ms": age,
+                "odom_extent_m": move,
+            }
+        )
+    return out
+
+
+def text(rep: dict, tz: str = "America/Los_Angeles") -> str:
+    L = []
+    if "start_unix_s" in rep:
+        L += [
+            f"Recording starts at {clock(rep, 0.0, tz)} ({tz}, recording computer's clock) "
+            "= t 0. Times below are seconds after that; [HH:MM:SS] is the wall clock.",
+            "",
+        ]
+    L += ["Topics (count, rate, longest gap, gaps > %.2f s)" % rep["thresholds"]["gap_s"]]
     for n, s in rep["topics"].items():
         L.append(
             f"  {n:42s} {s['count']:6d}  {s['rate_hz']:7.2f} Hz  max gap "
@@ -171,7 +234,8 @@ def text(rep: dict) -> str:
             kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
         L += ["", f"VIO: path {v['path_length_m']} m, height {v['z_range_m']} m, events {kinds}"]
         L += [
-            f"  t={e['t']:8.3f}  {json.dumps({k: x for k, x in e.items() if k != 't'})}"
+            f"  t={e['t']:8.3f} [{clock(rep, e['t'], tz)}]  "
+            f"{json.dumps({k: x for k, x in e.items() if k != 't'})}"
             for e in v["events"][:40]
         ]
         if len(v["events"]) > 40:
@@ -186,15 +250,28 @@ def text(rep: dict) -> str:
             L.append(
                 f"  {n:42s} median {x.get('median_ms')} ms  p90 {x.get('p90_ms')} ms  "
                 f"over limit {x.get('over_limit_fraction')}  first slow second t="
-                f"{x.get('first_slow_second_t')}   [{x['kind']}]"
+                f"{x.get('first_slow_second_t')} [{clock(rep, x.get('first_slow_second_t'), tz)}]"
+                f"   [{x['kind']}]"
             )
     for key in ("pose_tracking", "twist_tracking"):
         if key in rep:
             L += ["", f"{key}: {json.dumps(rep[key])}"]
     if rep.get("state_changes"):
         L += ["", "State changes:"] + [
-            f"  t={s['t']:8.3f}  {s['state']}" for s in rep["state_changes"]
+            f"  t={s['t']:8.3f} [{clock(rep, s['t'], tz)}]  {s['state']}"
+            for s in rep["state_changes"]
         ]
+    if rep.get("marks"):
+        L += [
+            "",
+            "Marks (+-%.0f s): VIO events, odometry extent, median data age" % rep["mark_window_s"],
+        ]
+        for m in rep["marks"]:
+            L.append(
+                f"  {m['mark']:12s} t={m['t']:8.3f} [{clock(rep, m['t'], tz)}]  "
+                f"events {len(m['events'])} {[e['kind'] for e in m['events']]}  "
+                f"moved {m['odom_extent_m']} m  age_ms {json.dumps(m['median_age_ms'])}"
+            )
     L += ["", f"Frames: {json.dumps(rep['frames'])}"]
     L += ["Notes:"] + [f"  - {n}" for n in rep["notes"]] if rep["notes"] else []
     return "\n".join(L) + "\n"
@@ -251,6 +328,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("bag", type=Path, help=".mcap file or ros2 bag folder")
     ap.add_argument("--out", default="flight")
+    ap.add_argument("--tz", default="America/Los_Angeles", help="time zone for wall-clock times")
+    ap.add_argument(
+        "--mark",
+        action="append",
+        default=[],
+        metavar="NAME=HH:MM:SS",
+        help="a noted moment, e.g. liftoff=15:52:10 (repeatable)",
+    )
+    ap.add_argument("--mark-window-s", type=float, default=5.0)
     for k, v in DEFAULTS.items():
         ap.add_argument("--" + k.replace("_", "-"), default=v, help=f"topic (default {v})")
     d = F.Thresholds()
@@ -259,7 +345,14 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     th = F.Thresholds(**{k: getattr(a, k) for k in d.__dict__})
     rep = analyze(load(a.bag), {k: getattr(a, k) for k in DEFAULTS}, th)
-    t = text(rep)
+    if a.mark:
+        marks = []
+        for m in a.mark:
+            name, _, hhmmss = m.partition("=")
+            marks.append((name, parse_clock(rep, hhmmss, a.tz)))
+        rep["mark_window_s"] = a.mark_window_s
+        rep["marks"] = marks_report(rep, marks, a.mark_window_s)
+    t = text(rep, a.tz)
     Path(f"{a.out}_report.txt").write_text(t)
     drawn = plot(rep, f"{a.out}.png")
     rep.pop("_series", None)
