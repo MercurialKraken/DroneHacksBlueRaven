@@ -68,21 +68,37 @@ def test_non_finite_and_non_advancing_samples_are_withheld():
     assert h.update(10 * DT, (0.3 * 10 * DT, 0.0, 0.8))[0]
 
 
-def test_high_variance_is_withheld_and_never_becomes_a_jump():
+def test_a_high_variance_jump_is_withheld_never_re_anchored_and_cut_as_broken():
     # T4 touchdowns: cuVSLAM's variance went 4e-4 -> 3 m^2 and its poses moved off together; that
-    # self-consistent garbage must not be accepted as a real jump
+    # self-consistent garbage must not be accepted as a real jump (variance vetoes re-anchoring)
     h = VioHealth()
     walk(h, 0.0, 0.0, 30)
     t = 30 * DT
     oks = [h.update(t + k * DT, (0.3 * t + 15.0 + 0.01 * k, 0.0, 0.8), var=3.0)[0] for k in range(15)]
     assert not any(oks) and h.n_rebased == 0
     assert h.reason.startswith("broken")
-    assert not h.update(t + 15 * DT, (0.3 * t, 0.0, 0.8), var=3.0)[0]        # even back in place, still too uncertain
+    assert not h.update(t + 15 * DT, (0.3 * t, 0.0, 0.8), var=3.0)[0]        # broken: needs quiet_s to recover
+
+
+def test_run2_accurate_samples_with_high_variance_are_passed_and_never_break_vision():
+    """T4 darion-wholestack run 2 (2026-11-07): cuVSLAM's variance was 0.053-0.071 m^2 for 7 samples in 0.4 s
+    while its positions stayed accurate. Withholding them tripped 'broken', PX4 got no vision for 0.5 s and
+    failsafe-landed. Now they pass (PX4 weighs the variance) and vision never stops."""
+    h = VioHealth()
+    walk(h, 0.0, 0.0, 30)
+    t0 = 30 * DT
+    variances = (0.053, 0.071, 0.067, 0.07, 0.059, 0.053, 0.062)
+    res = [h.update(t0 + k * DT, (0.3 * (t0 + k * DT), 0.0, 0.8), var=v) for k, v in enumerate(variances)]
+    assert all(ok for ok, _ in res)
+    assert all("passed for PX4 to weigh" in why for _, why in res)
+    assert h.n_high_var == 7 and h.n_withheld == 0 and not h.reason.startswith("broken")
+    assert all(ok for ok, _ in walk(h, t0 + 7 * DT, 0.3 * (t0 + 7 * DT), 20))
 
 
 def test_low_variance_passes_and_unknown_variance_is_allowed():
     h = VioHealth()
     assert h.update(0.0, (0, 0, 0.8), var=4e-4)[0] and h.update(DT, (0.02, 0, 0.8), var=None)[0]
+    assert h.update(2 * DT, (0.04, 0, 0.8), var=3.0)[0]                     # high variance alone: passed
 
 
 def test_a_persistent_jump_sets_rebased_on_the_accepting_sample_only():
@@ -97,4 +113,4 @@ def test_a_persistent_jump_sets_rebased_on_the_accepting_sample_only():
 
 
 def test_the_bridge_constructs_it_with_its_arguments():
-    VioHealth(max_speed_mps=5.0, jump_m=1.0, quiet_s=5.0)              # as onboard/vio/ev_bridge.py does
+    VioHealth(max_speed_mps=5.0, jump_m=1.0, quiet_s=5.0, max_var_m2=0.05)   # as onboard/vio/ev_bridge.py does
