@@ -2,8 +2,12 @@
 import json
 import math
 
+import pytest
+
 from course_planner import load_map, rasterise
 from course_planner.make_routes import HERE, build
+
+pytest.importorskip("scipy", reason="route generation requires scipy; see make_routes.build")
 
 
 def _xy(L, q):
@@ -21,6 +25,15 @@ def test_routes_shape_and_params():
     assert v3["leg_yaw_off_deg"][6] == 15.0 and sum(abs(x) for x in v3["leg_yaw_off_deg"]) == 15.0
     assert all(isinstance(x, float) for x in v3["leg_yaw_off_deg"])   # ROS param lists must be all floats
     json.dumps(v3)
+
+
+def test_committed_route_files_match_the_generator():
+    root = HERE.parent
+    for name, (route, params) in build().items():
+        doc = json.loads((root / "routes" / name).read_text())
+        assert doc["params"] == params, name
+        assert doc["route"] == [[float("%.3f" % a), float("%.3f" % b)] for a, b in route], name
+    assert json.loads((root / "route.json").read_text()) == json.loads((root / "routes" / "route_v4.json").read_text())
 
 
 def test_v4_leg_ends_survive_the_overshoot():
