@@ -62,11 +62,15 @@ def yaw_wxyz(w, x, y, z): return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("bag"); ap.add_argument("--launch-key", default="launch_sim"); ap.add_argument("--every", type=int, default=3)
+    ap.add_argument("--field", default=None, help="SDF field to align to (default: AlignParams.field)")
     a = ap.parse_args(argv)
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     L = load_launch(ROOT / "maps" / "course.yaml", a.launch_key)
     start = SE2(L["x"], L["y"], math.radians(L["yaw_deg"] - 90.0))
-    dc = DriftCorrector(cm, start)
+    from nav.map_align import AlignParams, CorrectorParams
+    cp = CorrectorParams(align=AlignParams(field=a.field) if a.field else AlignParams())
+    print(f"field: {cp.align.field}")
+    dc = DriftCorrector(cm, start, cp)
     R_bc = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], float); t_bc = np.array([0.116, 0.037, 0.029])
     K = att = pos = truth = phase = None; t0 = None; n = 0; rows = []
     for topic, t, b in stream(a.bag):

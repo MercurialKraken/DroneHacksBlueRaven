@@ -1,7 +1,7 @@
 """Map-based drift correction (todos.md Task 2). Pure: numpy + nav.course_map.
 
 Each depth frame's points are placed in the course map with the current pose estimate and aligned
-to the map's 'localization' distance field (walls; no floor, no net) by a robust Gauss-Newton fit
+to the map's 'localization' distance field (walls; see AlignParams.field) by a robust Gauss-Newton fit
 over (dx, dy, dyaw). Only directions the walls constrain are corrected: in a straight corridor the
 walls say nothing about position along it, so that component is left alone.
 
@@ -38,6 +38,11 @@ def level_to_map(pts_level: np.ndarray, pose: tuple[float, float, float, float])
 
 @dataclass
 class AlignParams:
+    # 'localization' (walls only, no nets). Depth DOES see the nets, so with this field net-heavy views (the
+    # first corridor, the north side) are rejected and get no correction. 'planning' (walls + nets) accepts
+    # them but was compared on 4 T4 truth bags (2026-11-07): position error the same (rms 0.039-0.074 vs
+    # 0.041-0.073 m), heading worse (follow_110923Z max 9.5 vs 5.1 deg), likely because the map's nets sit a
+    # few cm from the sim's. Revisit if the net geometry in the SDF is confirmed.
     field: str = "localization"
     band_m: float = 0.5           # points within this of flight height (walls, not floor or ceiling)
     max_points: int = 800         # subsample for speed

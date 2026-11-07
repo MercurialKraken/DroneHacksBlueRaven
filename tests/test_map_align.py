@@ -17,7 +17,8 @@ CELL = 0.05
 def grid_map(dist_fn, lo, hi):
     xs, ys, zs = (np.arange(lo[i], hi[i] + 1e-9, CELL) for i in range(3))
     X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
-    return CourseMap({"localization": dist_fn(X, Y, Z).astype(np.float32)}, (xs[0], ys[0], zs[0]), CELL)
+    f = dist_fn(X, Y, Z).astype(np.float32)
+    return CourseMap({"localization": f, "planning": f}, (xs[0], ys[0], zs[0]), CELL)
 
 
 def room():
