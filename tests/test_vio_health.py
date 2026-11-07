@@ -68,5 +68,33 @@ def test_non_finite_and_non_advancing_samples_are_withheld():
     assert h.update(10 * DT, (0.3 * 10 * DT, 0.0, 0.8))[0]
 
 
+def test_high_variance_is_withheld_and_never_becomes_a_jump():
+    # T4 touchdowns: cuVSLAM's variance went 4e-4 -> 3 m^2 and its poses moved off together; that
+    # self-consistent garbage must not be accepted as a real jump
+    h = VioHealth()
+    walk(h, 0.0, 0.0, 30)
+    t = 30 * DT
+    oks = [h.update(t + k * DT, (0.3 * t + 15.0 + 0.01 * k, 0.0, 0.8), var=3.0)[0] for k in range(15)]
+    assert not any(oks) and h.n_rebased == 0
+    assert h.reason.startswith("broken")
+    assert not h.update(t + 15 * DT, (0.3 * t, 0.0, 0.8), var=3.0)[0]        # even back in place, still too uncertain
+
+
+def test_low_variance_passes_and_unknown_variance_is_allowed():
+    h = VioHealth()
+    assert h.update(0.0, (0, 0, 0.8), var=4e-4)[0] and h.update(DT, (0.02, 0, 0.8), var=None)[0]
+
+
+def test_a_persistent_jump_sets_rebased_on_the_accepting_sample_only():
+    h = VioHealth()
+    walk(h, 0.0, 0.0, 30)
+    t = 30 * DT
+    flags = []
+    for k in range(10):
+        h.update(t + k * DT, (0.3 * (t + k * DT) + 1.5, 0.0, 0.8), var=4e-4)
+        flags.append(h.rebased)
+    assert sum(flags) == 1
+
+
 def test_the_bridge_constructs_it_with_its_arguments():
     VioHealth(max_speed_mps=5.0, jump_m=1.0, quiet_s=5.0)              # as onboard/vio/ev_bridge.py does

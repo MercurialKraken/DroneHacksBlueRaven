@@ -44,6 +44,16 @@ def test_take_off_releases_the_hold_after_release_s():
     assert out[-1] == ("i", False) and h.n["released"] == 1
 
 
+def test_land_detector_contact_engages_only_while_landing():
+    h = TouchdownHold()
+    descend(h, 0.0, [0.88, 0.85], ["a", "b"])
+    h.on_contact(0.3)
+    assert not h.active                                   # not landing: ignore the land detector
+    h.landing = True
+    h.on_contact(0.4)                                     # e.g. range stuck at a bad value on the floor
+    assert h.active and h.filter(0.5, "c") == ("b", True)
+
+
 def test_no_reference_means_no_hold():
     h = TouchdownHold()
     h.landing = True
