@@ -1,5 +1,17 @@
+# Python bytecode
 __pycache__/
+*.pyc
+
+# claude-com.sh bus state (per-machine)
+.claude-com-seen
+
+# pytest
 .pytest_cache/
+
+# a course map build that failed its sanity checks (kept for inspection, never committed)
+*.failed.npz
+
+# local environment and run data
+.venv/
 bags/
 *.tgz
-.venv/
