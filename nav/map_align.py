@@ -57,6 +57,10 @@ class AlignParams:
     # (T4, 13 bags: before the maze 5->6 turn, unproven +2.0-2.5 deg steps about a far origin turned 2-4 cm
     # into 10-11 cm along-track and stopped 4 runs at the real wall).
     yaw_min_gain: float = 0.10
+    # Weight points near the aircraft more (Hinson, devsim perturbed suite: a whole-view fit at the M2 tip used
+    # objects that had moved differently from the wall being passed). w *= 1 / (1 + (r / near_m)^2), r the
+    # horizontal range from the body. 0 = off.
+    near_m: float = 0.0
 
 
 @dataclass
@@ -69,6 +73,7 @@ class AlignResult:
     rms_after: float
     observable: np.ndarray        # bool (3,): which of x, y, yaw were corrected
     why: str = ""
+    theta: np.ndarray | None = None   # the full solution (in H's well-conditioned eigen-space), before per-axis gating
 
 
 def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, float],
@@ -95,6 +100,8 @@ def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, f
         ex, ey = P[m, 0] - pose[0], P[m, 1] - pose[1]
         J = np.stack([gx, gy, gx * (-ey) + gy * ex], axis=1)          # d(distance)/d(dx, dy, dyaw)
         w = np.where(np.abs(d) <= p.huber_m, 1.0, p.huber_m / np.maximum(np.abs(d), 1e-9))
+        if p.near_m > 0:
+            w = w / (1.0 + (ex * ex + ey * ey) / (p.near_m * p.near_m))
         H = (J * w[:, None]).T @ J
         b = (J * w[:, None]).T @ d
         if rms0 is None:
@@ -127,8 +134,8 @@ def align(course_map, pts_level: np.ndarray, prior: tuple[float, float, float, f
             delta[2] = 0.0
             obs = obs.copy(); obs[2] = False
     if not (rms1 <= p.max_rms_m):
-        return AlignResult(False, zero, H, int(m.sum()), rms0, rms1, obs, f"rms {rms1:.3f} > {p.max_rms_m}")
-    return AlignResult(True, delta, H, int(m.sum()), rms0, rms1, obs)
+        return AlignResult(False, zero, H, int(m.sum()), rms0, rms1, obs, f"rms {rms1:.3f} > {p.max_rms_m}", th.copy())
+    return AlignResult(True, delta, H, int(m.sum()), rms0, rms1, obs, "", th.copy())
 
 
 @dataclass

@@ -11,7 +11,7 @@ Also the time per frame on THIS machine (not the Jetson's).
 """
 from __future__ import annotations
 
-import argparse, math, struct, sys, time
+import argparse, struct, sys, time
 from pathlib import Path
 
 import numpy as np
