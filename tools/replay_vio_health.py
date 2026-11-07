@@ -1,46 +1,18 @@
-"""Replay a bag's cuVSLAM odometry through the old and the new onboard.vio.vio_health checks.
-Read-only, no ROS (numpy-free; zstandard for zstd bags).
+"""Replay a bag's cuVSLAM odometry through onboard.vio.vio_health.
+Read-only, no ROS (zstandard for zstd bags).
 
     python3 tools/replay_vio_health.py BAG.mcap [BAG2 ...]
 
-For each check: samples withheld, the longest stretch with nothing passed to PX4 (PX4 drops vision
-after EKF2_NOAID_TOUT = 1 s), and every stretch over 0.5 s.
+Reports samples withheld, the longest stretch with nothing passed to PX4 (PX4 drops vision after
+EKF2_NOAID_TOUT = 1 s), and every stretch over 0.5 s.
 """
 from __future__ import annotations
 
-import math, mmap, struct, sys
-from collections import deque
+import mmap, struct, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from onboard.vio.vio_health import VioHealth  # noqa: E402
-
-
-class LegacyVioHealth:
-    """The check as it was before this change (compares against the last sample, 10 s window, 5 s quiet)."""
-
-    def __init__(self, max_speed_mps=5.0, jump_m=1.0, window_s=10.0, max_jumps=1, quiet_s=5.0):
-        self.max_speed, self.jump_m, self.window_s, self.max_jumps, self.quiet_s = max_speed_mps, jump_m, window_s, max_jumps, quiet_s
-        self._last = None; self._events = deque(); self._last_bad_t = None
-
-    def update(self, t, pos):
-        bad = None
-        if self._last is not None:
-            t0, p0 = self._last; dt = t - t0; d = math.dist(p0, pos)
-            if dt <= 0: bad = "time"
-            elif d > self.jump_m: bad = "jump"
-            elif d / dt > self.max_speed: bad = "speed"
-        if self._last is None or t > self._last[0]:
-            self._last = (t, tuple(pos))
-        if bad:
-            self._last_bad_t = t; self._events.append(t)
-        while self._events and t - self._events[0] > self.window_s:
-            self._events.popleft()
-        if len(self._events) > self.max_jumps:
-            return False, "window"
-        if self._last_bad_t is not None and t - self._last_bad_t < self.quiet_s:
-            return False, "settling"
-        return True, "ok"
 
 
 def stream(path):
@@ -102,7 +74,7 @@ def main(argv=None):
     for bag in (argv or sys.argv[1:]):
         S = samples(bag)
         print(f"{Path(bag).name}: {len(S)} odometry samples, {S[0][0]:.1f}-{S[-1][0]:.1f} s")
-        for name, chk in (("old", LegacyVioHealth()), ("new", VioHealth())):
+        for name, chk in (("vio_health", VioHealth()),):
             w, gmax, long = run(chk, S)
             print(f"  {name}: withheld {w:4d}, longest stretch with nothing to PX4 {gmax:5.2f} s {'(PX4 would drop vision)' if gmax > 1.0 else ''}; stretches > 0.5 s: {long[:6]}")
 

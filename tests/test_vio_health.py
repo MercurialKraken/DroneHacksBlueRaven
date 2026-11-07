@@ -68,6 +68,5 @@ def test_non_finite_and_non_advancing_samples_are_withheld():
     assert h.update(10 * DT, (0.3 * 10 * DT, 0.0, 0.8))[0]
 
 
-def test_the_bridge_still_constructs_it_with_its_old_arguments():
-    VioHealth(max_speed_mps=5.0, jump_m=1.0, quiet_s=5.0)
-    VioHealth(max_speed_mps=5.0, jump_m=1.0, window_s=10.0, max_jumps=1, quiet_s=5.0)
+def test_the_bridge_constructs_it_with_its_arguments():
+    VioHealth(max_speed_mps=5.0, jump_m=1.0, quiet_s=5.0)              # as onboard/vio/ev_bridge.py does

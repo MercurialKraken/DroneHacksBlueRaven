@@ -28,9 +28,7 @@ if TYPE_CHECKING:
 
 class VioHealth:
     def __init__(self, *, max_speed_mps: float = 5.0, jump_m: float = 1.0, persist_s: float = 0.3,
-                 burst_n: int = 2, burst_s: float = 1.0, quiet_s: float = 5.0,
-                 window_s: float | None = None, max_jumps: int | None = None) -> None:
-        # window_s / max_jumps: the old parameters, accepted so existing configs still load (unused)
+                 burst_n: int = 2, burst_s: float = 1.0, quiet_s: float = 5.0) -> None:
         self.max_speed = float(max_speed_mps)
         self.jump_m = float(jump_m)
         self.persist_s = float(persist_s)

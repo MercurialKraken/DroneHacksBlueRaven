@@ -8,8 +8,11 @@ the EKF dead-reckon away, so PX4 never confirmed the landing.
 Only while `landing` is true (the bridge sets it from PX4's nav_state == AUTO_LAND) and the downward
 rangefinder reads below `engage_m`, the bridge publishes
 the LAST pose seen while the range was still at or above `ref_m`, instead of each new vision pose, with
-its variance raised by `hold_var`. The drone is nearly stationary in xy on the way down, so the held pose
-stays close to the truth and keeps the EKF anchored in x, y, z and yaw. The hold ends when the range has
+its x/y variance raised by `hold_var` and its z variance by `hold_z_var` (the held height is the height at
+ref_m, so it must not be used; the starter EKF2_EV_CTRL=9 does not fuse EV height anyway, which comes from
+the rangefinder). The drone is nearly stationary in xy on the way down, so the held pose stays close to
+the truth and keeps the EKF anchored in x, y and yaw, also when the camera freezes over the pad (FlyX
+run_005: EKF diverged after landing while vision was frozen, and PX4 never confirmed the landing). The hold ends when the range has
 been above `release_m` for `release_s` (a take-off, e.g. the return leg).
 
 The landing gate matters: cruise is at ~0.8 m and the range dips below 0.6-0.7 m over obstacles, so a
@@ -30,7 +33,8 @@ class TouchdownHold:
     ref_m: float = 0.8
     release_m: float = 0.9                  # above cruise height (~0.8-0.89 m) so it cannot flap in flight
     release_s: float = 0.3
-    hold_var: float = 0.01                  # m^2 added to the position variance while holding
+    hold_var: float = 0.01                  # m^2 added to the x/y variance while holding
+    hold_z_var: float = 100.0               # m^2 added to z: the held height is from ref_m, not the floor
     active: bool = False
     landing: bool = False                    # set by the caller: PX4 is in AUTO_LAND
     _ref: Any = None                         # (t, sample) last seen with range >= ref_m
