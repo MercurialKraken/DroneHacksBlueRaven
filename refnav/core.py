@@ -32,7 +32,7 @@ Safety behaviour (each one is a test in tests/test_refnav_core.py):
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -86,7 +86,7 @@ class Params:
     land_timeout_s: float = 60.0
     stall_s: float = 45.0                       # no progress along the path this long: land
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
-    a_lat_mps2: float = 0.5
+    a_lat_mps2: float = 0.25                    # sideways acceleration in turns: PX4 lags tighter ones and cuts the corner
     look_min_m: float = 0.3                     # lookahead at rest; it grows by look_s per m/s made while on track
     look_s: float = 1.5
     look_max_m: float = 1.2
@@ -200,6 +200,8 @@ class Mission:
         self.best_s: float = 0.0                    # furthest the aircraft has come along the path
         self.t_best: float = 0.0                    # when that was
         self.follower: F.Follower | None = None
+        self.corr: F.SE2 = F.SE2()                  # map-based drift correction of PX4's estimate (identity until one arrives)
+        self.corr_t: float | None = None
         self.cmd: F.Command | None = None
 
     def request_land(self, why: str = "requested") -> None:
@@ -217,6 +219,14 @@ class Mission:
             self.depth_ready_since = None
 
     # ------------------------------------------------------------------ inputs
+    def on_correction(self, t: float, x: float, y: float, yaw: float) -> None:
+        """A drift correction of PX4's estimate in its local NED frame. The latest one holds until replaced."""
+        self.corr, self.corr_t = F.SE2(x, y, yaw), t
+
+    def _corrected(self, v: Vehicle) -> Vehicle:
+        n, e = self.corr.point(v.pos[0], v.pos[1])
+        return replace(v, pos=(n, e, v.pos[2]), heading=float(F.wrap(v.heading + self.corr.yaw)), vel=self.corr.vector(*v.vel))
+
     def on_health(self, t: float, ok: bool) -> None:
         self.health.on_msg(t, ok)
 
@@ -466,13 +476,14 @@ class Mission:
             self.s_limit = fol.s_hat + free - (p.stop_m if obstacle else 0.0)
         return self.blocked_frames >= p.confirm_frames
 
-    def _follow(self, now: float, dt: float, out: Output, v: Vehicle) -> None:
-        p, fol = self.p, self.follower
+    def _follow(self, now: float, dt: float, out: Output, raw: Vehicle) -> None:
+        """The path lives in the corrected frame; what goes to PX4 is mapped back into its own estimate's frame."""
+        p, fol, v, back = self.p, self.follower, self._corrected(raw), self.corr.inverse()
         if not self.depth_fresh(now):
             self.s_limit = fol.s_ref                         # no live evidence: the reference waits
         elif self._judge_depth(v):
             self.counts["obstacle_stops"] += 1
-            self.sp[0], self.sp[1] = v.pos[0], v.pos[1]
+            self.sp[0], self.sp[1] = raw.pos[0], raw.pos[1]
             self._land(now, out, f"route blocked: obstacle {self.last_clearance:.2f} m ahead at {fol.s_hat:.1f} m along the path")
             return
         if self.s_limit <= fol.s_ref:
@@ -480,9 +491,9 @@ class Mission:
         doubt = (v.eph - p.eph_ok_m) / (p.eph_stop_m - p.eph_ok_m)
         self.cmd = fol.step((v.pos[0], v.pos[1]), v.vel, v.heading, dt, self.s_limit, doubt)
         before = self.sp[3]
-        self._slew_yaw(self.cmd.yaw, dt)
-        self.sp[0], self.sp[1] = self.cmd.pos
-        out.velocity, out.accel = self.cmd.vel, self.cmd.acc
+        self._slew_yaw(self.cmd.yaw - self.corr.yaw, dt)
+        self.sp[0], self.sp[1] = back.point(*self.cmd.pos)
+        out.velocity, out.accel = back.vector(*self.cmd.vel), back.vector(*self.cmd.acc)
         out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
         if fol.s_hat > self.best_s + 0.1:
             self.best_s, self.t_best = fol.s_hat, now
@@ -499,7 +510,7 @@ class Mission:
     def status(self, now: float) -> dict[str, Any]:
         return {"phase": self.phase, "why": self.why, "result": self.result, "started_t": self.t_started,
                 "points": len(self.targets), "points_passed": self.follower.points_passed if self.follower else 0,
-                "home": self.home,
+                "home": self.home, "correction_age_s": None if self.corr_t is None else round(now - self.corr_t, 2),
                 "targets": [list(t) for t in self.targets], "setpoint": list(self.sp) if self.sp else None,
                 "clearance_m": (None if self.last_clearance is None or math.isinf(self.last_clearance)
                                 else round(self.last_clearance, 2)),
@@ -514,7 +525,7 @@ class Mission:
             return {}
         fol, c = self.follower, self.cmd
         st = {"path": fol.path.downsample(0.1), "path_len": round(fol.path.length, 2), "s_ref": round(fol.s_ref, 2),
-              "s_hat": round(fol.s_hat, 2)}
+              "s_hat": round(fol.s_hat, 2), "correction": [round(self.corr.x, 3), round(self.corr.y, 3), round(self.corr.yaw, 4)]}
         if c is not None:
             st.update(xtrack=round(c.xtrack, 3), scale=round(c.scale, 2), lead=round(c.lead, 2), yaw_cmd=round(c.yaw, 3),
                       look=[round(c.look[0], 3), round(c.look[1], 3)])

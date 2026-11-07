@@ -193,7 +193,7 @@ def test_health_gap_restarts_the_quiet_window() -> None:
 
 def test_no_translation_without_live_depth_and_landing_when_it_stays_silent() -> None:
     # depth stops at t = 14 s (mid-route): the reference freezes, then the aircraft lands
-    m, px4, log = fly(C.Params(route=[(6.0, 0.0)], speed_mps=0.5), depth_on=lambda t: t < 14.0)
+    m, px4, log = fly(C.Params(route=[(12.0, 0.0)], speed_mps=0.5), depth_on=lambda t: t < 14.0)
     assert m.result.startswith("landed: depth silent"), m.result
     pos_at_cut = [pos for t, p, s, c, pos in log if abs(t - 14.6) < 0.026][0]
     before_land = [pos for t, p, s, c, pos in log if p == "follow" and t > 15.0]

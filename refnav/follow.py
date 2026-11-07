@@ -17,6 +17,7 @@ STEP_M = 0.02           # path sample spacing
 MIN_SPEED = 0.05        # the reference creeps at least this fast when allowed to move, so v=0 samples never stall it
 PROJECT_BACK_M = 0.25   # the aircraft is matched to the path only this far behind its last match...
 PROJECT_AHEAD_M = 0.25  # ...or ahead of the reference, so a U-turn never jumps to the parallel corridor
+LEAD_M = 0.03           # the reference stays at least this far ahead; more would feed PX4 speed it was not planned
 
 
 def wrap(a):
@@ -25,6 +26,26 @@ def wrap(a):
 
 def clamp01(x: float) -> float:
     return min(1.0, max(0.0, x))
+
+
+@dataclass(frozen=True)
+class SE2:
+    """A planar correction in NED: p' = R(yaw) p + (x, y), yaw positive clockwise from north like PX4's heading."""
+    x: float = 0.0
+    y: float = 0.0
+    yaw: float = 0.0
+
+    def vector(self, n: float, e: float) -> tuple[float, float]:
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        return c * n - s * e, s * n + c * e
+
+    def point(self, n: float, e: float) -> tuple[float, float]:
+        rn, re = self.vector(n, e)
+        return rn + self.x, re + self.y
+
+    def inverse(self) -> SE2:
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        return SE2(-(c * self.x + s * self.y), -(-s * self.x + c * self.y), -self.yaw)
 
 
 @dataclass
@@ -207,11 +228,11 @@ class Follower:
         v_cap = math.sqrt(2.0 * L.accel * max(s_limit - self.s_ref, 0.0)) if math.isfinite(s_limit) else math.inf
         i = int(P.index(self.s_ref))
         speed = min(max(float(self.v[i]), MIN_SPEED), v_cap) * scale
-        s_new = min(self.s_ref + speed * dt, self.s_hat + lead / 2.0 + STEP_M, s_limit, P.length)
-        if not at_corner:
-            s_new = min(s_new, corner)
-        # never behind the aircraft: pulling it back to a stalled reference flies a loop
-        self.s_ref = max(self.s_ref, s_new, min(self.s_hat, s_limit))
+        gate = math.inf if at_corner and scale > 0.0 else corner      # a sharp corner is passed only once faced
+        s_new = min(self.s_ref + speed * dt, self.s_hat + lead / 2.0 + STEP_M, s_limit, P.length, gate)
+        # always ahead of the aircraft: a reference it overruns pulls it back and flies a loop
+        ahead = self.s_hat + LEAD_M
+        self.s_ref = max(self.s_ref, s_new, min(ahead, s_limit, P.length, gate))
 
         i = int(P.index(self.s_ref))
         j = min(i + 1, len(self.v) - 1)

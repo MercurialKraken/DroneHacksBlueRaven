@@ -117,6 +117,10 @@ class RefNav(Node):
         self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
         self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
         self.create_subscription(Bool, self.health_topic, self._on_health, 10)
+        correction = self.declare_parameter("correction_topic", "/blueraven/odom_correction").value
+        if correction:
+            from geometry_msgs.msg import PoseStamped
+            self.create_subscription(PoseStamped, correction, self._on_correction, 10)
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
         self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         if control:
@@ -169,6 +173,11 @@ class RefNav(Node):
 
     def _on_health(self, m: Bool) -> None:
         self.mission.on_health(self._now(), m.data)
+
+    def _on_correction(self, m) -> None:
+        q = m.pose.orientation              # a rotation about NED down: PX4's heading sense
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.mission.on_correction(self._now(), m.pose.position.x, m.pose.position.y, yaw)
 
     def _on_info(self, m: CameraInfo) -> None:
         if m.k[0] > 0 and m.k[4] > 0:

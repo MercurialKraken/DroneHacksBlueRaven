@@ -125,8 +125,22 @@ def test_the_reference_never_falls_behind_the_aircraft() -> None:
     fol = _follower(path)
     fol.s_ref, fol.s_hat = 0.8, 0.9                             # the aircraft has overrun a slow reference
     fol.step((1.0, 0.0), (0.4, 0.0), math.pi / 2, 0.05, math.inf)    # facing away: the reference would not move
-    assert fol.s_ref >= 1.0 - F.STEP_M
+    assert fol.s_ref >= 1.0 + F.LEAD_M - F.STEP_M
     fol2 = _follower(path)
     fol2.s_ref, fol2.s_hat = 0.4, 0.9
     fol2.step((1.0, 0.0), (0.4, 0.0), math.pi / 2, 0.05, 0.5)  # ...but never into space depth has not seen
     assert fol2.s_ref <= 0.5 + 1e-9
+
+
+def test_se2_correction_round_trips() -> None:
+    c = F.SE2(0.3, -0.2, math.radians(5))
+    n, e = c.inverse().point(*c.point(1.2, -0.7))
+    assert (n, e) == pytest.approx((1.2, -0.7))
+    assert c.vector(1.0, 0.0) == pytest.approx((math.cos(math.radians(5)), math.sin(math.radians(5))))
+
+
+def test_a_drift_correction_moves_the_flown_track_not_the_path() -> None:
+    """PX4 believes it is 0.3 m west of where the map says: the aircraft must fly the route 0.3 m west in PX4's frame."""
+    m, px4, log = fly(C.Params(route=ROUTE), on_tick=lambda t, m: m.on_correction(t, 0.0, 0.3, 0.0))
+    assert m.result == "complete", (m.result, m.why)
+    assert px4.pos[1] == pytest.approx(-3.0 - 0.3, abs=0.15)
