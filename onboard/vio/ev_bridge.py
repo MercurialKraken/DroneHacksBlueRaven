@@ -125,7 +125,10 @@ class EvBridge(Node):
                 self.ok=False;self.reason='proving sole vision ownership';self.counts['unowned']+=1;return
             (pos,quat,pose_cov),_=self.hold.filter(capture*1e-6,None)
             pose_cov=list(pose_cov);vel=None;ang=None;twist_cov=None
-            for i in (0,7,14):pose_cov[i]=max(pose_cov[i],0.)+self.hold.hold_var
+            for i in (0,7):pose_cov[i]=max(pose_cov[i],0.)+self.hold.hold_var
+            # the held z is the height at ref_m, not on the floor: make it worthless so PX4 never pulls height
+            # from it (the starter EKF2_EV_CTRL=9 fuses EV horizontal position + yaw only; this covers other configs)
+            pose_cov[14]=max(pose_cov[14],0.)+self.hold.hold_z_var
             self.ok,self.reason=True,'touchdown hold'
             self.counts['held']=self.counts.get('held',0)+1
         else:

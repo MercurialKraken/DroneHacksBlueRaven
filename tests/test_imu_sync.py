@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from onboard.slam.imu_sync import ImuFrameSync, legacy_release  # noqa: E402
+from onboard.slam.imu_sync import ImuFrameSync  # noqa: E402
 
 IMU_HZ, CAM_HZ = 460.0, 15.0
 NS = 1_000_000_000
@@ -48,19 +48,6 @@ def run_sync(events, wait_s=0.08):
     return s, out
 
 
-def run_legacy(events):
-    q, last_f, last_i, dropped, frames = [], -1, -1, 0, 0
-    for _, kind, t in events:
-        if kind == "imu":
-            q.append((t, None, None))
-        elif t > last_f:
-            reg, q, d, last_i = legacy_release(q, t, last_f, last_i)
-            dropped += d
-            last_f = t
-            frames += 1
-    return dropped, frames
-
-
 def test_steady_streams_lose_nothing_and_never_wait():
     ev = arrivals(10.0)
     s, out = run_sync(ev)
@@ -74,10 +61,9 @@ def test_steady_streams_lose_nothing_and_never_wait():
         prev = r.t_ns
 
 
-def test_a_stall_that_delivers_images_first_drops_imu_in_the_old_code_but_not_here():
+def test_a_stall_that_delivers_images_first_loses_no_imu():
+    # the T4 failure mode: tracking each image at once dropped ~1.2 s x 460 Hz of IMU here
     ev = arrivals(10.0, stall_at=5.0, stall_s=1.2, images_first=True)
-    legacy_dropped, _ = run_legacy(ev)
-    assert legacy_dropped > 400                       # about 1.2 s x 460 Hz: the T4 failure mode
     s, out = run_sync(ev)
     assert s.n["imu_late"] == 0
     assert s.n["frames_timeout"] == 0                 # the backlog's IMU arrives right behind its images
@@ -85,9 +71,8 @@ def test_a_stall_that_delivers_images_first_drops_imu_in_the_old_code_but_not_he
     assert [r.t_ns for r in out] == cam               # nothing lost, still in order
 
 
-def test_imu_first_after_a_stall_is_fine_in_both():
+def test_imu_first_after_a_stall_is_fine():
     ev = arrivals(10.0, stall_at=5.0, stall_s=1.2, images_first=False)
-    assert run_legacy(ev)[0] == 0
     s, _ = run_sync(ev)
     assert s.n["imu_late"] == 0
 

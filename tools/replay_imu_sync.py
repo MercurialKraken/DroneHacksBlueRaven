@@ -1,5 +1,5 @@
-"""Replay a bag's IMU and stereo stamps through the old and the new IMU/frame pairing, with an injected
-executor stall, and count lost IMU. No ROS, no cuVSLAM; needs numpy (and zstandard for zstd bags).
+"""Replay a bag's IMU and stereo stamps through onboard.slam.imu_sync with an injected executor stall,
+and count lost IMU. No ROS, no cuVSLAM (zstandard for zstd bags).
 
     python3 tools/replay_imu_sync.py BAG.mcap --stall-at 80 --stall 1.2 [--images-first]
 
@@ -13,7 +13,7 @@ import argparse, mmap, struct, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from onboard.slam.imu_sync import ImuFrameSync, legacy_release  # noqa: E402
+from onboard.slam.imu_sync import ImuFrameSync  # noqa: E402
 
 TOPICS = {"/stereo/imu": "imu", "/stereo/left/image": "l", "/stereo/right/image": "r"}
 
@@ -72,12 +72,6 @@ def main(argv=None):
     held.sort(key=lambda e: (e[1] == "cam") if a.imu_first else (e[1] != "cam"))
     order = before + [(end, k, t) for _, k, t in held] + after
 
-    q, lf, li, legacy_drop, legacy_frames = [], -1, -1, 0, 0
-    for _, kind, t in order:
-        if kind == "imu":
-            q.append((t, None, None))
-        elif t > lf:
-            _, q, d, li = legacy_release(q, t, lf, li); legacy_drop += d; lf = t; legacy_frames += 1
     s = ImuFrameSync(wait_s=a.wait); frames = 0
     for now, kind, t in order:
         if kind == "imu":
@@ -89,10 +83,9 @@ def main(argv=None):
     n_imu = sum(1 for e in ev if e[1] == "imu"); n_cam = sum(1 for e in ev if e[1] == "cam")
     print(f"bag: {n_imu} IMU, {n_cam} stereo pairs; stall {a.stall} s at {a.stall_at} s, backlog {'IMU' if a.imu_first else 'images'} first; "
           f"{sum(1 for e in held if e[1] == 'imu')} IMU and {sum(1 for e in held if e[1] == 'cam')} pairs held")
-    print(f"old pairing: {legacy_drop} IMU dropped, {legacy_frames} frames tracked")
-    print(f"new pairing: {s.n['imu_late']} IMU late, {frames} frames tracked, {s.n['frames_timeout']} timeouts, "
+    print(f"pairing: {s.n['imu_late']} IMU late, {frames} frames tracked, {s.n['frames_timeout']} timeouts, "
           f"{s.n['frames_waited']} frames waited, {s.n['frames_overflow']} frames overflowed")
-    return legacy_drop, s.n["imu_late"]
+    return s.n["imu_late"]
 
 
 if __name__ == "__main__":
