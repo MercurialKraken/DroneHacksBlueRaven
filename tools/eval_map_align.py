@@ -65,12 +65,17 @@ def main(argv=None):
     ap.add_argument("--field", default=None, help="SDF field to align to (default: AlignParams.field)")
     ap.add_argument("--method", choices=("align", "mcl"), default="align", help="DriftCorrector or the particle filter")
     ap.add_argument("--mcl", nargs="*", default=[], help="MclParams overrides, e.g. points_per_dof=75 walk_xy=0.01")
+    ap.add_argument("--align", nargs="*", default=[], help="AlignParams/CorrectorParams overrides, e.g. yaw_min_gain=0")
     a = ap.parse_args(argv)
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     L = load_launch(ROOT / "maps" / "course.yaml", a.launch_key)
     start = SE2(L["x"], L["y"], math.radians(L["yaw_deg"] - 90.0))
     from nav.map_align import AlignParams, CorrectorParams
     cp = CorrectorParams(align=AlignParams(field=a.field) if a.field else AlignParams())
+    for kv in a.align:
+        k, v = kv.split("=", 1)
+        tgt = cp.align if hasattr(cp.align, k) else cp
+        setattr(tgt, k, type(getattr(tgt, k))(v))
     if a.method == "mcl":
         from nav.map_mcl import MclParams, ParticleCorrector
         mp = MclParams(field=a.field) if a.field else MclParams()
