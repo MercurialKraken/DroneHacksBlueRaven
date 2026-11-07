@@ -12,13 +12,13 @@ replay of recorded data and the aircraft differ only in their launch files):
   health       std_msgs/Bool, true = the estimator feeding PX4 is healthy (topic by parameter)
   PX4          /fmu/out/{vehicle_local_position_v1, vehicle_attitude, vehicle_status_v1}
                in; /fmu/in/{offboard_control_mode, trajectory_setpoint, vehicle_command} out
-  status       /refnav/status (status_topic; std_msgs/String, JSON): phase, why, leg, counters, the
+  status       /refnav/status (status_topic; std_msgs/String, JSON): phase, why, points_passed, counters, the
                latest depth refusal - what a grader, the interactive runtime or an operator reads;
                the node itself never reads simulator truth
   control      optional (control_topic): std_msgs/String JSON {"run_id", "request": "land"} from the
                interactive runtime; a request for this run_id goes through the mission's own landing
 
-Run:  python3 -m refnav.node --ros-args -p route_file:=scenarios/<x>.json -p depth_topic:=... \
+Run:  python3 -m refnav.node --ros-args -p route_file:=route.json -p depth_topic:=... \
           -p use_sim_time:=true
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -44,8 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from typing import Any, NoReturn
 
-    from px4_msgs.msg import (EstimatorStatusFlags, VehicleAttitude, VehicleLandDetected,
-                              VehicleLocalPosition, VehicleStatus)
+    from px4_msgs.msg import EstimatorStatusFlags, VehicleAttitude, VehicleLocalPosition, VehicleStatus
 
 # PX4's uXRCE-DDS endpoints are BEST_EFFORT + TRANSIENT_LOCAL; a different durability never matches
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -54,31 +54,55 @@ CMD_SET_MODE, CMD_ARM, CMD_LAND = 176, 400, 21
 PX4_MAIN_MODE_OFFBOARD = 6
 
 
-def load_route(node: Node) -> tuple[list[tuple[float, float]], dict[str, Any]]:
+def load_route(node: Node) -> dict[str, Any] | list:
+    """The route file's document, or a bare point list from the route parameter."""
     path = node.declare_parameter("route_file", "").value
     flat = list(node.declare_parameter("route", [0.0]).value)
     if path:
         with open(path) as f:
-            doc = json.load(f)
-        pts = doc["route"] if isinstance(doc, dict) else doc
-        return [(float(a), float(b)) for a, b in pts], doc if isinstance(doc, dict) else {}
+            return json.load(f)
     if len(flat) >= 2 and len(flat) % 2 == 0:
-        return [(float(flat[i]), float(flat[i + 1])) for i in range(0, len(flat), 2)], {}
+        return [(float(flat[i]), float(flat[i + 1])) for i in range(0, len(flat), 2)]
     raise SystemExit("refnav: give route_file:=<json> or route:=[f1,l1,f2,l2,...] (forward/left metres)")
 
 
 class RefNav(Node):
+    def _map_builder(self, prm: C.Params):
+        """With the course map: the route as an elastic band kept clear of the map. Without: plain arcs."""
+        root = Path(__file__).resolve().parents[1]
+        path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
+        course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value
+        key = self.declare_parameter("launch_key", "launch_sim").value      # the real course: launch
+        margin = float(self.declare_parameter("map_margin_m", 0.20).value)
+        shift = float(self.declare_parameter("map_max_shift_m", 0.3).value)
+        if not path:
+            return None
+        from nav.course_map import CourseMap
+        from nav.frames import load_launch
+
+        from . import map_route
+        try:
+            cm, launch = CourseMap.load(path), load_launch(course, key)
+        except (OSError, KeyError, ValueError) as e:
+            self.get_logger().warn(f"no course map ({e}): the route is flown as plain arcs")
+            return None
+        clear = map_route.DRONE_RADIUS_M + margin
+        self.get_logger().info(f"course map {path}, launch {key}: the path keeps {clear:.2f} m clear where it fits")
+        return map_route.builder(cm, launch, prm.height_m + launch["z"], clear, shift)
+
     def __init__(self) -> None:
         super().__init__("refnav")
-        route, doc = load_route(self)
-        prm = C.Params(route=route)
-        for k, v in vars(C.Params()).items():
-            if k == "route":
-                continue
-            default = doc.get("params", {}).get(k, v)
-            val = self.declare_parameter(k, default).value
-            setattr(prm, k, type(v)(val))
-        self.mission: C.Mission = C.Mission(prm)
+        doc = load_route(self)
+        try:
+            # the route file's params are the defaults; this node's parameters (flight.yaml, -p) win
+            prm, unknown = C.params_from_doc(doc)
+            prm, _ = C.params_from_doc(doc, {k: self.declare_parameter(k, v).value
+                                             for k, v in vars(prm).items() if k != "route"})
+        except ValueError as e:
+            raise SystemExit(f"refnav: {e}") from None
+        if unknown:
+            self.get_logger().warn(f"route file params not used by this mission: {', '.join(unknown)}")
+        self.mission: C.Mission = C.Mission(prm, self._map_builder(prm))
         self.depth_topic: str = self.declare_parameter("depth_topic", "/camera/depth/image_raw").value
         info = self.declare_parameter("depth_info_topic", "").value
         self.info_topic: str = info or self.depth_topic.rsplit("/", 1)[0] + "/camera_info"
@@ -97,8 +121,8 @@ class RefNav(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        from px4_msgs.msg import (EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint, VehicleAttitude,
-                                  VehicleCommand, VehicleLandDetected, VehicleLocalPosition, VehicleStatus)
+        from px4_msgs.msg import (DistanceSensor, EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint,
+                                  VehicleAttitude, VehicleCommand, VehicleLocalPosition, VehicleStatus)
         self._OCM, self._TSP, self._CMD = OffboardControlMode, TrajectorySetpoint, VehicleCommand
         self.pub_ocm = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", PX4_QOS)
         self.pub_sp = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", PX4_QOS)
@@ -110,10 +134,14 @@ class RefNav(Node):
         self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1", self._on_lpos, PX4_QOS)
         self.create_subscription(VehicleAttitude, "/fmu/out/vehicle_attitude", self._on_att, PX4_QOS)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self._on_status, PX4_QOS)
-        self.create_subscription(VehicleLandDetected, "/fmu/out/vehicle_land_detected", self._on_land, PX4_QOS)
+        self.create_subscription(DistanceSensor, "/fmu/out/distance_sensor", self._on_range, PX4_QOS)
         self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
         self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
         self.create_subscription(Bool, self.health_topic, self._on_health, 10)
+        correction = self.declare_parameter("correction_topic", "/blueraven/odom_correction").value
+        if correction:
+            from geometry_msgs.msg import PoseStamped
+            self.create_subscription(PoseStamped, correction, self._on_correction, 10)
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
         self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         if control:
@@ -129,7 +157,7 @@ class RefNav(Node):
         self._wait_log_t: float | None = None
         self.create_timer(0.05, self._tick)            # node clock: pauses with a paused simulator
         self.create_timer(0.5, self._publish_status)
-        self.get_logger().info(f"route {len(route)} legs; depth {self.depth_topic}; health {self.health_topic}; "
+        self.get_logger().info(f"route {len(prm.route)} points; depth {self.depth_topic}; health {self.health_topic}; "
                                f"sim time {self.get_parameter('use_sim_time').value}")
 
     # ------------------------------------------------------------------ inputs
@@ -142,6 +170,8 @@ class RefNav(Node):
     def _on_lpos(self, m: VehicleLocalPosition) -> None:
         self.v.pos = (m.x, m.y, m.z)
         self.v.heading = m.heading
+        self.v.vel = (m.vx, m.vy) if m.v_xy_valid else (0.0, 0.0)
+        self.v.eph = float(m.eph)
         # heading: PX4's heading_good_for_control, OR its own yaw alignment. With a COMPASS, PX4 sets
         # heading_good_for_control only after re-aligning the heading in flight above 1.5 m (ekf.h
         # isYawFinalAlignComplete: ground magnetic anomalies), so a compass aircraft would wait on the
@@ -159,11 +189,16 @@ class RefNav(Node):
         self.v.armed = m.arming_state == 2
         self.v.nav_state = int(m.nav_state)
 
-    def _on_land(self, m: VehicleLandDetected) -> None:
-        self.v.landed = bool(m.landed)
+    def _on_range(self, m) -> None:
+        # signal_quality 0 is a reported failure; -1 (unknown) is what the sim reports, including 0.0 on the floor
+        self.v.range_m = float(m.current_distance) if m.signal_quality != 0 else None
 
     def _on_health(self, m: Bool) -> None:
         self.mission.on_health(self._now(), m.data)
+
+    def _on_correction(self, m) -> None:
+        q = m.pose.orientation              # a rotation about NED down: PX4's heading sense
+        self.mission.on_correction(self._now(), m.pose.position.x, m.pose.position.y, D.quat_yaw(q.w, q.x, q.y, q.z))
 
     def _on_info(self, m: CameraInfo) -> None:
         if m.k[0] > 0 and m.k[4] > 0:
@@ -263,9 +298,10 @@ class RefNav(Node):
             s = self._TSP()
             s.timestamp = o.timestamp
             s.position = [float(c) for c in out.setpoint[:3]]
-            s.velocity = [math.nan] * 3
-            s.acceleration = [math.nan] * 3
+            s.velocity = [float(out.velocity[0]), float(out.velocity[1]), math.nan] if out.velocity else [math.nan] * 3
+            s.acceleration = [float(out.accel[0]), float(out.accel[1]), math.nan] if out.accel else [math.nan] * 3
             s.yaw = float(out.setpoint[3])
+            s.yawspeed = float(out.yawspeed) if out.yawspeed is not None else math.nan
             self.pub_sp.publish(s)
         for c in out.commands:
             if c == "offboard":
@@ -276,6 +312,8 @@ class RefNav(Node):
                 self._command(CMD_LAND)
             elif c == "disarm":
                 self._command(CMD_ARM, 0.0)                 # param2 0: PX4 refuses it in the air
+            elif c == "disarm_force":
+                self._command(CMD_ARM, 0.0, 21196.0)        # only ever sent once the rangefinder shows touchdown
         if out.phase == "done" and self.done_at is None:
             self.done_at = now
             self.get_logger().info(f"mission done: {self.mission.result}")

@@ -8,3 +8,4 @@
     base_frame: base_link
     control_topic: /refnav/control
     status_topic: /refnav/status
+    yaw_rate_dps: 45.0   # faster turns broke cuVSLAM tracking near walls

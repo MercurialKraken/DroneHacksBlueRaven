@@ -10,3 +10,8 @@ __pycache__/
 
 # a course map build that failed its sanity checks (kept for inspection, never committed)
 *.failed.npz
+
+# local environment and run data
+.venv/
+bags/
+*.tgz
