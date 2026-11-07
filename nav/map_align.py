@@ -174,7 +174,7 @@ class CorrectorParams:
     max_rate_yaw: float = math.radians(3.0)
     max_jump_xy: float = 0.5      # a single measurement further than this is ignored (likely a wrong match)
     max_jump_yaw: float = math.radians(10.0)
-    max_total_yaw: float = math.radians(12.0)   # the correction's yaw never exceeds this (raw drift seen: up to 9 deg)
+    max_total_yaw: float = math.radians(20.0)   # the correction's yaw never exceeds this (raw drift seen: 11.9 deg on speedprof_154800Z)
     # The fits' heading accuracy floor is ~1.2-1.5 deg rms (T4, 10 truth bags), worse than a good raw heading
     # (0.3-0.7 deg). So yaw follows only a sustained innovation beyond yaw_deadband, and slowly.
     tau_yaw_s: float = 8.0
