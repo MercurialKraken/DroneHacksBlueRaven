@@ -64,6 +64,7 @@ def main(argv=None):
     ap.add_argument("bag"); ap.add_argument("--launch-key", default="launch_sim"); ap.add_argument("--every", type=int, default=3)
     ap.add_argument("--field", default=None, help="SDF field to align to (default: AlignParams.field)")
     ap.add_argument("--method", choices=("align", "mcl"), default="align", help="DriftCorrector or the particle filter")
+    ap.add_argument("--mcl", nargs="*", default=[], help="MclParams overrides, e.g. points_per_dof=75 walk_xy=0.01")
     a = ap.parse_args(argv)
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     L = load_launch(ROOT / "maps" / "course.yaml", a.launch_key)
@@ -72,8 +73,12 @@ def main(argv=None):
     cp = CorrectorParams(align=AlignParams(field=a.field) if a.field else AlignParams())
     if a.method == "mcl":
         from nav.map_mcl import MclParams, ParticleCorrector
-        dc = ParticleCorrector(cm, start, MclParams(field=a.field) if a.field else MclParams())
-        print(f"method: particle filter, field {dc.p.field}, {dc.p.n} particles")
+        mp = MclParams(field=a.field) if a.field else MclParams()
+        for kv in a.mcl:
+            k, v = kv.split("=", 1)
+            setattr(mp, k, type(getattr(mp, k))(v))
+        dc = ParticleCorrector(cm, start, mp)
+        print(f"method: particle filter, field {dc.p.field}, {dc.p.n} particles, overrides {a.mcl}")
     else:
         dc = DriftCorrector(cm, start, cp)
         print(f"method: align, field: {cp.align.field}")

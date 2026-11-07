@@ -34,11 +34,13 @@ class MclParams:
     max_points: int = 150
     init_xy_m: float = 0.05
     init_yaw_deg: float = 1.0
-    walk_xy: float = 0.03            # m per sqrt(s)
-    walk_yaw_deg: float = 0.4        # deg per sqrt(s)
+    # tuned on 5 T4 truth bags (2026-11-07); the first guesses (walk 0.03 m and 0.4 deg per sqrt(s), trunc 0.20,
+    # points_per_dof 25) collapsed the weights (resampling on ~40% of frames) and were worse than raw
+    walk_xy: float = 0.01            # m per sqrt(s)
+    walk_yaw_deg: float = 0.35       # deg per sqrt(s): heading drift reaches ~9 deg in a minute, so keep it free
     sigma_m: float = 0.05            # per-point measurement noise
-    trunc_m: float = 0.20            # a point further than this from any wall costs the same as at 0.20
-    points_per_dof: float = 25.0     # tempering: n points count as n / points_per_dof independent ones
+    trunc_m: float = 0.12            # a point further than this from any wall costs the same as at trunc_m
+    points_per_dof: float = 150.0    # tempering: n points count as n / points_per_dof independent ones
     min_points: int = 60
     min_explained: float = 0.35      # best particle must put this share of points within sigma*2 of a wall
     max_rate_xy: float = 0.15        # output rate limits (m/s, deg/s)
