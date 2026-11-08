@@ -148,6 +148,45 @@ class XYIntegral:
         return c * self.f - s * self.r, s * self.f + c * self.r
 
 
+class PushEstimator:
+    """A steady push learned from the VELOCITY shortfall (params.push_tau_s > 0), and cancelled.
+
+    Each tick: the velocity refnav last SENT, passed through PX4's response (first order, lag_s), is what the drone
+    should be doing; the measured velocity minus that is the push. Low-passed over tau_s in the BODY frame (a push
+    fixed to the airframe turns with it), bounded, and subtracted from the next twist. Unlike an integral of the
+    POSITION error (XYIntegral: it adds phase lag inside the position loop and orbited on the T4's ~2 s response,
+    t9r5), this estimate does not feed on the position error, so it leaves the P loop's stability alone; a mismatched
+    lag model only leaks transient error, which tau_s filters. Learns in the hold and in follow; reset otherwise."""
+
+    def __init__(self) -> None:
+        self.f, self.r = 0.0, 0.0                     # the estimate, body (forward, right) m/s
+        self.exp: tuple[float, float] | None = None   # expected velocity (pad NED)
+        self.sent: tuple[float, float] = (0.0, 0.0)   # the last twist sent (pad NED, before _to_interface)
+        self.t: float | None = None
+
+    def reset(self) -> None:
+        self.f, self.r, self.exp, self.sent, self.t = 0.0, 0.0, None, (0.0, 0.0), None
+
+    def step(self, now: float, vel: tuple[float, float], heading: float, lag_s: float, tau_s: float,
+             max_mps: float) -> tuple[float, float]:
+        """-> the push estimate as (north, east) m/s; the caller subtracts it and records what it sent (self.sent)."""
+        dt = 0.0 if self.t is None else min(max(now - self.t, 0.0), 0.2)
+        self.t = now
+        if self.exp is None:                          # start from what the drone is doing: no shortfall yet
+            self.exp, self.sent = (vel[0], vel[1]), (vel[0], vel[1])
+        a = min(1.0, dt / max(lag_s, 1e-3))
+        self.exp = (self.exp[0] + a * (self.sent[0] - self.exp[0]), self.exp[1] + a * (self.sent[1] - self.exp[1]))
+        dn, de = vel[0] - self.exp[0], vel[1] - self.exp[1]
+        c, s = math.cos(heading), math.sin(heading)
+        k = min(1.0, dt / max(tau_s, 1e-3))
+        self.f += k * ((c * dn + s * de) - self.f)
+        self.r += k * ((-s * dn + c * de) - self.r)
+        m = math.hypot(self.f, self.r)
+        if m > max_mps:
+            self.f, self.r = self.f * max_mps / m, self.r * max_mps / m
+        return c * self.f - s * self.r, s * self.f + c * self.r
+
+
 class Track:
     """Follow-phase tracking guard: too far from the setpoint, or jammed (commanded to move, not moving)."""
 
@@ -207,10 +246,12 @@ class Descent:
 
 def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset_rad: float,
           lag_s: float = VEL_LAG_S, speed_mps: float = 0.0, integ: XYIntegral | None = None, ki: float = 0.0,
-          now: float = 0.0) -> tuple[float, float, float, float] | None:
+          now: float = 0.0, push: PushEstimator | None = None, push_tau_s: float = 0.0,
+          push_max_mps: float = 0.15) -> tuple[float, float, float, float] | None:
     """The twist (ENU vx, vy, vz, yaw rate) for a streaming mission output: feed-forward velocity, plus lag_s of the
     path's acceleration (PX4's velocity loop lags that long; the interface has no acceleration input), plus PX4's
-    position loop, plus (ki > 0) the position integral in the hold and in follow, bounded."""
+    position loop, plus (ki > 0) the position integral in the hold and in follow, minus (push_tau_s > 0) the
+    learned push in the hold and in follow, bounded."""
     if not out.stream or out.setpoint is None or v.pos is None or v.heading is None:
         return None
     n, e, d, yaw = out.setpoint
@@ -223,7 +264,13 @@ def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset
         i_n, i_e = integ.step(now, n - v.pos[0], e - v.pos[1], v.heading, ki,
                               out.tangent if out.phase == "follow" else None,
                               freeze=out.phase == "follow" and out.tangent is None)
-    vn, ve = _clamp(fn + lag_s * an + cn + i_n, fe + lag_s * ae + ce + i_e, max(speed_mps, XY_MAX_MPS))
+    b_n = b_e = 0.0
+    learning = push is not None and push_tau_s > 0 and out.phase in ("hover", "follow") and v.vel is not None
+    if learning:
+        b_n, b_e = push.step(now, v.vel, v.heading, lag_s, push_tau_s, push_max_mps)
+    vn, ve = _clamp(fn + lag_s * an + cn + i_n - b_n, fe + lag_s * ae + ce + i_e - b_e, max(speed_mps, XY_MAX_MPS))
+    if learning:
+        push.sent = (vn, ve)
     vx, vy = _to_interface(pad, vn, ve, yaw_offset_rad)
     cap = math.radians(yaw_rate_dps)
     r = (out.yawspeed or 0.0) + KP_YAW * math.remainder(yaw - v.heading, math.tau)
@@ -233,12 +280,15 @@ def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset
 def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, track: Track,
             state: dict[str, Any] | None, t_odom: float, t_state: float, now: float, yaw_rate_dps: float,
             yaw_offset_rad: float, lag_s: float = VEL_LAG_S, speed_mps: float = 0.0,
-            integ: XYIntegral | None = None, ki: float = 0.0
+            integ: XYIntegral | None = None, ki: float = 0.0, push: PushEstimator | None = None,
+            push_tau_s: float = 0.0, push_max_mps: float = 0.15
             ) -> tuple[tuple[float, float, float, float] | None, str | None]:
     """-> (the twist to publish this tick or None, why to land now). In the air a silence over HOLD_S holds still,
     over the STALE limits it lands; on the ground nothing is sent, so the interface never enters Offboard on it."""
     if integ is not None and out.phase not in ("hover", "follow"):
         integ.reset()
+    if push is not None and out.phase not in ("hover", "follow"):
+        push.reset()
     stale = (f"odometry silent for {now - t_odom:.2f} s" if now - t_odom > ODOM_STALE_S else
              f"/skybeta/state silent for {now - t_state:.2f} s" if now - t_state > STATE_STALE_S else None)
     hold = now - t_odom > HOLD_S or now - t_state > HOLD_S
@@ -256,7 +306,8 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
         return (0.0, 0.0, 0.0, 0.0), stale
     if hold or pad is None:
         return None, None
-    tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps, integ, ki, now)
+    tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps, integ, ki, now, push, push_tau_s,
+               push_max_mps)
     if out.phase != "follow" or tw is None:
         track.hist, track.t_far = [], None
         return tw, None

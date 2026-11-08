@@ -126,7 +126,7 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
     m = C.Mission(prm)
     sk = Stack(offset, start_yaw_enu, detect_mps, tau, delay, skew, push_body, climb_push)
     v, pad, descent = C.Vehicle(), None, S.Descent()
-    track, integ = S.Track(), S.XYIntegral()
+    track, integ, push = S.Track(), S.XYIntegral(), S.PushEstimator()
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
     t = DT
@@ -144,7 +144,8 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.yaw_enu += carry[2]
             carry = None
         tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, offset,
-                             tau if lag_s is None else lag_s, prm.speed_mps, integ, prm.ki_xy)
+                             tau if lag_s is None else lag_s, prm.speed_mps, integ, prm.ki_xy, push, prm.push_tau_s,
+                             prm.push_max_mps)
         if land:
             m.request_land(land)
         if tw is not None:
@@ -564,3 +565,52 @@ def test_the_integral_is_body_frame_bounded_and_reset_outside_the_hold_and_follo
     for k in range(100):                                   # along the path (the reference's lead) is never integrated
         j.step(k * DT, 0.5, 0.0, 0.0, 0.08, tangent=(1.0, 0.0))
     assert (j.f, j.r) == (0.0, 0.0)
+
+
+# ---- the push estimator (velocity shortfall, push_tau_s): replaces ki_xy, which orbited on the T4 (t9r5) -------------
+PUSH_HOLD = {**GATED, "ki_xy": 0.0, "hover_s": 10.0, "push_tau_s": 3.0}
+
+
+def _push_flight(push=REAL_PUSH, climb=REAL_CLIMB, tau=0.55, delay=0.0, lag=0.55, skew=0.0, offset=0.0, yaw0=0.0, **over):
+    trail: list = []
+    m, sk, sent = flight(offset=offset, start_yaw_enu=yaw0, doc=R1_DOC, prm_over={**PUSH_HOLD, **over}, tau=tau,
+                         delay=delay, skew=skew, lag_s=lag, push_body=push, climb_push=climb, trail=trail, limit_s=260.0)
+    hold = [(t, math.hypot(p[0], p[1])) for t, ph, p in trail if ph == "hover"]
+    start = next(((t, p) for t, ph, p in trail if ph == "follow"), None)
+    path = np.c_[m.path.x, m.path.y]
+    off = [float(np.min(np.hypot(path[:, 0] - p[0], path[:, 1] - p[1]))) for t, ph, p in trail if ph == "follow"]
+    return m, start, off, hold
+
+
+@pytest.mark.parametrize("offset,yaw0", [(0.0, 0.0), (0.0, math.pi / 2), (-math.pi / 2, 0.0)])
+def test_the_push_estimator_returns_to_the_take_off_point_against_the_real_push_on_the_drone(offset, yaw0):
+    m, start, off, hold = _push_flight(offset=offset, yaw0=yaw0)       # drone 0.55 s; the T4's -90 deg; a 90 deg take-off
+    assert m.result == "complete" and math.hypot(*start[1][:2]) <= 0.05
+    assert float(np.percentile(off, 95)) < 0.03                          # 160449 flew 0.22 m off with P only
+
+
+@pytest.mark.parametrize("tau,delay,skew", [(0.9, 0.6, 0.0), (1.5, 0.6, 0.0), (1.5, 0.6, 0.75)])
+@pytest.mark.parametrize("push", [REAL_PUSH, (0.0, 0.0)])
+def test_on_a_t4_like_slow_response_the_hold_never_orbits_and_the_route_completes(tau, delay, skew, push):
+    climb = REAL_CLIMB if push != (0.0, 0.0) else (0.0, 0.0)
+    m, start, off, hold = _push_flight(push=push, climb=climb, tau=tau, delay=delay, lag=1.5, skew=skew, offset=-math.pi / 2)
+    assert m.result == "complete" and math.hypot(*start[1][:2]) <= 0.05
+    d = [x for t, x in hold]
+    assert max(d[len(d) // 2:]) <= max(d[: len(d) // 2]) + 1e-9         # the second half of the hold never exceeds the first
+    if push == (0.0, 0.0):                                               # the T4 has no push: a 10 s hold, on the line
+        assert hold[-1][0] - hold[0][0] < 10.5 and float(np.percentile(off, 95)) < 0.04
+
+
+def test_the_push_estimator_learns_a_body_push_turns_with_the_drone_and_resets():
+    p = S.PushEstimator()
+    for k in range(200):                     # commanded 0, achieved 0.1 m/s north, heading north: a 0.1 m/s forward push
+        b = p.step(k * DT, (0.1, 0.0), 0.0, 0.55, 3.0, 0.15)
+        p.sent = (0.0, 0.0)
+    assert b == pytest.approx((0.1, 0.0), abs=0.01)
+    assert p.step(200 * DT, (0.0, 0.1), math.pi / 2, 0.55, 3.0, 0.15) == pytest.approx((0.0, 0.1), abs=0.01)   # turned
+    for k in range(200):
+        b = p.step(k * DT + 20, (1.0, 0.0), 0.0, 0.55, 3.0, 0.15)
+        p.sent = (0.0, 0.0)
+    assert math.hypot(*b) == pytest.approx(0.15)                         # bounded
+    p.reset()
+    assert (p.f, p.r, p.exp) == (0.0, 0.0, None)

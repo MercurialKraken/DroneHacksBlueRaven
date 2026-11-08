@@ -28,7 +28,7 @@ class SkybetaRefNav(RefNav):
         # off by default: odometry starts where the stack started, which is the mark only if it was started there
         self.start_max_m = float(self.declare_parameter("start_max_m", float("inf"), LOOSE).value)
         self.start_max_deg = float(self.declare_parameter("start_max_deg", float("inf"), LOOSE).value)
-        self.descent, self.track, self.integ = S.Descent(), S.Track(), S.XYIntegral()
+        self.descent, self.track, self.integ, self.push = S.Descent(), S.Track(), S.XYIntegral(), S.PushEstimator()
         # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone by default; 1.5 s fits the T4 sim
         self.vel_lag_s = float(self.declare_parameter("vel_lag_s", S.VEL_LAG_S, LOOSE).value)
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
@@ -104,7 +104,8 @@ class SkybetaRefNav(RefNav):
     def _send(self, out: C.Output) -> None:
         tw, land = S.command(out, self.v, self.pad, self.descent, self.track, self.state, self.t_odom, self.t_state,
                              self._now(), self.mission.p.yaw_rate_dps, self.yaw_offset, self.vel_lag_s,
-                             self.mission.p.speed_mps, self.integ, self.mission.p.ki_xy)
+                             self.mission.p.speed_mps, self.integ, self.mission.p.ki_xy, self.push,
+                             self.mission.p.push_tau_s, self.mission.p.push_max_mps)
         if land:
             self.mission.request_land(land)
         if tw is None:

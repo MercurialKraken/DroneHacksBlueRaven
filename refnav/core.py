@@ -83,6 +83,9 @@ class Params:
     hover_timeout: str = "land"                 # "land", or "start" the route from where it is
     ki_xy: float = 0.0                          # the skybeta adapter's integral gain (1/s^2) on the position error, in the
                                                 # body frame: a steady push is learned and cancelled (0: P only, as before)
+                                                # NOTE: orbits on slow responses (T4 t9r5); prefer push_tau_s
+    push_tau_s: float = 0.0                     # > 0: learn a steady push from the VELOCITY shortfall over this long and
+    push_max_mps: float = 0.15                  # cancel it, up to this, in the hold and in follow (skybeta adapter)
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
@@ -146,8 +149,8 @@ class Params:
             raise ValueError(f"hover_timeout must be 'land' or 'start', not {self.hover_timeout!r}")
         if self.hover_tol_m > 0 and not self.hover_max_s >= self.hover_s:
             raise ValueError(f"hover_max_s ({self.hover_max_s:g}) must be at least hover_s ({self.hover_s:g})")
-        if self.ki_xy < 0 or self.hover_tol_m < 0 or self.hover_dwell_s < 0:
-            raise ValueError("ki_xy, hover_tol_m and hover_dwell_s cannot be negative")
+        if self.ki_xy < 0 or self.hover_tol_m < 0 or self.hover_dwell_s < 0 or self.push_tau_s < 0 or self.push_max_mps < 0:
+            raise ValueError("ki_xy, hover_tol_m, hover_dwell_s, push_tau_s and push_max_mps cannot be negative")
         if self.path_source not in PATH_SOURCES:
             raise ValueError(f"path_source must be one of {', '.join(PATH_SOURCES)}, not {self.path_source!r}")
         if self.path_source == "waypoints":
