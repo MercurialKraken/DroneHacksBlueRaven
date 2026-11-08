@@ -33,7 +33,7 @@ def _qmul(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, float, flo
 
 class Pad:
     """North along the drone's nose on the pad, origin there, z down: the odometry pose it was anchored at
-    while the mission waited on the ground."""
+    until the climb began."""
 
     def __init__(self, x: float, y: float, z: float, yaw: float) -> None:
         self.p0, self.yaw0 = (x, y, z), yaw
@@ -51,12 +51,12 @@ class Pad:
 def on_odom(v: C.Vehicle, pad: Pad | None, phase: str, p: tuple[float, float, float],
             q_xyzw: tuple[float, float, float, float], v_flu: tuple[float, float, float]) -> Pad | None:
     """One odometry sample (ENU position, FLU -> ENU orientation, FLU body velocity) into the mission's Vehicle.
-    -> the pad frame: this pose while the mission waits on the ground, else the one it had."""
+    -> the pad frame: this pose until the climb (moved or turned before it, the route starts from there), else the one it had."""
     qx, qy, qz, qw = q_xyzw
     if not all(math.isfinite(c) for c in (*p, *q_xyzw, *v_flu)):
         v.pos_ok = False
         return pad
-    if phase == "wait" or pad is None:
+    if phase in ("wait", "arm") or pad is None:
         pad = Pad(*p, yaw_enu_from_xyzw(*q_xyzw))
     h = -pad.yaw0 / 2
     q_pad_enu = _qmul(_Q_X180, (math.cos(h), 0.0, 0.0, math.sin(h)))

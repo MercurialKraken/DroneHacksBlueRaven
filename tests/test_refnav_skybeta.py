@@ -90,7 +90,8 @@ class Stack:
 
 
 def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at: float | None = None,
-           limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow"):
+           limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow",
+           carry: tuple[float, float, float] | None = None):
     prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
     launch = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
@@ -106,6 +107,10 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             state, t_state = sk.state(), t
             S.on_state(v, state, m.phase)
         out = m.step(t, v)
+        if carry is not None and m.phase == "arm":                # carried (NED m) and turned (rad) after "wait -> arm"
+            sk.p[:2] += carry[:2]
+            sk.yaw_enu += carry[2]
+            carry = None
         tw = descent.twist(t, v, state) if out.phase == "land" else S.twist(out, v, pad, prm.yaw_rate_dps, offset)
         if tw is not None:
             sk.twist(t, tw)
@@ -143,6 +148,17 @@ def test_the_full_route_is_flown_and_landed_whatever_the_frames(offset_deg, star
     assert max(abs(tw[3]) for _, _, tw in sent) <= math.radians(45.0) + 1e-9
     assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= 1.5
     assert all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for _, ph, tw in sent if ph == "land")   # detected at 0.35
+
+
+def test_carrying_the_drone_after_arm_moves_the_route_with_it():
+    yaw0 = math.radians(30.0)
+    m, sk, sent = flight(carry=(2.0, -1.0, yaw0))
+    assert m.result == "complete", (m.result, m.why)
+    climb = [tw for _, ph, tw in sent if ph == "climb"]
+    assert max(math.hypot(tw[0], tw[1]) for tw in climb[:10]) < 0.05          # no dash back to the old spot
+    start = np.array([-1.0, 2.0, 0.0])                                         # NED (2, -1) is ENU (-1, 2)
+    end = _rz(yaw0).T @ (np.array(sk.odom()[0]) - start)
+    assert np.hypot(*(end[:2] - np.array(DOC["route"][-1]))) < 0.2, end
 
 
 def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_holds():
