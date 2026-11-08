@@ -1,0 +1,41 @@
+{
+ "from": "route1-ff_sim: route 1 (route_v7_cp2_simple's intent: right arc, then straight east through the CP2 gap centre at map y 2.153, land at map (-0.539, 2.153), 0.49 m past the CP2 line) from Darion's NEW real start, map (-2.515, 1.466) nose north. Arc radius 0.57 m (largest whose flown path keeps a >= 0.29 m turn, i.e. <= 30 deg/s at 0.15 m/s), 3 targets on it (start, 45 deg, end): map (-2.515, 1.583), (-2.348, 1.986), (-1.945, 2.153). No hover: forward from lift-off. Clearance at 0.4 m: walls 0.430 m (tools/check_waypoint_path.py); the straight passes 0.133 m from the cone's centre, so the rotors overfly it: base_link 0.17 m above its 0.30 m top. push_ff (body forward, right) 0, 0 m/s: real flight 160449's push; 0 here, the sim has no push.",
+ "frame": "metres from the take-off pose: [forward, left]; launch_sim (map -2.5146, 1.1144, yaw 90)",
+ "labels": [
+  "arc start (turn right)",
+  "arc middle (45 deg)",
+  "arc end (heading through CP2)",
+  "past CP2: land"
+ ],
+ "route": [
+  [
+   0.469,
+   0.0
+  ],
+  [
+   0.872,
+   -0.167
+  ],
+  [
+   1.039,
+   -0.57
+  ],
+  [
+   1.039,
+   -1.976
+  ]
+ ],
+ "params": {
+  "height_m": 0.4,
+  "speed_mps": 0.15,
+  "arrive_m": 0.15,
+  "corridor_half_m": 0.35,
+  "stop_m": 0.65,
+  "min_corridor_coverage": 0.4,
+  "yaw_rate_dps": 30.0,
+  "fillet_m": 0.57,
+  "hover_s": 8.0,
+  "push_ff_fwd_mps": 0.0,
+  "push_ff_right_mps": 0.0
+ }
+}
