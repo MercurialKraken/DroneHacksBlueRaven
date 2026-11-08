@@ -66,6 +66,7 @@ class Errors:
     gap_s: tuple[float, float] = (0.15, 0.40)
     drift_frac: float = 0.0
     yaw_drift_dpm: float = 0.0
+    drift_dir_deg: float | None = None    # fixed map direction of the drift (no wander): estimate - truth points here
     yaw_slip_m_per_rad: float = 0.0
     jump_per_s: float = 0.0
     jump_m: float = 0.04
@@ -200,7 +201,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     rng = np.random.default_rng(seed)
     x, v, z, yaw = launch.copy(), np.zeros(2), 0.07, yaw0        # truth
     e, eyaw = np.zeros(2), 0.0                                   # estimate error (believed = R(eyaw)(true-launch)+launch+e)
-    drift_dir = rng.uniform(0, 2 * math.pi)
+    drift_dir = rng.uniform(0, 2 * math.pi) if err.drift_dir_deg is None else math.radians(err.drift_dir_deg)
     yaw_sign = 1.0 if rng.random() < 0.5 else -1.0
     slip = rng.normal(size=2)
     slip /= max(float(np.hypot(*slip)), 1e-9)
@@ -221,7 +222,8 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     while t < 240.0:
         # estimate error grows with distance flown (wandering direction), steady yaw drift, rare jumps
         step_d = float(np.hypot(*v)) * dt
-        drift_dir += rng.normal() * 0.3 * math.sqrt(dt)
+        if err.drift_dir_deg is None:
+            drift_dir += rng.normal() * 0.3 * math.sqrt(dt)
         e = e + err.drift_frac * step_d * np.array([math.cos(drift_dir), math.sin(drift_dir)])
         eyaw += yaw_sign * math.radians(err.yaw_drift_dpm) / 60.0 * dt
         if rng.random() < err.jump_per_s * dt:
