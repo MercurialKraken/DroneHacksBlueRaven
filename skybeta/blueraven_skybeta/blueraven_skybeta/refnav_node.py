@@ -43,7 +43,7 @@ class SkybetaRefNav(RefNav):
             from blueraven_skybeta.mppi_follow import MppiFollow
             from nav.mppi_ros import MppiPublisher
             prm = {k: float(self.declare_parameter(k, v, LOOSE).value) for k, v in
-                   (("mppi_v_cruise_mps", 0.15), ("mppi_tau_s", 0.55), ("mppi_dead_time_s", 0.0))}
+                   (("mppi_v_cruise_mps", 0.15), ("mppi_tau_s", 0.9), ("mppi_dead_time_s", 0.6))}
             self.mppi = MppiFollow(prm["mppi_v_cruise_mps"], prm["mppi_tau_s"], prm["mppi_dead_time_s"])
             self.mppi_state, self.mppi_pub = None, MppiPublisher(self, z=self.mission.p.height_m)
             if self.mission.p.depth_mode != "assisted":      # assisted: RefNav subscribes to the same topics

@@ -72,9 +72,9 @@ def generate_launch_description():
         DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
         DeclareLaunchArgument('nav', default_value='refnav', description="follower: 'refnav' or 'mppi'"),
         DeclareLaunchArgument('mppi_v_cruise_mps', default_value='0.15', description="MPPI's cruise speed, m/s"),
-        # MPPI models PX4: lag (drone 0.55 s = 1 / MPC_XY_VEL_P_ACC) and actuation dead time (T4 fit: 0.9 s + 0.6 s)
-        DeclareLaunchArgument('mppi_tau_s', default_value='0.55'),
-        DeclareLaunchArgument('mppi_dead_time_s', default_value='0.0'),
+        # MPPI's model of PX4's velocity response: the T4 fit (0.9 s lag + 0.6 s dead time, Arnav's FLIGHT_MPPI) until the drone's is fitted
+        DeclareLaunchArgument('mppi_tau_s', default_value='0.9'),
+        DeclareLaunchArgument('mppi_dead_time_s', default_value='0.6'),
         DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
         DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
         DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),

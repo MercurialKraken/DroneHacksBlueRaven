@@ -210,8 +210,7 @@ def test_depth_lost_in_flight_slows_then_lands_3_s_later():
     assert "SLOW" in states and not sk.armed
 
 
-@pytest.mark.parametrize("jitter_m", [0.0, 0.003, pytest.param(0.006, marks=pytest.mark.xfail(
-    strict=True, reason="33506a2 fades the grid per metre of odometry jitter: at 6 mm/sample wall B fades while it waits"))])
+@pytest.mark.parametrize("jitter_m", [0.0, 0.003, 0.006])
 def test_a_wall_across_the_gap_blocks_or_sticks_and_lands_without_contact(jitter_m):
     w = start_world(TAPE / "course.yaml")
     shut = World(w.x_range, w.y_range, boxes=[*w.boxes, (-1.45, -0.80, 1.90, 2.40, WALL)], polys=w.polys, nets=w.nets)

@@ -9,7 +9,7 @@ import pytest
 
 from nav.local_grid import LocalGrid
 from nav.local_nav import LocalNav
-from nav.mppi_ros import occupancy, route_to_odom, sample_lines, status_dict
+from nav.mppi_ros import body_to_odom, occupancy, route_to_odom, sample_lines, status_dict
 
 
 def test_route_forward_left_maps_into_odom_with_the_takeoff_pose():
@@ -45,3 +45,10 @@ def test_occupancy_is_row_major_with_the_corner_origin():
     assert data[j[0] * w + i[0]] == 100                                    # ROS: index = row (y) * width + column (x)
     assert origin[0] == pytest.approx(g.origin[0] - cell / 2)
     assert (data == -1).any() and (data == 0).any()
+
+
+def test_odometry_twist_is_rotated_from_base_link_into_odom():
+    q90 = (math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4))             # yaw +90 deg (facing +y)
+    np.testing.assert_allclose(body_to_odom((0.3, 0.0, 0.0), q90), (0.0, 0.3, 0.0), atol=1e-12)   # forward -> +y
+    np.testing.assert_allclose(body_to_odom((0.0, 0.2, 0.0), q90), (-0.2, 0.0, 0.0), atol=1e-12)  # left -> -x
+    np.testing.assert_allclose(body_to_odom((0.3, 0.1, 0.0), (1.0, 0.0, 0.0, 0.0)), (0.3, 0.1, 0.0))

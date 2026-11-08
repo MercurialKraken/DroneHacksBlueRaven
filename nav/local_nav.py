@@ -10,13 +10,15 @@ so it slides along such a wall and keeps making progress.
 * Progress: the projection onto that polyline (nav.mppi: monotone, searched only in a window around the current
   progress, so it can't jump to a later leg that passes nearby).
 * Obstacles: nav.local_grid from depth (add_depth), handed to MPPI as its clearance grid whenever it changed.
-* Heading: along the line yaw_lookahead_m ahead of the drone's progress, rate-limited, so the camera looks into a
-  turn before the drone gets there.
+* Heading: along the line yaw_lookahead_m ahead of the drone's progress, so the camera looks into a turn before the
+  drone gets there; at most yaw_rate_dps, scaled by speed (full at yaw_full_speed), so it turns while moving and
+  never spins in place.
 * State (the caller acts on it):
   WAIT     fewer than min_depth_frames depth frames so far: zero velocity (never move on an empty grid);
   GO       flying;
-  SLOW     no depth for depth_stale_s (a dropout, a stalled camera): speeds are capped at v_no_depth and MPPI
-           flies on the remembered grid and the line. Never a stop on its own: odometry loss is the shell's guard;
+  SLOW     no depth for depth_stale_s (a dropout): speeds capped at v_no_depth_frac * cruise; MPPI flies on the
+           remembered grid and the line;
+  HOLD     no depth for depth_dead_s: zero velocity; the caller holds, then lands (never fly blind on memory); Never a stop on its own: odometry loss is the shell's guard;
   ARRIVED  within accept_m of the last waypoint and slower than arrive_speed: the caller lands;
   BLOCKED  every MPPI candidate crashes: zero velocity; the caller holds, then lands;
   STUCK    progress along the line grew less than stuck_m in stuck_s: the caller holds, then lands.
@@ -44,12 +46,21 @@ class LocalNavParams:
     accept_m: float = 0.25
     arrive_speed: float = 0.10
     yaw_lookahead_m: float = 0.6
-    yaw_rate_dps: float = 45.0
+    yaw_rate_dps: float = 30.0        # cap (Darion: cuVSLAM diverged in a 45 deg/s turn on the T4; no IMU on the drone)
+    yaw_full_speed: float = 0.10      # the yaw rate scales with speed, full at this: a stopped drone never spins in
+                                      # place (near-pure rotation gives stereo VIO nothing to triangulate)
     min_depth_frames: int = 5
     depth_stale_s: float = 0.5
-    v_no_depth: float = 0.20
+    v_no_depth_frac: float = 0.5      # SLOW: at most this fraction of cruise (0.075 m/s at 0.15 cruise)
+    depth_dead_s: float = 2.0         # no depth this long: HOLD (zero), the flight program holds then lands
     stuck_s: float = 8.0
     stuck_m: float = 0.10
+
+
+# The flight default: PX4's velocity response as fitted on the T4 through the real flight_interface (Hinson: lag 0.9 s +
+# 0.6 s dead time). The shield's braking check and the pose prediction use it, so a flight node that passes nothing
+# still gets the measured plant (Hinson's review, arnav/mppi@33506a2). Re-fit on the real drone's first MPPI flight.
+FLIGHT_MPPI = MppiParams(tau=0.9, dead_time_s=0.6)
 
 
 def waypoint_path(start: Any, waypoints: Sequence[Sequence[float]], p: LocalNavParams) -> tuple[np.ndarray, np.ndarray]:
@@ -141,7 +152,7 @@ class LocalNav:
         self.p = nav or LocalNavParams()
         self.grid = LocalGrid(grid, centre=start_xy)
         self.path, self.v_ref = waypoint_path(start_xy, waypoints, self.p)
-        self.mppi = Mppi(self.grid.grid2d(), self.path, self.v_ref, mppi, xp)
+        self.mppi = Mppi(self.grid.grid2d(), self.path, self.v_ref, mppi or FLIGHT_MPPI, xp)
         self.goal = self.path[-1].copy()
         self.yaw_cmd = float(start_yaw)
         self._dirty = False
@@ -165,22 +176,25 @@ class LocalNav:
         return math.atan2(self.mppi.py[k] - self.mppi.py[k - 1], self.mppi.px[k] - self.mppi.px[k - 1])
 
     def step(self, pos: Any, vel: Any, t: float, pose_stamp: float | None = None) -> NavCommand:
-        """One 10 Hz cycle. pos/vel: odometry (odom frame); t: now; pose_stamp: the odometry's capture stamp (same
+        """One 10 Hz cycle. pos/vel: odometry in the ODOM frame (an Odometry twist is in base_link: convert it with
+        nav.mppi_ros.body_to_odom); t: now; pose_stamp: the odometry's capture stamp (same
         clock as t). MPPI predicts through the pose's age, so stale poses (delivery gaps) don't steer it wrong."""
         depth_age = math.inf if self.t_depth is None else max(t - self.t_depth, 0.0)
-        if self.depth_frames < self.p.min_depth_frames:
+        if self.depth_frames < self.p.min_depth_frames or depth_age > self.p.depth_dead_s:
             self.t_last = t
-            return NavCommand(0.0, 0.0, self.yaw_cmd, "WAIT", None, depth_age)
+            self.mppi.note_sent((0.0, 0.0), replace_last=False)
+            state = "WAIT" if self.depth_frames < self.p.min_depth_frames else "HOLD"
+            return NavCommand(0.0, 0.0, self.yaw_cmd, state, None, depth_age)
         origin = self.grid.origin.copy()
         self.grid.follow(np.asarray(pos, float)[:2])                  # the window follows the drone even without depth
         if self._dirty or not np.array_equal(origin, self.grid.origin):
             self.mppi.set_grid(self.grid.grid2d())
             self._dirty = False
         stale = depth_age > self.p.depth_stale_s
-        scale = min(1.0, self.p.v_no_depth / self.p.v_cruise) if stale else 1.0
+        scale = self.p.v_no_depth_frac if stale else 1.0
         if scale != self._scale:
             self.mppi.set_speed_profile(self.v_ref * scale)
-            self.mppi.set_speed_cap(self.p.v_no_depth if stale else None)
+            self.mppi.set_speed_cap(self.p.v_no_depth_frac * self.p.v_cruise if stale else None)
             self._scale = scale
         age = 0.0 if pose_stamp is None else max(t - pose_stamp, 0.0)
         r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2], pose_age_s=age)
@@ -189,7 +203,8 @@ class LocalNav:
         if self._prog[0] is None or r.s >= self._prog[1] + self.p.stuck_m:
             self._prog = (t, r.s)
         want = self._path_heading(min(r.s + self.p.yaw_lookahead_m, self.mppi.length))
-        dmax = math.radians(self.p.yaw_rate_dps) * dt
+        moving = min(1.0, float(np.hypot(*np.asarray(vel, float)[:2])) / max(self.p.yaw_full_speed, 1e-6))
+        dmax = math.radians(self.p.yaw_rate_dps) * dt * moving
         self.yaw_cmd = _wrap(self.yaw_cmd + float(np.clip(_wrap(want - self.yaw_cmd), -dmax, dmax)))
         speed = float(np.hypot(*np.asarray(vel, float)[:2]))
         near = float(np.hypot(*(np.asarray(pos, float)[:2] - self.goal))) <= self.p.accept_m
@@ -202,4 +217,6 @@ class LocalNav:
         else:
             state = "SLOW" if stale else "GO"
         u = (0.0, 0.0) if state in ("ARRIVED", "BLOCKED") else r.u
+        if u != r.u:
+            self.mppi.note_sent(u, replace_last=True)            # the prediction must replay what was really sent
         return NavCommand(u[0], u[1], self.yaw_cmd, state, r, depth_age)
