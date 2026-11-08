@@ -171,8 +171,8 @@ def main() -> int:
         # these params ignores them (it logs "route file params not used") and holds hover_s, as before; refnav with the
         # gate but WITHOUT push_tau_s (43af5e5/014af28) would gate on the P loop alone and land at hover_max_s under a
         # push, so this file goes on the drone only together with 35446dd
+        # Chelsea, 2026-11-08: a FIXED 10 s hold, then fly from wherever it is (no gate: hover_tol_m stays 0, off)
         chelsea = {**fly, "hover_s": HOVER_S, "speed_mps": CHELSEA_SPEED_MPS, "height_m": CHELSEA_HEIGHT_M,
-                   "hover_tol_m": 0.05, "hover_dwell_s": 1.0, "hover_max_s": 40.0, "hover_timeout": "land",
                    "push_tau_s": 3.0, "push_max_mps": 0.15}
         for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, chelsea, back)):
             text = ('{\n "from": ' + json.dumps(note + src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
