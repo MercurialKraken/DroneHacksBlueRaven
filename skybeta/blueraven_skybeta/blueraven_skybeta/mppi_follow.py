@@ -19,7 +19,7 @@ if str(_repo_root()) not in sys.path:
     sys.path.insert(0, str(_repo_root()))
 from nav.depth_points import depth_to_odom  # noqa: E402
 from nav.local_grid import LocalGridParams  # noqa: E402
-from nav.local_nav import LocalNav, LocalNavParams  # noqa: E402
+from nav.local_nav import LocalNav, LocalNavParams, NavCommand  # noqa: E402
 from nav.mppi import MppiParams  # noqa: E402
 from nav.mppi_ros import route_to_odom  # noqa: E402
 from nav.pose_buffer import PoseBuffer  # noqa: E402
@@ -46,6 +46,13 @@ def despeckle(depth_m: np.ndarray, stride: int = DEPTH_STRIDE) -> np.ndarray:
 CMD_STALE_S = 0.35          # MPPI steps at 10 Hz: older than this (3 missed steps) and refnav holds still
 CMD_LAND_S = 1.0            # no fresh command for this long in follow: land
 CMD_FIRST_S = 3.0           # follow started this long ago without one command for it: land
+# VIO jump guard. In nav:=mppi refnav's tracking guard can't fire (its setpoint is the estimate itself), so MPPI
+# watches the odometry: a step of more than JUMP_M + JUMP_MPS x the gap between samples is not flight (cuVSLAM
+# jumped 2.3 m in a T4 hover facing a wall). MPPI then latches LOST (zero velocity) and refnav lands.
+JUMP_M, JUMP_MPS, JUMP_GAP_S = 0.15, 0.6, 1.0
+# MPPI's caps in flight (the library's 0.6 m/s is far too fast for 0.10 m/s flying):
+V_MAX_MIN, V_MAX_PER_CRUISE = 0.15, 1.5     # GROUND speed it may plan: max(0.15, 1.5 x cruise) = 0.15 at 0.10
+U_MAX_MIN, U_MAX_PER_CRUISE = 0.30, 3.0     # the COMMAND, leaning against the ~0.115 m/s push: 0.30 at 0.10
 
 
 def yaw_enu(q_xyzw: Any) -> float:
@@ -68,7 +75,7 @@ def cmd_msg(c: Any, start_id: float | None, now: float) -> dict[str, Any]:
             "state": c.state, "depth_age": rnd(c.depth_age),
             "ms": None if r is None else rnd(r.ms, 1), "e_lat": None if r is None else rnd(r.e_lat),
             "crash_frac": None if r is None else rnd(r.crash_frac), "min_d_plan": None if r is None else rnd(r.min_d_plan),
-            "dist": None if dist is None else [rnd(d) for d in dist]}
+            "dist": None if dist is None else [rnd(d) for d in dist], "why": getattr(c, "why", None)}
 
 
 def to_ext(m: dict[str, Any], pad: Any) -> dict[str, Any]:
@@ -116,6 +123,8 @@ class CmdLink:
     def why_land(self, now: float) -> str | None:
         if self.start_id is None:
             return None
+        if self.last is not None and self.last.get("state") == "LOST":
+            return f"MPPI: odometry jumped (VIO lost?): {self.last.get('why') or 'see the mppi_node log'}"
         if self.last is None:
             return (f"MPPI sent no command in {CMD_FIRST_S:g} s of follow (mppi_node down?)"
                     if now - self.t_start > CMD_FIRST_S else None)
@@ -126,7 +135,11 @@ class CmdLink:
 class MppiFollow:
     def __init__(self, v_cruise: float, tau_s: float, dead_time_s: float = 0.0) -> None:
         self.nav_p = LocalNavParams(v_cruise=v_cruise)
-        self.mppi_p = MppiParams(tau=tau_s, dead_time_s=dead_time_s)
+        v_max = max(V_MAX_MIN, V_MAX_PER_CRUISE * v_cruise)
+        self.mppi_p = MppiParams(tau=tau_s, dead_time_s=dead_time_s, v_max=v_max, v_lat=min(MppiParams.v_lat, v_max),
+                                 u_max=max(U_MAX_MIN, U_MAX_PER_CRUISE * v_cruise))
+        self.lost: str | None = None                # why the odometry is no longer trusted (latched until start())
+        self._odom_prev: tuple[float, np.ndarray] | None = None
         self.poses = PoseBuffer()
         self.nav: LocalNav | None = None
         self.pos: np.ndarray | None = None          # latest odom ENU position, its stamp, and velocity
@@ -139,6 +152,14 @@ class MppiFollow:
 
     def on_odom(self, stamp: float, p: Any, q_xyzw: Any, v_flu: Any) -> None:
         x, y, z, w = q_xyzw
+        pa = np.asarray(p, float)
+        if self._odom_prev is not None and self.nav is not None and self.lost is None and np.isfinite(pa).all():
+            gap = stamp - self._odom_prev[0]
+            step = float(np.linalg.norm(pa - self._odom_prev[1]))
+            if 0.0 < gap <= JUMP_GAP_S and step > JUMP_M + JUMP_MPS * gap:
+                self.lost = f"odometry jumped {step:.2f} m in {gap:.2f} s (limit {JUMP_M + JUMP_MPS * gap:.2f} m)"
+        if np.isfinite(pa).all():
+            self._odom_prev = (stamp, pa)
         self.poses.add_position(stamp, p)
         self.poses.add_attitude(stamp, (w, x, y, z))
         self.pos, self.stamp = np.asarray(p, float), stamp
@@ -160,13 +181,18 @@ class MppiFollow:
         """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it)."""
         self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
                             grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p)
+        self.lost = None                            # a new follow: the jump guard starts afresh
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:
         """Every 20 Hz tick in follow; steps MPPI on every STEP_EVERY-th. -> the Mission.ext command."""
         self.ticks += 1
         if self.nav is None or self.pos is None or (self.ticks - 1) % STEP_EVERY:
             return self.ext
-        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp, yaw=self.yaw)
+        if self.lost is not None:                   # odometry no longer trusted: no MPPI, zero velocity, refnav lands
+            c = self.cmd = NavCommand(0.0, 0.0, self.nav.yaw_cmd, "LOST", None, math.inf)
+            c.why = self.lost
+        else:
+            c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp, yaw=self.yaw)
         if pad is None:                             # mppi_node: the command goes out as cmd_msg, refnav converts it
             return None
         vn, ve = pad.vector(c.vx, c.vy)

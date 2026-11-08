@@ -49,6 +49,7 @@ class MppiNode(Node):
         self.start_id: float | None = None
         self.t_odom, self.K, self.T, self.n_depth, self.ready = -1e9, None, None, 0, False
         self.n_no_pose = 0
+        self.logged_lost: str | None = None
         from tf2_ros import Buffer, TransformListener
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -113,6 +114,9 @@ class MppiNode(Node):
         c = self.mppi.cmd
         if c is cmd or c is None:
             return
+        if c.state == "LOST" and self.logged_lost != self.mppi.lost:
+            self.logged_lost = self.mppi.lost
+            self.get_logger().error(f"MPPI LOST: {self.mppi.lost}: zero velocity, refnav lands")
         self.pub_cmd.publish(String(data=json.dumps(cmd_msg(c, self.start_id, now))))
         self.pub.publish(c, self.mppi.nav)
         if not self.ready and self.n_depth >= READY_FRAMES:
