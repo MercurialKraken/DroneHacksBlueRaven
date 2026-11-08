@@ -18,8 +18,10 @@ Per depth frame:
    camera's lowest ray reaches the band's bottom ((z_cam - band bottom) / tan(vfov/2)) are not cleared IF their
    hits came from low returns (low_mark_m under the drone): a rock that drops out of view under the camera stays
    marked, while a stray return at the drone's own height still gets cleared there.
-   A cell is an obstacle only after hits in two frames (l_occ = 2 l_hit - margin): a single stray stereo return,
-   which is common, never becomes a wall.
+   A cell is an obstacle only after hits in two frames (l_occ = 2 l_hit - margin) AND with at least one obstacle
+   neighbour: stray stereo returns are lone cells, real surfaces never are. A lone phantom 0.46 m ahead (two strays
+   in one cell) used to leave every MPPI candidate crashing, BLOCKED, in the realistic-error course sim. Low cells
+   are protected from clearing under the camera only after 3 hits (l_protect), so strays can't lock themselves in.
 3. Log-odds are clamped to [l_min, l_max]. Cells the camera no longer sees keep their value, so side walls stay
    after they leave the field of view. mem_tau_s fades everything towards unknown, which bounds what odometry drift
    can do to old walls.
@@ -69,9 +71,14 @@ class LocalGridParams:
     l_max: float = 3.5
     l_occ: float = 1.2                # two frames of hits: one stray stereo return never makes a wall
     low_mark_m: float = 0.15          # a hit this far under the drone marks its cell LOW (a rock, a sill)
+    l_protect: float = 2.4            # ...protected from clearing under the camera only with this much evidence (3 hits)
+    min_neighbours: int = 1           # an obstacle cell needs this many obstacle neighbours (8-connected) to count:
+                                      # walls and rocks are always several cells, stray stereo returns are lone cells
     hit_margin_cells: int = 2
     recentre_m: float = 2.0
-    mem_tau_s: float = 60.0
+    mem_tau_s: float = 12.0           # unseen cells fade: a wall last seen ~13 s ago drops below l_occ. When the pose
+                                      # estimate drifts, remembered walls end up misplaced (doubled walls in the
+                                      # course sim at 60 s); walls the camera keeps seeing stay
     max_clear_m: float = 3.0          # distances saturate here (also the no-obstacle value)
 
 
@@ -176,7 +183,7 @@ class LocalGrid:
             in_blind = np.broadcast_to(steps[None, :] < blind, use.shape)[use]
             i, j, ok = self.cells(pts[use])
             flat = i[ok] * self.n + j[ok]
-            protect = in_blind[ok] & self.low.ravel()[flat]           # low obstacles under the camera stay
+            protect = in_blind[ok] & self.low.ravel()[flat] & (self.L.ravel()[flat] >= p.l_protect)
             flat = np.unique(flat[~protect])
             if len(flat):
                 self.L.ravel()[flat] += np.float32(p.l_miss)
@@ -199,7 +206,13 @@ class LocalGrid:
 
     # ------------------------------------------------------------------ outputs
     def occupied(self) -> np.ndarray:
-        return self.L >= self.p.l_occ
+        occ = self.L >= self.p.l_occ
+        if self.p.min_neighbours <= 0 or not occ.any():
+            return occ
+        o = np.pad(occ, 1).astype(np.int8)
+        nb = sum(o[1 + di:o.shape[0] - 1 + di, 1 + dj:o.shape[1] - 1 + dj]
+                 for di in (-1, 0, 1) for dj in (-1, 0, 1) if di or dj)
+        return occ & (nb >= self.p.min_neighbours)
 
     def known(self) -> np.ndarray:
         return np.abs(self.L) > 1e-3

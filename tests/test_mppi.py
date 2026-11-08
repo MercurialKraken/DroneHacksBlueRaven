@@ -312,3 +312,17 @@ def test_grid_can_be_swapped_every_cycle():
     m.set_grid(Grid2D(np.full((10, 10), 0.3), (2.5, -0.5), 0.1))
     assert float(m.clearance(q)[0]) == pytest.approx(0.3)
     assert float(m.clearance(np.array([[9.0, 0.0]]))[0]) == -1.0          # off the new grid
+
+
+def test_dead_time_plans_from_the_predicted_state():
+    """With dead time, MPPI rolls the commands already in flight forward first: same commands, later start."""
+    P, vref = straight_path()
+    m = Mppi(corridor_map(), P, vref, MppiParams(dead_time_s=0.3))
+    r1 = m.step((1.0, 0.0), (0.3, 0.0))
+    assert len(m._inflight) == 1                                          # this cycle's command is now in flight
+    for _ in range(4):
+        m.step((1.0, 0.0), (0.3, 0.0))
+    assert len(m._inflight) == 3                                          # 0.3 s / 0.1 s
+    assert r1.plan[0, 0] > 1.0 + 0.3 * 0.1                                # the plan starts ahead of the drone
+    m.reset()
+    assert m._inflight == []

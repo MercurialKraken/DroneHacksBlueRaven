@@ -204,27 +204,39 @@ def test_a_moved_wall_jutting_across_the_line():
     assert w.clearance(traj).min() > nav.mppi.p.r_drone
 
 
-def new_start_world() -> World:
-    """Darion's corrected drawing (v2) of the rebuilt start (map metres, approximate): wall A, the diagonal wall B, the
-    0.752 m CP2 gap between their ends (~0.10 m a side for a 0.56 m drone), the 0.30 m cone 0.19 m before the gap
-    line, the barrier, and the nets (which depth can't see)."""
-    a, b = np.array([-1.747, 0.762]), np.array([-1.023, 1.932])
+def _start_world(wall_a, wall_b, cone) -> World:
+    a, b = np.array(wall_b[0], float), np.array(wall_b[1], float)
     n = np.array([-(b - a)[1], (b - a)[0]]) / np.hypot(*(b - a)) * 0.05
-    wall_b = np.array([a - n, b - n, b + n, a + n])
+    (ax0, ay), (ax1, _) = wall_a
+    cx, cy = cone
     return World((-3.3, 1.2), (0.2, 3.3),
                  boxes=[(-3.048, 1.0, 0.41, 0.51, WALL),                 # the barrier
-                        (-2.743, -1.277, 2.59, 2.69, WALL),              # wall A
-                        (-1.484, -1.254, 2.220, 2.450, 0.30)],           # the cone (as a 0.23 m box), at the gap
-                 polys=[(wall_b, WALL)],
+                        (ax0, ax1, ay - 0.05, ay + 0.05, WALL),          # wall A
+                        (cx - 0.115, cx + 0.115, cy - 0.115, cy + 0.115, 0.30)],   # the cone (as a 0.23 m box)
+                 polys=[(np.array([a - n, b - n, b + n, a + n]), WALL)],          # wall B, the diagonal
                  nets=[(-3.3, -3.048, 0.2, 3.3), (-3.3, 1.2, 3.048, 3.3)])
 
 
+# The rebuilt start. FINAL = Darion's tape map (chelsea/course-map ea5071d): CP2 gap 1.00 m, centre (-1.098, 2.153).
+# V2_TIGHT = his earlier drawing, a 0.752 m gap with the cone just before it: kept as a tight-gap stress test.
+START_FINAL = dict(wall_a=((-2.743, 2.591), (-1.339, 2.591)), wall_b=((-1.747, 0.762), (-0.857, 1.715)),
+                   cone=(-1.431, 2.286), wps=[(-2.45, 2.00), (-1.098, 2.153), (-0.485, 2.490)])
+START_V2_TIGHT = dict(wall_a=((-2.743, 2.640), (-1.277, 2.640)), wall_b=((-1.747, 0.762), (-1.023, 1.932)),
+                      cone=(-1.369, 2.335), wps=[(-2.45, 2.05), (-1.13, 2.30), (-0.49, 2.52)])
+
+
+def new_start_world(layout: dict | None = None) -> World:
+    L = layout or START_FINAL
+    return _start_world(L["wall_a"], L["wall_b"], L["cone"])
+
+
+@pytest.mark.parametrize("layout", ["final", "v2_tight"])
 @pytest.mark.parametrize("noisy", [False, True])
-def test_new_start_through_the_cp2_gap_over_the_cone(noisy):
-    w = new_start_world()
+def test_new_start_through_the_cp2_gap_over_the_cone(noisy, layout):
+    L = START_FINAL if layout == "final" else START_V2_TIGHT
+    w = new_start_world(L)
     start, yaw0 = (-2.515, 0.914), math.pi / 2                          # the launch mark, facing north
-    wps = [(-2.45, 2.05), (-1.13, 2.30), (-0.49, 2.52)]                 # ~0.02-0.05 m off a human's best guess
-    nav = LocalNav(wps, start, yaw0)
+    nav = LocalNav(L["wps"], start, yaw0)
     drone = Drone(np.array(start, float), yaw0)
     rng = np.random.default_rng(3)
     dt = nav.mppi.p.dt
@@ -244,7 +256,7 @@ def test_new_start_through_the_cp2_gap_over_the_cone(noisy):
     assert states[-1] == "ARRIVED", states[-5:]
     assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # walls and nets; the cone is flown over
     # it went THROUGH the gap: crossed the segment between wall A's east end and wall B's NE end
-    p, q = np.array([-1.277, 2.640]), np.array([-1.023, 1.932])
+    p, q = np.array(L["wall_a"][1]), np.array(L["wall_b"][1])
     side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
     k = int(np.argmax(side != side[0]))
     assert k > 0

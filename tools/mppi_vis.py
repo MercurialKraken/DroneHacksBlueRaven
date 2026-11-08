@@ -27,11 +27,11 @@ from matplotlib.collections import LineCollection                               
 
 from nav.local_nav import LocalNav                                                   # noqa: E402
 from sim_world import Drone                                                          # noqa: E402
-from test_local_nav import clip_world, cp1_world, new_start_world                   # noqa: E402
+from test_local_nav import START_FINAL, clip_world, cp1_world, new_start_world      # noqa: E402
 
 SCENES = {
     "new_start": dict(world=new_start_world, start=(-2.515, 0.914), yaw=math.pi / 2,
-                      wps=[(-2.45, 2.05), (-1.13, 2.30), (-0.49, 2.52)], view=((-3.3, 0.3), (0.3, 3.2))),
+                      wps=START_FINAL["wps"], view=((-3.3, 0.3), (0.3, 3.2))),
     "clip": dict(world=clip_world, start=(0.0, 0.0), yaw=0.0, wps=[(6.5, 0.0)], view=((-0.8, 7.6), (-1.4, 1.4))),
     "cp1": dict(world=cp1_world, start=(0.0, 0.0), yaw=0.0, wps=[(4.3, 0.25), (3.8, -3.6)],
                 view=((-1.0, 5.2), (-5.2, 1.2))),
