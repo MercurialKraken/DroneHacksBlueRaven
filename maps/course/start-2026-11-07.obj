@@ -1,18 +1,17 @@
 # Start of the course as rebuilt by the organizers on 2026-11-07 (they withheld exact dimensions).
-# From Darion's marked-up drawing (feet grid; map m = ft * 0.3048 - 3.048), approx +-0.1 m; Wall A
-# 'fairly accurate'. Boxes in the published OBJ's frame (x east, y north, z up, metres). Used with
-# dronehacks-course-v3.obj, whose maze dividers M1, M2, M3 were removed (course.yaml excludes them).
-# Built by hand (chelsea-claude); not from the organizers' CAD.
+# From Darion's CORRECTED drawing (2026-11-07 ~19:35; feet grid, map m = ft * 0.3048 - 3.048), approximate.
+# Boxes in the published OBJ's frame (x east, y north, z up, metres). Used with dronehacks-course-v3.obj,
+# whose maze dividers M1, M2, M3 were removed (course.yaml excludes them). Built by hand (chelsea-claude).
 
 g Start wall A
-v -2.7430 2.6492 0.0000
-v -1.1600 2.6492 0.0000
-v -1.1600 2.7508 0.0000
-v -2.7430 2.7508 0.0000
-v -2.7430 2.6492 1.7270
-v -1.1600 2.6492 1.7270
-v -1.1600 2.7508 1.7270
-v -2.7430 2.7508 1.7270
+v -2.7430 2.5892 0.0000
+v -1.2770 2.5892 0.0000
+v -1.2770 2.6908 0.0000
+v -2.7430 2.6908 0.0000
+v -2.7430 2.5892 1.7270
+v -1.2770 2.5892 1.7270
+v -1.2770 2.6908 1.7270
+v -2.7430 2.6908 1.7270
 f 1 2 3 4
 f 8 7 6 5
 f 1 5 6 2
@@ -20,14 +19,14 @@ f 2 6 7 3
 f 3 7 8 4
 f 4 8 5 1
 g Start wall B diagonal
-v -1.7131 0.7251 0.0000
-v -0.6431 1.8551 0.0000
-v -0.7169 1.9249 0.0000
-v -1.7869 0.7949 0.0000
-v -1.7131 0.7251 1.7270
-v -0.6431 1.8551 1.7270
-v -0.7169 1.9249 1.7270
-v -1.7869 0.7949 1.7270
+v -1.7038 0.7353 0.0000
+v -0.9798 1.9053 0.0000
+v -1.0662 1.9587 0.0000
+v -1.7902 0.7887 0.0000
+v -1.7038 0.7353 1.7270
+v -0.9798 1.9053 1.7270
+v -1.0662 1.9587 1.7270
+v -1.7902 0.7887 1.7270
 f 9 10 11 12
 f 16 15 14 13
 f 9 13 14 10
@@ -35,14 +34,14 @@ f 10 14 15 11
 f 11 15 16 12
 f 12 16 13 9
 g Boulder 6 CP2 cone
-v -1.3650 2.2780 0.0000
-v -1.1350 2.2780 0.0000
-v -1.1350 2.5080 0.0000
-v -1.3650 2.5080 0.0000
-v -1.3650 2.2780 0.3000
-v -1.1350 2.2780 0.3000
-v -1.1350 2.5080 0.3000
-v -1.3650 2.5080 0.3000
+v -1.4840 2.2200 0.0000
+v -1.2540 2.2200 0.0000
+v -1.2540 2.4500 0.0000
+v -1.4840 2.4500 0.0000
+v -1.4840 2.2200 0.3000
+v -1.2540 2.2200 0.3000
+v -1.2540 2.4500 0.3000
+v -1.4840 2.4500 0.3000
 f 17 18 19 20
 f 24 23 22 21
 f 17 21 22 18
