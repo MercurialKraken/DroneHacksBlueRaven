@@ -9,16 +9,18 @@ from blueraven_skybeta.mission_core import _repo_root
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 ROOT = _repo_root()
 
 
 def generate_launch_description():
+    # a float for both nodes: the interface declares a double, and :=0 would be an integer
+    offset = PythonExpression(['float(', LaunchConfiguration('odom_to_ned_yaw_offset_rad'), ')'])
     interface = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(Path(__file__).resolve().with_name('blueraven.launch.py'))),
-        launch_arguments={'competitor': 'false'}.items(),
+        launch_arguments={'competitor': 'false', 'odom_to_ned_yaw_offset_rad': offset}.items(),
     )
     refnav = Node(
         package='blueraven_skybeta', executable='refnav_mission', name='refnav', output='screen', emulate_tty=True,
@@ -32,7 +34,7 @@ def generate_launch_description():
             # disarms or Offboard ends, never in a hold
             'pilot_arms': True, 'wait_s': float('inf'), 'arm_wait_s': float('inf'), 'land_timeout_s': float('inf'),
             'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
-            'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],
+            'odom_to_ned_yaw_offset_rad': offset}],
     )
     return LaunchDescription([
         DeclareLaunchArgument('depth_mode', default_value='assisted', description="'assisted' or 'blind'"),

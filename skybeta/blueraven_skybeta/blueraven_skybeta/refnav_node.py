@@ -11,14 +11,14 @@ from std_msgs.msg import String
 
 from blueraven_skybeta import refnav_skybeta as S  # first: it puts the team repo (refnav/) on sys.path
 from refnav import core as C
-from refnav.node import RefNav
+from refnav.node import LOOSE, RefNav
 from refnav.node import main as refnav_main
 
 
 class SkybetaRefNav(RefNav):
     def _io(self) -> None:
         # the SAME value the flight interface gets: it rotates poses by it, not twists, so we do
-        self.yaw_offset = float(self.declare_parameter("odom_to_ned_yaw_offset_rad", 0.0).value)
+        self.yaw_offset = float(self.declare_parameter("odom_to_ned_yaw_offset_rad", 0.0, LOOSE).value)
         self.state: dict | None = None
         self.t_state = self.t_odom = -1e9
         self.pad: S.Pad | None = None

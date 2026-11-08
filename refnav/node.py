@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
                        qos_profile_sensor_data)
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      history=HistoryPolicy.KEEP_LAST, depth=1)
 CMD_SET_MODE, CMD_ARM, CMD_LAND = 176, 400, 21
+LOOSE = ParameterDescriptor(dynamic_typing=True)    # height_m:=1 and :=1.0 both work; Params casts the value
 PX4_MAIN_MODE_OFFBOARD = 6
 
 
@@ -96,7 +98,7 @@ class RefNav(Node):
         try:
             # the route file's params are the defaults; this node's parameters (flight.yaml, -p) win
             prm, unknown = C.params_from_doc(doc)
-            overrides = {k: self.declare_parameter(k, v).value for k, v in vars(prm).items() if k != "route"}
+            overrides = {k: self.declare_parameter(k, v, LOOSE).value for k, v in vars(prm).items() if k != "route"}
             prm, _ = C.params_from_doc(doc, overrides)
         except ValueError as e:
             raise SystemExit(f"refnav: {e}") from None
