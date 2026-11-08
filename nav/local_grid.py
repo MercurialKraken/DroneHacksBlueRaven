@@ -75,13 +75,19 @@ class LocalGridParams:
     l_protect: float = 2.4            # ...protected from clearing under the camera only with this much evidence (3 hits)
     min_neighbours: int = 1           # an obstacle cell needs this many obstacle neighbours (8-connected) to count:
                                       # walls and rocks are always several cells, stray stereo returns are lone cells
-    hit_margin_cells: int = 2
+    hit_margin_cells: int = 2         # clearing stops this far short of a hit ...
+    depth_sigma_k: float = 0.015      # ... or 2 sigma(r) = 2 * 0.015 r^2 if larger (measured OAK error: 6 cm @2 m,
+                                      # 23 cm @4 m): a far return measured long must not erase the true wall
     recentre_m: float = 2.0
     mem_dist_m: float = 3.0           # unseen cells fade with DISTANCE FLOWN: a wall last seen ~3 m of flight ago drops
                                       # below l_occ. Odometry drift grows with distance, so old walls get misplaced (they
                                       # doubled in the course sim); but a drone waiting beside a wall it can't see must
                                       # not forget it (a 12 s time constant did, at the CP2 gap, and it hit wall A)
-    mem_tau_s: float = 0.0            # optional extra fading with time (0 = off)
+    move_floor_m: float = 0.05        # displacement counts only in chunks of this much from the last anchor, so
+                                      # odometry jitter at a hover (mm per sample) never adds up to 'distance flown'
+                                      # (Hinson's jitter test: 6 mm sigma faded walls in ~12 s and it touched)
+    mem_tau_s: float = 300.0          # plus a very slow time fade (Hinson's review): an out-of-view phantom can't live
+                                      # forever during a long hover, while walls survive any realistic wait (~5 min)
     max_clear_m: float = 3.0          # distances saturate here (also the no-obstacle value)
 
 
@@ -113,6 +119,7 @@ class LocalGrid:
         self._place(np.asarray(centre, dtype=float)[:2])
         self.t_last: float | None = None
         self.last_sensor: np.ndarray | None = None
+        self.anchor: np.ndarray | None = None        # where displacement was last counted from
         self.frames = 0
 
     # ------------------------------------------------------------------ window
@@ -155,8 +162,13 @@ class LocalGrid:
         k = 0.0
         if t is not None and self.t_last is not None and t > self.t_last and p.mem_tau_s > 0:
             k += (t - self.t_last) / p.mem_tau_s
-        if self.last_sensor is not None and p.mem_dist_m > 0:
-            k += float(np.hypot(*(sensor[:2] - self.last_sensor[:2]))) / p.mem_dist_m
+        if p.mem_dist_m > 0:
+            if self.anchor is None:
+                self.anchor = sensor[:2].copy()
+            moved = float(np.hypot(*(sensor[:2] - self.anchor)))
+            if moved >= p.move_floor_m:
+                k += moved / p.mem_dist_m
+                self.anchor = sensor[:2].copy()
         if k > 0:
             self.L *= np.float32(math.exp(-k))
         if t is not None:
@@ -184,7 +196,9 @@ class LocalGrid:
         order = np.lexsort((rng, b))
         first = np.r_[True, b[order][1:] != b[order][:-1]]
         ray_dir = rel[order][first] / rng[order][first][:, None]
-        ray_len = np.minimum(rng[order][first], p.max_range_m) - p.hit_margin_cells * p.cell
+        r_hit = rng[order][first]
+        margin = np.maximum(p.hit_margin_cells * p.cell, 2.0 * p.depth_sigma_k * r_hit ** 2)
+        ray_len = np.minimum(r_hit, p.max_range_m) - margin
         blind = max(sensor[2] - bottom, 0.0) / math.tan(math.radians(p.vfov_deg) / 2.0)
         steps = np.arange(p.min_range_m, max(float(ray_len.max()), 0.0) + 1e-9, 0.5 * p.cell)
         if len(steps) and len(ray_len):

@@ -287,20 +287,23 @@ def test_slows_on_the_remembered_grid_when_depth_stops():
     w = corridor_world()
     nav = LocalNav([(6.5, 0.0)], (0.0, 0.0), 0.0)
     d = Drone(np.array([0.0, 0.0]), 0.0)
-    states, speeds = [], []
-    for k in range(500):                                                  # 0.2 m/s after 4 s: ~30 s to the end
+    states, speeds, cmds = [], [], []
+    for k in range(500):
         t = 0.1 * k
-        if t < 4.0:                                                       # depth stops after 4 s (a dark tunnel)
+        if not 4.0 <= t < 5.5:                                            # depth drops out for 1.5 s mid-flight
             cam = d.cam()
             nav.add_depth(w.depth_points(cam, d.yaw), cam, d.z, t)
         c = nav.step(d.x, d.v, t)
         states.append(c.state)
+        cmds.append(float(np.hypot(c.vx, c.vy)))
         if c.state == "ARRIVED":
             break
         d.step((c.vx, c.vy), c.yaw, 0.1)
         speeds.append(float(np.hypot(*d.v)))
-    assert "SLOW" in states and states[-1] == "ARRIVED"
-    assert max(speeds[60:]) <= nav.p.v_no_depth + 0.05                     # 2 s after depth stopped
+    assert "SLOW" in states and "HOLD" not in states and states[-1] == "ARRIVED"
+    slow = [v for v, st in zip(cmds, states) if st == "SLOW"]
+    assert max(slow[3:]) <= nav.p.v_no_depth_frac * nav.p.v_cruise + 1e-6       # commands obey the cap (the T4-like
+                                                                                # drone itself slows after its dead time)
     assert w.clearance(np.array([d.x])).min() > nav.mppi.p.r_drone
 
 
@@ -384,3 +387,60 @@ def test_a_shut_cp2_gap_is_never_flown_through_even_after_waiting(cruise):
     side = np.sign((b[0] - a[0]) * (traj[:, 1] - a[1]) - (b[1] - a[1]) * (traj[:, 0] - a[0]))
     assert (side == side[0]).all()                                       # never crossed the gap line
     assert "STUCK" in states or "BLOCKED" in states                      # and it said so
+
+
+
+def test_no_depth_for_long_holds_still():
+    """Hinson's review: with the camera dead, never keep flying on memory. After depth_dead_s: HOLD, zero velocity."""
+    w = corridor_world()
+    nav = LocalNav([(6.5, 0.0)], (0.0, 0.0), 0.0)
+    d = Drone(np.array([0.0, 0.0]), 0.0)
+    last = None
+    for k in range(80):
+        t = 0.1 * k
+        if t < 3.0:
+            cam = d.cam()
+            nav.add_depth(w.depth_points(cam, d.yaw), cam, d.z, t)
+        last = nav.step(d.x, d.v, t)
+        d.step((last.vx, last.vy), last.yaw, 0.1)
+    assert last.state == "HOLD" and (last.vx, last.vy) == (0.0, 0.0)
+
+
+def test_the_sent_command_is_what_the_prediction_replays():
+    """Hinson's review: when LocalNav overrides MPPI's command (zero on ARRIVED/BLOCKED, WAIT), the history the pose
+    prediction replays must hold what was really sent."""
+    nav = LocalNav([(5.0, 0.0)], (0.0, 0.0), 0.0)
+    nav.step((0.0, 0.0), (0.0, 0.0), 0.0)                                 # WAIT: a zero is recorded
+    assert len(nav.mppi._inflight) == 1 and not nav.mppi._inflight[-1].any()
+    nav.mppi._inflight[-1] = np.array([0.3, 0.0])
+    nav.mppi.note_sent((0.0, 0.0), replace_last=True)
+    assert not nav.mppi._inflight[-1].any()
+
+
+
+def test_yaw_turns_only_while_moving_and_at_most_30_deg_s():
+    """Darion: near-pure rotation diverged cuVSLAM on the T4 (no IMU on the real drone). Stopped: no yaw at all."""
+    nav = LocalNav([(0.0, 3.0)], (0.0, 0.0), 0.0)                          # the line goes left: the heading wants +90 deg
+    pts = np.c_[np.full(60, 2.5), np.linspace(-1, 1, 60), np.full(60, 0.7)]
+    for k in range(6):
+        nav.add_depth(pts, (0.0, 0.0, 0.7), 0.7, 0.1 * k)
+    yaws = [nav.step((0.0, 0.0), (0.0, 0.0), 0.6 + 0.1 * k).yaw for k in range(10)]
+    assert max(abs(y) for y in yaws) < 1e-9                               # not moving: never turns
+    y0 = nav.yaw_cmd
+    y1 = nav.step((0.0, 0.0), (0.0, 0.2), 1.6).yaw                         # moving: turns, within 30 deg/s (0.1 s)
+    assert 0 < y1 - y0 <= math.radians(30) * 0.1 + 1e-9
+
+
+
+def test_odometry_jitter_at_a_hover_does_not_fade_walls():
+    """Hinson's jitter test: 6 mm odometry noise per frame at a hover must not count as distance flown."""
+    w = World((-1, 6), (-5, 5), boxes=[(1.5, 1.7, -5, 5, WALL)])
+    g = LocalGrid()
+    rng = np.random.default_rng(0)
+    cam = np.array([0.0, 0.0, 0.7])
+    for _ in range(3):
+        g.integrate(w.depth_points(cam, 0.0), cam, 0.7)
+    for k in range(1800):                                                 # 60 s at 30 Hz, looking away from the wall
+        c = cam + np.r_[rng.normal(0, 0.006, 2), 0.0]
+        g.integrate(np.zeros((0, 3)), c, 0.7, 0.1 + k / 30)
+    assert cell_value(g, 1.5, 0.0) >= g.p.l_occ                            # still remembered after a minute of jitter

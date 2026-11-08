@@ -51,8 +51,9 @@ def depth_to_odom(depth: Any, K: Any, T_base_cam: Any, poses: PoseBuffer, stamp:
     """(points (N, 3) in odom, camera position (3,) in odom) for one depth frame, or None if the pose buffer can't
     give the pose at `stamp` (the frame is then dropped).
 
-    T_base_cam: 4x4 base_link <- camera OPTICAL frame (static TF). stride 2 on 320x200 keeps ~16k pixels before the
-    ~35% valid fraction: plenty for a 5 cm grid out to 4 m."""
+    T_base_cam: 4x4 base_link <- camera OPTICAL frame (static TF; take the frame from camera_info.header.frame_id).
+    Use stride 4 at 640x400 (the drone's depth since 19:17) or stride 2 at 320x200: ~16k pixels before the ~17-50 %
+    valid fraction, plenty for a 5 cm grid out to 4 m."""
     pose = poses.at(stamp)
     if pose is None:
         return None

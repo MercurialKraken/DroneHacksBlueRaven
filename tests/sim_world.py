@@ -92,12 +92,16 @@ class Drone:
     yaw: float
     z: float = 0.7
     v: np.ndarray = field(default_factory=lambda: np.zeros(2))
-    tau: float = 0.55
+    tau: float = 0.9                    # the T4-fitted PX4 velocity response (Hinson): lag 0.9 s ...
+    dead_time: float = 0.6              # ... and 0.6 s before a command starts to act
     yaw_rate_dps: float = 90.0
+    queue: list = field(default_factory=list)
 
     def step(self, u: tuple[float, float], yaw_cmd: float, dt: float) -> None:
         a = math.exp(-dt / self.tau)
-        u = np.asarray(u, float)
+        n = int(round(self.dead_time / dt))
+        self.queue.append(np.asarray(u, float))
+        u = self.queue.pop(0) if len(self.queue) > n else np.zeros(2)
         self.x = self.x + u * dt + (self.v - u) * self.tau * (1 - a)
         self.v = u + (self.v - u) * a
         dy = (yaw_cmd - self.yaw + math.pi) % (2 * math.pi) - math.pi
