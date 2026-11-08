@@ -156,6 +156,7 @@ class Mppi:
         self.U = self.xp.zeros((H, 2))
         self.u_last: np.ndarray | None = None
         self._side, self._side_age = 0, 0
+        self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
         self.rng = self.xp.random.default_rng(self.p.seed)
         self._depth_grid: np.ndarray | None = None
         self.set_grid(grid)
@@ -185,6 +186,10 @@ class Mppi:
         self.vref = vref
         v_mid = np.maximum(0.5 * (self.vref[1:] + self.vref[:-1]), self.p.v_floor)
         self.pt = np.r_[0.0, np.cumsum(np.diff(self.ps) / v_mid)]   # time to each path point along the profile
+
+    def set_speed_cap(self, v: float | None) -> None:
+        """A hard speed cap on every candidate (None: only v_max), e.g. while depth is missing."""
+        self.v_cap = math.inf if v is None else float(v)
 
     def set_speed_profile(self, v_ref: Any) -> None:
         """New speeds for the SAME path (one per point given to set_path); progress is kept."""
@@ -302,9 +307,10 @@ class Mppi:
     def _box(self, v: Any, tg: Any, nm: Any) -> Any:
         """Path-frame box: forward speed in [0, v_max], sideways in [-v_lat, v_lat], |v| <= v_max."""
         xp, p = self.xp, self.p
-        f = xp.clip(v @ tg, 0.0, p.v_max)
-        l = xp.clip(v @ nm, -p.v_lat, p.v_lat)
-        return self._clipnorm(f[..., None] * tg + l[..., None] * nm, p.v_max)
+        vmax = min(p.v_max, self.v_cap)
+        f = xp.clip(v @ tg, 0.0, vmax)
+        l = xp.clip(v @ nm, -min(p.v_lat, vmax), min(p.v_lat, vmax))
+        return self._clipnorm(f[..., None] * tg + l[..., None] * nm, vmax)
 
     def sample(self, u_last: Any, targets: Any, tg: Any, nm: Any, n_noisy: int) -> Any:
         """Candidate command sequences (n_special + n_noisy, H, 2): the targets reached under the change limit,

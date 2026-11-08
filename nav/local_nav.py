@@ -15,8 +15,8 @@ so it slides along such a wall and keeps making progress.
 * State (the caller acts on it):
   WAIT     fewer than min_depth_frames depth frames so far: zero velocity (never move on an empty grid);
   GO       flying;
-  SLOW     no depth for depth_stale_s (the dark tunnel, a dropout): the speed profile is scaled to v_no_depth and
-           MPPI flies on the remembered grid and the line. Never a stop on its own: odometry loss is the shell's guard;
+  SLOW     no depth for depth_stale_s (a dropout, a stalled camera): speeds are capped at v_no_depth and MPPI
+           flies on the remembered grid and the line. Never a stop on its own: odometry loss is the shell's guard;
   ARRIVED  within accept_m of the last waypoint and slower than arrive_speed: the caller lands;
   BLOCKED  every MPPI candidate crashes: zero velocity; the caller holds, then lands;
   STUCK    progress along the line grew less than stuck_m in stuck_s: the caller holds, then lands.
@@ -138,6 +138,7 @@ class LocalNav:
         scale = min(1.0, self.p.v_no_depth / self.p.v_cruise) if stale else 1.0
         if scale != self._scale:
             self.mppi.set_speed_profile(self.v_ref * scale)
+            self.mppi.set_speed_cap(self.p.v_no_depth if stale else None)
             self._scale = scale
         r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2])
         dt = self.mppi.p.dt if self.t_last is None else max(t - self.t_last, 0.0)
