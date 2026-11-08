@@ -25,6 +25,12 @@ ARRIVE_MPS, BRAKE_MAX_S = 0.10, 2.0  # brake to a stop before descending, at mos
 STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
 ODOM_STALE_S = 1.0          # real skybeta-09 odometry arrives with gaps up to 0.39 s under load
 HOLD_S = 0.25               # a shorter silence than STALE holds position (zero twist) instead of landing
+CORR_MAX_MPS = 0.25         # position-loop share of the twist: 0.25 m off at KP_XY 1, past the 0.20 m the reference waits at
+XY_MAX_MPS = 0.5            # the 0.3 m/s routes plus their corner lead (<= 0.23 m/s); a jam never gets 1-1.5 m/s
+VEL_LAG_S = 0.55            # PX4's velocity loop, 1 / MPC_XY_VEL_P_ACC (1.8 on the drone; the T4 sim's 0.8 is 1.25 s)
+TRACK_LAND_M = 0.40         # this far from the setpoint in follow: stop and land where it is
+STUCK_S, STUCK_FRAC = 2.0, 0.3  # moved under 30% of what was commanded over 2 s (a jam): stop and land
+LAND_HOLD_MPS = 0.15        # the descent's pull back over its landing point
 _Q_X180 = (0.0, 1.0, 0.0, 0.0)  # FLU <-> FRD, and ENU-about-the-pad <-> NED-about-the-pad
 
 
@@ -93,49 +99,92 @@ def healthy(state: dict[str, Any] | None, t_state: float, now: float) -> bool:
     return state is not None and now - t_state <= STATE_STALE_S and state.get("px4_link") is True
 
 
+def _clamp(x: float, y: float, cap: float) -> tuple[float, float]:
+    n = math.hypot(x, y)
+    return (x * cap / n, y * cap / n) if n > cap else (x, y)
+
+
+def _to_interface(pad: Pad, vn: float, ve: float, yaw_offset_rad: float) -> tuple[float, float]:
+    """pad (north, east) velocity -> the ENU twist the interface turns into that NED direction."""
+    return twist_for_interface(*pad.to_odom(vn, ve), yaw_offset_rad)
+
+
+class Track:
+    """Follow-phase tracking guard: too far from the setpoint, or jammed (commanded to move, not moving)."""
+
+    def __init__(self) -> None:
+        self.hist: list[tuple[float, tuple[float, float], float]] = []    # (t, pad (n, e), commanded m/s)
+
+    def check(self, now: float, setpoint: tuple[float, ...], pos: tuple[float, ...], cmd_mps: float) -> str | None:
+        err = math.dist(setpoint[:2], pos[:2])
+        if err > TRACK_LAND_M:
+            return f"tracking error {err:.2f} m from the setpoint (TRACK_LAND_M {TRACK_LAND_M:g})"
+        self.hist = [h for h in self.hist if now - h[0] <= STUCK_S] + [(now, pos[:2], cmd_mps)]
+        if now - self.hist[0][0] < STUCK_S * 0.9:
+            return None
+        asked = sum(c * (t1 - t0) for (t0, _, c), (t1, _, _) in zip(self.hist, self.hist[1:]))
+        moved = math.dist(self.hist[0][1], self.hist[-1][1])
+        if asked > 0.2 and moved < STUCK_FRAC * asked:
+            return f"stuck: moved {moved:.2f} m in {STUCK_S:g} s while commanded {asked:.2f} m"
+        return None
+
+
 class Descent:
-    """The mission's "land" as Chelsea's hover lands: straight down, pressing firmer on the ground, never a hold.
+    """The mission's "land" as Chelsea's hover lands: straight down over `target`, pressing firmer on the ground.
     It goes on until PX4 disarms and stops for good once Offboard ends (the pilot or a failsafe has it)."""
 
     def __init__(self) -> None:
+        self.target: tuple[float, float] | None = None      # pad (n, e) held during the descent
         self.t_ground: float | None = None
         self.t_start: float | None = None
         self.zs: list[tuple[float, float]] = []
-        self.over = False
+        self.braked = self.over = False
 
     def twist(self, now: float, v: C.Vehicle, state: dict[str, Any] | None
-              ) -> tuple[float, float, float, float] | None:
+              ) -> tuple[float, float, float] | None:
+        """-> (pad north, pad east, ENU up) velocity, or None once Offboard has ended."""
         if self.over or not state or not (state.get("offboard_active") and state.get("armed")):
             self.over = True
             return None
         self.t_start = now if self.t_start is None else self.t_start
-        if math.hypot(*v.vel) > ARRIVE_MPS and now - self.t_start < BRAKE_MAX_S:
-            return 0.0, 0.0, 0.0, 0.0
+        vn = ve = 0.0
+        if self.target is not None and v.pos is not None and self.t_ground is None:    # on the ground: no xy push
+            vn, ve = _clamp(KP_XY * (self.target[0] - v.pos[0]), KP_XY * (self.target[1] - v.pos[1]), LAND_HOLD_MPS)
+        if not self.braked and math.hypot(*v.vel) > ARRIVE_MPS and now - self.t_start < BRAKE_MAX_S:
+            return vn, ve, 0.0
+        self.braked = True
         if v.pos is not None:
             self.zs = [(t, z) for t, z in self.zs if now - t <= STALL_S] + [(now, v.pos[2])]
         stalled = bool(self.zs) and now - self.zs[0][0] >= STALL_S * 0.9 and self.zs[-1][1] - self.zs[0][1] < STALL_M
         on_ground = v.pos is not None and v.pos[2] >= -GROUND_BAND_M or stalled
         self.t_ground = (self.t_ground if self.t_ground is not None else now) if on_ground else None
         press = self.t_ground is not None and now - self.t_ground >= GROUND_WAIT_S
-        return 0.0, 0.0, -(GROUND_PRESS_MPS if press else DESCEND_MPS), 0.0
+        if self.t_ground is not None:
+            vn = ve = 0.0
+        return vn, ve, -(GROUND_PRESS_MPS if press else DESCEND_MPS)
 
 
-def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset_rad: float
-          ) -> tuple[float, float, float, float] | None:
-    """The twist (ENU vx, vy, vz, yaw rate) for a streaming mission output: feed-forward plus PX4's position loop."""
+def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset_rad: float,
+          lag_s: float = VEL_LAG_S, speed_mps: float = 0.0) -> tuple[float, float, float, float] | None:
+    """The twist (ENU vx, vy, vz, yaw rate) for a streaming mission output: feed-forward velocity, plus lag_s of the
+    path's acceleration (PX4's velocity loop lags that long; the interface has no acceleration input), plus PX4's
+    position loop, bounded."""
     if not out.stream or out.setpoint is None or v.pos is None or v.heading is None:
         return None
     n, e, d, yaw = out.setpoint
     fn, fe = out.velocity or (0.0, 0.0)
-    vx, vy = pad.to_odom(fn + KP_XY * (n - v.pos[0]), fe + KP_XY * (e - v.pos[1]))
-    vx, vy = twist_for_interface(vx, vy, yaw_offset_rad)
+    an, ae = out.accel or (0.0, 0.0)
+    cn, ce = _clamp(KP_XY * (n - v.pos[0]), KP_XY * (e - v.pos[1]), CORR_MAX_MPS)
+    vn, ve = _clamp(fn + lag_s * an + cn, fe + lag_s * ae + ce, max(speed_mps, XY_MAX_MPS))
+    vx, vy = _to_interface(pad, vn, ve, yaw_offset_rad)
     cap = math.radians(yaw_rate_dps)
     r = (out.yawspeed or 0.0) + KP_YAW * math.remainder(yaw - v.heading, math.tau)
     return vx, vy, -KP_Z * (d - v.pos[2]), -max(-cap, min(cap, r))
 
 
-def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, state: dict[str, Any] | None,
-            t_odom: float, t_state: float, now: float, yaw_rate_dps: float, yaw_offset_rad: float
+def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, track: Track,
+            state: dict[str, Any] | None, t_odom: float, t_state: float, now: float, yaw_rate_dps: float,
+            yaw_offset_rad: float, lag_s: float = VEL_LAG_S, speed_mps: float = 0.0
             ) -> tuple[tuple[float, float, float, float] | None, str | None]:
     """-> (the twist to publish this tick or None, why to land now). In the air a silence over HOLD_S holds still,
     over the STALE limits it lands; on the ground nothing is sent, so the interface never enters Offboard on it."""
@@ -143,9 +192,25 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, stat
              f"/skybeta/state silent for {now - t_state:.2f} s" if now - t_state > STATE_STALE_S else None)
     hold = now - t_odom > HOLD_S or now - t_state > HOLD_S
     if out.phase == "land":
-        return descent.twist(now, v, state), None
+        if descent.target is None and v.pos is not None:
+            sp = out.setpoint
+            near = sp is not None and math.dist(sp[:2], v.pos[:2]) <= TRACK_LAND_M
+            descent.target = sp[:2] if near else v.pos[:2]          # a far setpoint (a jam, a failsafe): land here
+        tw = descent.twist(now, v, state)
+        if tw is None:
+            return None, None
+        vn, ve = (0.0, 0.0) if pad is None or now - t_odom > HOLD_S else tw[:2]
+        return (*(_to_interface(pad, vn, ve, yaw_offset_rad) if pad else (0.0, 0.0)), tw[2], 0.0), None
     if (stale or hold) and out.phase in C.AIRBORNE:
         return (0.0, 0.0, 0.0, 0.0), stale
     if hold or pad is None:
         return None, None
-    return twist(out, v, pad, yaw_rate_dps, yaw_offset_rad), None
+    tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps)
+    if out.phase != "follow" or tw is None:
+        track.hist = []
+        return tw, None
+    why = track.check(now, out.setpoint, v.pos, math.hypot(tw[0], tw[1]))
+    if why:
+        descent.target = v.pos[:2]
+        return (0.0, 0.0, 0.0, 0.0), why
+    return tw, None

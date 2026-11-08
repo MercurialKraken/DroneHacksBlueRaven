@@ -27,7 +27,9 @@ class SkybetaRefNav(RefNav):
         # off by default: odometry starts where the stack started, which is the mark only if it was started there
         self.start_max_m = float(self.declare_parameter("start_max_m", float("inf"), LOOSE).value)
         self.start_max_deg = float(self.declare_parameter("start_max_deg", float("inf"), LOOSE).value)
-        self.descent = S.Descent()
+        self.descent, self.track = S.Descent(), S.Track()
+        # PX4's velocity-loop lag, 1 / MPC_XY_VEL_P_ACC: the drone's 1.8 by default, the T4 sim's 0.8 is 1.25 s
+        self.vel_lag_s = float(self.declare_parameter("vel_lag_s", S.VEL_LAG_S, LOOSE).value)
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.create_subscription(Odometry, self.declare_parameter(
             "odometry_topic", "/visual_slam/tracking/odometry").value, self._on_odom, 10)
@@ -60,8 +62,9 @@ class SkybetaRefNav(RefNav):
         S.on_state(self.v, self.state, self.mission.phase)
 
     def _send(self, out: C.Output) -> None:
-        tw, land = S.command(out, self.v, self.pad, self.descent, self.state, self.t_odom, self.t_state, self._now(),
-                             self.mission.p.yaw_rate_dps, self.yaw_offset)
+        tw, land = S.command(out, self.v, self.pad, self.descent, self.track, self.state, self.t_odom, self.t_state,
+                             self._now(), self.mission.p.yaw_rate_dps, self.yaw_offset, self.vel_lag_s,
+                             self.mission.p.speed_mps)
         if land:
             self.mission.request_land(land)
         if tw is None:

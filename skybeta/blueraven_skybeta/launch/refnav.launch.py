@@ -33,6 +33,8 @@ def generate_launch_description():
             'route_file': [str(ROOT / 'courses') + '/', LaunchConfiguration('course'), '/routes/', LaunchConfiguration('route'),
                            '.json'],
             'path_source': 'waypoints', 'corner_cut_m': 0.05,
+            'xtrack_slow_m': 0.08, 'xtrack_stop_m': 0.20,       # 0.20 m off the path the reference waits for it
+            'vel_lag_s': LaunchConfiguration('vel_lag_s'),
             'height_m': LaunchConfiguration('height_m'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'depth_mode': LaunchConfiguration('depth_mode'),
@@ -50,6 +52,8 @@ def generate_launch_description():
         DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
         DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
         DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),
+        DeclareLaunchArgument('vel_lag_s', default_value='0.55',
+                              description='1 / MPC_XY_VEL_P_ACC: 0.55 on the drone (1.8), 1.25 on the T4 sim (0.8)'),
         DeclareLaunchArgument('use_sim_time', default_value='false', description="'true' on the T4 simulator"),
         DeclareLaunchArgument('course', default_value=(ROOT / 'courses' / 'ACTIVE').read_text().strip(),
                               description="courses/<course>/: the course the route belongs to"),

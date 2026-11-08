@@ -9,6 +9,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pytest
@@ -26,7 +27,7 @@ ROUTES = ROOT / "courses" / "start-2026-11-07" / "routes"
 DOC = json.loads((ROUTES / "route_v6_start2.json").read_text())        # Chelsea's file, unchanged
 LAUNCH_PARAMS = {"depth_mode": "blind", "pilot_arms": True, "wait_s": math.inf, "arm_wait_s": math.inf,
                  "land_timeout_s": math.inf, "height_m": 0.7, "path_source": "waypoints",
-                 "corner_cut_m": 0.05}                                             # refnav.launch.py's
+                 "corner_cut_m": 0.05, "xtrack_slow_m": 0.08, "xtrack_stop_m": 0.20}                                             # refnav.launch.py's
 
 
 def _rz(a: float) -> np.ndarray:
@@ -42,8 +43,8 @@ class Stack:
     """PX4 + the flight interface + VIO. PX4 NED <- odom ENU: position_ned = R_down(offset) enu_to_ned(p),
     as the interface assumes for poses; a twist is only enu_to_ned'd. The vision frame starts at `start`."""
 
-    def __init__(self, offset: float, start_yaw_enu: float, detect_mps: float = 0.275) -> None:
-        self.off = offset
+    def __init__(self, offset: float, start_yaw_enu: float, detect_mps: float = 0.275, tau: float = 0.3) -> None:
+        self.off, self.tau = offset, tau              # tau: PX4's velocity loop, 1 / MPC_XY_VEL_P_ACC
         self.detect_mps = detect_mps                  # PX4's land detector: commanded descent it needs on the ground
         self.p = np.zeros(3)                          # PX4 NED
         self.vel = np.zeros(3)
@@ -74,7 +75,7 @@ class Stack:
     def step(self, t: float) -> None:
         flying = self.armed and self.nav == C.NAV_OFFBOARD
         cmd = self.cmd if (flying and t - self.t_twist < 1.0) else np.zeros(3)   # stale twist: hold
-        self.vel += (cmd - self.vel) * min(1.0, DT / 0.3)
+        self.vel += (cmd - self.vel) * min(1.0, DT / self.tau)
         if flying and t - self.t_twist < 1.0:
             self.yaw_enu += self.wz * DT
         self.p += self.vel * DT
@@ -92,10 +93,13 @@ class Stack:
 def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at: float | None = None,
            limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow",
            carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
-           state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None):
-    prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
+           state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None,
+           doc: dict = DOC, tau: float = 0.3, lag_s: float | None = None, wall: Callable | None = None,
+           trail: list | None = None):
+    prm, _ = C.params_from_doc(doc, LAUNCH_PARAMS)
     m = C.Mission(prm)
-    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps), C.Vehicle(), None, S.Descent()
+    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps, tau), C.Vehicle(), None, S.Descent()
+    track = S.Track()
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
     t = DT
@@ -112,7 +116,8 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.p[:2] += carry[:2]
             sk.yaw_enu += carry[2]
             carry = None
-        tw, land = S.command(out, v, pad, descent, state, t_odom, t_state, t, prm.yaw_rate_dps, offset)
+        tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, offset,
+                             tau if lag_s is None else lag_s, prm.speed_mps)
         if land:
             m.request_land(land)
         if tw is not None:
@@ -127,6 +132,10 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.nav, pilot_takes_over_at = 2, None
             sent.append((t, "takeover", ()))
         sk.step(t)
+        if wall is not None:
+            wall(sk, t)
+        if trail is not None and v.pos is not None:
+            trail.append((t, m.phase, v.pos))
         if m.phase == "land" and sk.armed and sk.nav == C.NAV_OFFBOARD:
             assert sent[-1][0] == t, "an armed tick in Offboard without a twist: the interface would hold"
         t += DT
@@ -151,9 +160,10 @@ def test_the_full_route_is_flown_and_landed_whatever_the_frames(offset_deg, star
     assert {"arm", "climb", "follow", "land"} <= set(phases)
     assert max(abs(tw[3]) for _, _, tw in sent) <= math.radians(45.0) + 1e-9
     assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= 1.5
-    land = [tw for _, ph, tw in sent if ph == "land"]                 # brake to a stop, then straight down at 0.35
-    brake = next(i for i, tw in enumerate(land) if tw != (0.0, 0.0, 0.0, 0.0))
-    assert brake * DT <= S.BRAKE_MAX_S + DT and all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for tw in land[brake:])
+    land = [tw for _, ph, tw in sent if ph == "land"]                 # brake to a stop, then down at 0.35 over the point
+    brake = next(i for i, tw in enumerate(land) if tw[2] != 0.0)
+    assert brake * DT <= S.BRAKE_MAX_S + DT and all(tw[2] == -S.DESCEND_MPS for tw in land[brake:])
+    assert max(math.hypot(tw[0], tw[1]) for tw in land) <= S.LAND_HOLD_MPS + 1e-9
 
 
 def _from_polyline(path: F.Path, corners: np.ndarray) -> np.ndarray:
@@ -214,7 +224,7 @@ def test_offboard_entered_before_the_mission_is_ready_descends_until_px4_disarms
         m.on_health(t, S.healthy(sk.state(), t, t))
         S.on_state(v, sk.state(), m.phase)
         out = m.step(t, v)
-        tw = descent.twist(t, v, sk.state()) if out.phase == "land" else S.twist(out, v, pad, 45.0, 0.0)
+        tw, _ = S.command(out, v, pad, descent, S.Track(), sk.state(), t, t, t, 45.0, 0.0)
         if tw is not None:
             sk.twist(t, tw)
             sent.append(tw)
@@ -319,11 +329,11 @@ def test_odometry_becomes_the_pad_frame():
 
 def test_the_twist_is_feed_forward_plus_the_position_loop_and_yaw_rate_is_capped():
     v = C.Vehicle(pos=(0.0, 0.0, -0.8), heading=0.0)
-    out = C.Output("follow", setpoint=(0.1, -0.2, -0.7, math.radians(90.0)), velocity=(0.4, 0.0), yawspeed=0.0,
+    out = C.Output("follow", setpoint=(0.1, -0.2, -0.7, math.radians(90.0)), velocity=(0.3, 0.0), yawspeed=0.0,
                    stream=True)
     vx, vy, vz, wz = S.twist(out, v, S.Pad(0, 0, 0, 0), 45.0, 0.0)
     # pad at yaw 0: north = odom +x, east = odom -y
-    assert (vx, vy, vz) == pytest.approx((0.5, 0.2, -0.1))
+    assert (vx, vy, vz) == pytest.approx((0.4, 0.2, -0.1))
     assert wz == pytest.approx(-math.radians(45.0))                # turning right (NED +) is ENU -, capped
 
 
@@ -354,3 +364,85 @@ def test_no_px4_publisher_exists_in_the_drone_program():
 def test_the_launch_file_sets_what_these_tests_fly():
     text = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
     assert all(f"'{k}'" in text for k in LAUNCH_PARAMS) and "default_value='route_v6_start2'" in text
+
+
+TAPE = json.loads((ROOT / "courses" / "start-2026-11-07-tape" / "routes" / "route_v6_start2_sim.json").read_text())
+
+
+def test_the_position_correction_and_the_total_twist_are_bounded():
+    v = C.Vehicle(pos=(0.0, 0.0, -0.7), heading=0.0)                  # the setpoint 2 m away: an estimate jump
+    out = C.Output("follow", setpoint=(2.0, 0.0, -0.7, 0.0), velocity=(0.0, 0.3), yawspeed=0.0, stream=True)
+    vx, vy, _, _ = S.twist(out, v, S.Pad(0, 0, 0, 0), 45.0, 0.0)
+    assert (vx, vy) == pytest.approx((S.CORR_MAX_MPS, -0.3))
+    out.velocity, out.accel = (0.3, 0.0), (1.0, 0.0)
+    assert math.hypot(*S.twist(out, v, S.Pad(0, 0, 0, 0), 45.0, 0.0)[:2]) == pytest.approx(S.XY_MAX_MPS)
+
+
+@pytest.mark.parametrize("tau", [0.55, 1.25])                       # the drone's velocity loop, the T4 sim's
+def test_the_cp4_corner_is_tracked_within_10_cm_with_the_velocity_lag_led(tau):
+    trail: list = []
+    m, _, sent = flight(doc=TAPE, tau=tau, trail=trail, limit_s=300.0)
+    assert m.result == "complete", (m.result, m.why)
+    path = np.stack([m.path.x, m.path.y], 1)
+    dev = [np.hypot(*(path - p[:2]).T).min() for _, ph, p in trail if ph == "follow"]
+    assert max(dev) < 0.1, max(dev)
+    corner = (TAPE["route"][16][0], -TAPE["route"][16][1])          # CP4 Gate B approach's corner, where run 4 overshot
+    near = [d for d, (_, ph, p) in zip(dev, [x for x in trail if x[1] == "follow"]) if math.dist(p[:2], corner) < 0.5]
+    assert near and max(near) < 0.05, max(near)
+    assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= S.XY_MAX_MPS + 1e-9
+
+
+def test_without_the_lead_the_sims_lag_overshoots_the_cp4_corner():
+    trail: list = []
+    m, _, _ = flight(doc=TAPE, tau=1.25, lag_s=0.0, trail=trail, limit_s=300.0)
+    path = np.stack([m.path.x, m.path.y], 1)
+    corner = (TAPE["route"][16][0], -TAPE["route"][16][1])
+    near = [np.hypot(*(path - p[:2]).T).min() for _, ph, p in trail if ph == "follow" and math.dist(p[:2], corner) < 0.5]
+    assert max(near) > 0.1
+
+
+def test_far_from_the_setpoint_it_stops_and_lands_there():
+    track, v = S.Track(), C.Vehicle(pos=(0.0, 0.0, -0.7), heading=0.0)
+    out = C.Output("follow", setpoint=(0.45, 0.0, -0.7, 0.0), velocity=(0.3, 0.0), yawspeed=0.0, stream=True)
+    descent = S.Descent()
+    tw, why = S.command(out, v, S.Pad(0, 0, 0, 0), descent, track, {"px4_link": True}, 1.0, 1.0, 1.0, 45.0, 0.0)
+    assert tw == (0.0, 0.0, 0.0, 0.0) and why.startswith("tracking error")
+    assert descent.target == (0.0, 0.0)                             # the descent holds where it is, not the setpoint
+
+
+def test_a_jammed_drone_stops_pushing_and_lands_where_it_is():
+    jam: dict = {}
+
+    def wall(sk: Stack, t: float) -> None:                            # from 30 s on it is stuck on something
+        if t >= 30.0:
+            jam.setdefault("p", sk.p[:2].copy())
+            sk.p[:2], sk.vel[:2] = jam["p"], 0.0
+
+    trail: list = []
+    m, sk, sent = flight(doc=TAPE, tau=1.25, wall=wall, trail=trail, limit_s=120.0)
+    assert m.land_reason.startswith("landing requested: stuck"), m.land_reason
+    t_land = next(t for t, ph, _ in sent if ph == "land")
+    assert 30.0 < t_land <= 30.0 + S.STUCK_S + 0.5, t_land
+    assert max(math.hypot(tw[0], tw[1]) for _, _, tw in sent if tw) <= S.XY_MAX_MPS + 1e-9
+    assert all(math.hypot(tw[0], tw[1]) < 0.02 for t, ph, tw in sent if ph == "land")    # no push into the jam
+
+
+def test_a_drone_arriving_at_0_3_mps_lands_within_10_cm_of_the_last_point():
+    sk = Stack(0.0, 0.0, tau=1.25)                                     # the T4 sim's soft velocity loop
+    sk.armed, sk.nav, sk.landed, sk.t_twist = True, C.NAV_OFFBOARD, False, 0.0
+    v = C.Vehicle()
+    pad = S.on_odom(v, None, "wait", *sk.odom())
+    sk.p[2] = -0.7
+    vx, vy = pad.to_odom(0.3, 0.0)                                     # 0.3 m/s along the pad's north, as NED
+    sk.vel[:] = (vy, vx, 0.0)
+    target = (0.15, 0.0)
+    out = C.Output("land", setpoint=(*target, -0.7, 0.0))
+    descent, t = S.Descent(), DT
+    while sk.armed and t < 30.0:
+        pad = S.on_odom(v, pad, "land", *sk.odom())
+        tw, _ = S.command(out, v, pad, descent, S.Track(), sk.state(), t, t, t, 45.0, 0.0)
+        sk.twist(t, tw)
+        sk.step(t)
+        t += DT
+    pad = S.on_odom(v, pad, "land", *sk.odom())
+    assert not sk.armed and math.dist(v.pos[:2], target) < 0.1, v.pos
