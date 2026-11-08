@@ -3,8 +3,10 @@
 
     python tools/make_route_cp2_simple.py   # routes/route_v7_cp2_simple{,_sim}.json, copied into courses/
 
-Take off and hover (the mission does that), fly STRAIGHT FORWARD from the take-off pose, turn 90 deg RIGHT, fly
-straight through the CP2 gap until the whole drone is across, land. Two corners: the turn and the end. The turn is
+Take off and hover (the mission does that), fly STRAIGHT FORWARD from the take-off pose, turn RIGHT along a gradual
+ARC (Chelsea, 2026-11-07: three targets, start / middle / end of a quarter circle of ARC_RADIUS_M, cut INSIDE the
+corner so the drone keeps away from the end wall, Wall A, and turns 22.5 + 45 + 22.5 deg instead of 90 at once),
+fly straight through the CP2 gap until the whole drone is across, land. The corner the arc rounds is
 placed where the rightward leg is furthest from both gap walls (rebuilt_start's Wall A and Wall B, their exact
 footprints: the leg runs along Wall A's south face and over Wall B's north-east end); the end is CROSS_MARGIN_M
 beyond the drone radius past CP2's line, along its normal. One file per launch entry: `launch` (the real mark) and
@@ -38,6 +40,7 @@ HEIGHT_M, SPEED_MPS = 0.7, 0.15  # fixed 0.7 m; 0.15 m/s: the T4 run (refnav, 20
 CROSS_MARGIN_M = 0.20           # the end: the drone's centre this far beyond its radius past CP2's line
 TURN_SHIFT_M = 0.0              # move the turn, so the whole rightward leg, this far forward (+: towards Wall A and
                                 # the cone) or back (-: towards Wall B) from the best-clearance place
+ARC_RADIUS_M = 0.5              # the turn's arc: it starts this far before the corner and ends this far after it
 STEP_M = 0.005                  # leg sampling for the clearances
 
 
@@ -101,14 +104,23 @@ def main() -> int:
         F = float(max(np.arange(lo, hi, 0.0005), key=lambda F: min(clear(F).values()))) + TURN_SHIFT_M
         C, E = legs(F)
         right = float(np.linalg.norm(E - C))
-        ex = clear(F)
+        rad = ARC_RADIUS_M
+        if not (0.0 < rad <= min(F - 0.3, right - 0.3)):
+            print(f"{key}: ARC_RADIUS_M {rad} leaves no straight climb-out or exit leg: nothing written")
+            return 1
+        k = 1.0 - math.sqrt(0.5)                            # the arc's middle: rad * (1 - cos 45) in from both legs
+        arc = [C - rad * f, C - k * rad * f + k * rad * r, C + rad * r]   # start, middle, end (map)
+        poly = [O, *arc, E]
+        ex = {w: float(min(to_polygon(samples(p, q), fp).min() for p, q in zip(poly, poly[1:])))
+              for w, fp in walls.items()}
         z = L["z"] + HEIGHT_M
         on_map = [float(np.nanmin(cm.distance(np.c_[P, np.full(len(P), z)], "planning")))
-                  for P in (samples(O, C), samples(C, E))]
+                  for P in (samples(p, q) for p, q in zip(poly, poly[1:]))]
         print(f"{key}: forward {F:.3f} m, turn 90 deg right, {right:.3f} m: turn at map "
               f"({C[0]:+.3f}, {C[1]:+.3f}), land at ({E[0]:+.3f}, {E[1]:+.3f}), {past:.3f} m past CP2's line")
         print(f"  exact clearance {', '.join(f'{w} {d:.3f} m' for w, d in ex.items())}; map at z {z:.2f}: "
-              f"leg 1 {on_map[0]:.3f} m, leg 2 {on_map[1]:.3f} m (rule {need:.2f} m)")
+              f"legs {', '.join(f'{d:.3f}' for d in on_map)} m (rule {need:.2f} m); arc radius {rad} m, so the corner "
+              f"({C[0]:+.3f}, {C[1]:+.3f}) is never reached")
         side = 1.0 if (g["cone"] - C) @ f > 0 else -1.0      # the cone is forward (+) or back (-) of the leg
         room = next((s for s in np.arange(0.0, 0.3, 0.001)
                      if min(clear(F - side * (s + 0.001)).values()) < need), 0.3)
@@ -121,16 +133,17 @@ def main() -> int:
         if min(on_map) < need or min(ex.values()) < need:
             print(f"{key}: below the {need:.2f} m clearance rule: nothing written")
             return 1
-        route = [(F, 0.0), (F, -right)]
+        route = [(F - rad, 0.0), (F - k * rad, -k * rad), (F, -rad), (F, -right)]
         src = (f"tools/make_route_cp2_simple.py on maps/course.yaml {cfg['course']['name']}, launch_key {key}, "
-               f"{HEIGHT_M} m. Darion's method to CP2: take off, straight forward {F:.3f} m, turn 90 deg right, "
-               f"straight {right:.3f} m through the CP2 gap, land {past:.3f} m past its line "
+               f"{HEIGHT_M} m. Darion's method to CP2 with a gradual turn: take off, straight forward "
+               f"{F - rad:.3f} m, a {rad} m-radius right arc (3 targets: start, middle, end) inside the corner at "
+               f"forward {F:.3f} m, straight {right - rad:.3f} m through the CP2 gap, land {past:.3f} m past its line "
                f"(whole drone across + {CROSS_MARGIN_M:.2f} m). Turn at map ({C[0]:.3f}, {C[1]:.3f}), land at "
                f"({E[0]:.3f}, {E[1]:.3f}). Clearance (exact) {', '.join(f'{w} {d:.3f} m' for w, d in ex.items())}, "
                f"turn shift {TURN_SHIFT_M:+.3f} m from the best; map min {min(on_map):.3f} m. {cone[0].upper()}{cone[1:]}.")
         pts = ",\n".join(f"  [{fw:.3f}, {lf:.3f}]" for fw, lf in route)
         text = ('{\n "from": ' + json.dumps(src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
-                'launch_key ' + key + '",\n "labels": ' + json.dumps(["turn 90 deg right", "past CP2: land"]) +
+                'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
                 ',\n "route": [\n' + pts + '\n ],\n "params": ' + json.dumps(fly) + '\n}\n')
         json.loads(text)
         out = ROOT / "routes" / f"{NAME}{suffix}.json"
