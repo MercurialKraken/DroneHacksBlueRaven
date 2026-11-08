@@ -1,0 +1,12 @@
+{
+ "from": "route1-chelsea: after the climb, HOLD 10 s over the take-off point remembered before lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below, at 0.1 m/s and 0.4 m (launch with HEIGHT=0.4: the launch argument overrides this file's height_m). The waypoints are the same as route_v7_cp2_simple's. tools/make_route_cp2_simple.py on maps/course.yaml dronehacks-2026-v3-start2, launch_key launch, 0.7 m. Darion's method to CP2 with a gradual turn: take off, straight forward 0.539 m, a 0.7 m-radius right arc (3 targets: start, middle, end) inside the corner at forward 1.239 m, straight 1.276 m through the CP2 gap, land 0.490 m past its line (whole drone across + 0.20 m). Turn at map (-2.515, 2.153), land at (-0.539, 2.153). Clearance (exact) Wall A 0.438 m, Wall B 0.438 m, turn shift +0.000 m from the best; map min 0.414 m. The rightward leg passes 0.133 m from the cone's centre (0.018 m outside its 0.23 m base), 0.47 m above it.",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch",
+ "labels": ["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"],
+ "route": [
+  [0.539, 0.000],
+  [1.034, -0.205],
+  [1.239, -0.700],
+  [1.239, -1.976]
+ ],
+ "params": {"height_m": 0.4, "speed_mps": 0.1, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4, "yaw_rate_dps": 30.0, "fillet_m": 0.7, "hover_s": 10.0}
+}
