@@ -1,7 +1,9 @@
 """The organizers' flight interface (blueraven.launch.py's, unchanged) plus refnav flying route.json.
 
-    ros2 launch blueraven_skybeta refnav.launch.py                       # depth assisted, the real launch mark
-    ros2 launch blueraven_skybeta refnav.launch.py depth_mode:=blind     # waypoints and map only
+    ros2 launch blueraven_skybeta refnav.launch.py                           # the drone: blind, 0.7 m
+    ros2 launch blueraven_skybeta refnav.launch.py depth_mode:=assisted      # + depth stops (needs a depth topic)
+    ros2 launch blueraven_skybeta refnav.launch.py use_sim_time:=true depth_topic:=/camera/depth/image_raw \
+        depth_info_topic:=/camera/depth/camera_info launch_key:=launch_sim odom_to_ned_yaw_offset_rad:=-1.5708  # T4
 """
 from pathlib import Path
 
@@ -27,9 +29,11 @@ def generate_launch_description():
         parameters=[str(ROOT / 'flight.yaml'), {
             'route_file': str(ROOT / 'route.json'),
             'launch_key': LaunchConfiguration('launch_key'),
+            'height_m': LaunchConfiguration('height_m'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
             'depth_mode': LaunchConfiguration('depth_mode'),
-            'depth_topic': '/oak/stereo/image_raw',
-            'depth_info_topic': '/oak/stereo/camera_info',
+            'depth_topic': LaunchConfiguration('depth_topic'),
+            'depth_info_topic': LaunchConfiguration('depth_info_topic'),
             # the pilot arms and switches whenever he is ready after "wait -> arm"; the descent ends only when PX4
             # disarms or Offboard ends, never in a hold
             'pilot_arms': True, 'wait_s': float('inf'), 'arm_wait_s': float('inf'), 'land_timeout_s': float('inf'),
@@ -37,7 +41,12 @@ def generate_launch_description():
             'odom_to_ned_yaw_offset_rad': offset}],
     )
     return LaunchDescription([
-        DeclareLaunchArgument('depth_mode', default_value='assisted', description="'assisted' or 'blind'"),
+        # blind on the drone: the README forbids reading /oak/* images in flight (it delays the VIO PX4 flies on)
+        DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
+        DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
+        DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
+        DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),
+        DeclareLaunchArgument('use_sim_time', default_value='false', description="'true' on the T4 simulator"),
         DeclareLaunchArgument('launch_key', default_value='launch',
                               description="course.yaml entry: 'launch' (the real mark) or 'launch_sim'"),
         # blueraven.launch.py's own defaults, declared here too so this file can read them for refnav

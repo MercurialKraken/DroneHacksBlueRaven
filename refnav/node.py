@@ -113,15 +113,14 @@ class RefNav(Node):
         control = self.declare_parameter("control_topic", "").value
         self.run_id: str = self.declare_parameter("run_id", "").value
 
-        from tf2_ros import Buffer, TransformListener
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-
         status_topic = self.declare_parameter("status_topic", "/refnav/status").value
         self.pub_status = self.create_publisher(String, status_topic, 10)
         self.v: C.Vehicle = C.Vehicle()
         self._io()
         if prm.depth_mode == "assisted":
+            from tf2_ros import Buffer, TransformListener
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
             self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
             self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         if control:

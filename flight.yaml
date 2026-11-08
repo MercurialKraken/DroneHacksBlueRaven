@@ -2,8 +2,8 @@
   ros__parameters:
     # Physical companion default. The simulator's deployment file selects its clock.
     use_sim_time: false
-    # assisted: depth gates arming, stops at obstacles and map_align corrects the pose. blind: waypoints and map only,
-    # no depth subscription. The drone's depth image is /oak/stereo/image_raw.
+    # assisted: depth gates arming and stops at obstacles; map_align corrects the pose only where main.py starts it
+    # (never on the drone). blind: no depth subscription. refnav.launch.py sets the drone's own values.
     depth_mode: assisted
     depth_topic: /camera/depth/image_raw
     depth_info_topic: /camera/depth/camera_info
