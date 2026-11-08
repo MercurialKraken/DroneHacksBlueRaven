@@ -35,6 +35,8 @@ def generate_launch_description():
                            '.json'],
             'path_source': 'waypoints', 'corner_cut_m': 0.05,
             'xtrack_slow_m': 0.08, 'xtrack_stop_m': 0.20,       # 0.20 m off the path the reference waits for it
+            # nose within ~0.5 m of the path ahead: on the T4 the velocity drifts ~0.75 x the nose's angle off it, the other way
+            'look_s': 0.5, 'look_max_m': 0.5,
             'vel_lag_s': LaunchConfiguration('vel_lag_s'),
             'height_m': LaunchConfiguration('height_m'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),

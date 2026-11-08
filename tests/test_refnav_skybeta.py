@@ -27,7 +27,8 @@ ROUTES = ROOT / "courses" / "start-2026-11-07" / "routes"
 DOC = json.loads((ROUTES / "route_v6_start2.json").read_text())        # Chelsea's file, unchanged
 LAUNCH_PARAMS = {"depth_mode": "blind", "pilot_arms": True, "wait_s": math.inf, "arm_wait_s": math.inf,
                  "land_timeout_s": math.inf, "height_m": 0.7, "path_source": "waypoints",
-                 "corner_cut_m": 0.05, "xtrack_slow_m": 0.08, "xtrack_stop_m": 0.20}                                             # refnav.launch.py's
+                 "corner_cut_m": 0.05, "xtrack_slow_m": 0.08, "xtrack_stop_m": 0.20,
+                 "look_s": 0.5, "look_max_m": 0.5}                                             # refnav.launch.py's
 
 
 def _rz(a: float) -> np.ndarray:
@@ -44,8 +45,9 @@ class Stack:
     as the interface assumes for poses; a twist is only enu_to_ned'd. The vision frame starts at `start`."""
 
     def __init__(self, offset: float, start_yaw_enu: float, detect_mps: float = 0.275, tau: float = 0.3,
-                 delay: float = 0.0) -> None:
+                 delay: float = 0.0, skew: float = 0.0) -> None:
         self.off, self.tau, self.delay = offset, tau, delay   # PX4's xy velocity response: lag tau after a dead time
+        self.skew = skew        # the T4: velocity turns ~skew x the nose's angle off it, the other way (uneven drag)
         self.queue: list[tuple[float, np.ndarray]] = []
         self.detect_mps = detect_mps                  # PX4's land detector: commanded descent it needs on the ground
         self.p = np.zeros(3)                          # PX4 NED
@@ -72,7 +74,7 @@ class Stack:
         v = np.array(tw[:3])
         n = np.linalg.norm(v)
         self.cmd = _enu_to_ned(v * min(1.0, 1.5 / n) if n > 0 else v)   # the interface's speed clamp
-        self.queue.append((t, self.cmd))
+        self.queue.append((t, np.r_[self.cmd, tw[3]]))
         self.wz, self.t_twist = tw[3], t
 
     def step(self, t: float) -> None:
@@ -82,9 +84,13 @@ class Stack:
             self.queue.pop(0)
         if self.delay and self.queue and flying:
             cmd = np.r_[self.queue[0][1][:2], cmd[2]]
+        wz = self.queue[0][1][3] if self.delay and self.queue else self.wz
+        if self.skew and np.hypot(*cmd[:2]) > 1e-3:
+            nose = math.remainder(math.pi / 2 - self.yaw_enu + self.off - math.atan2(cmd[1], cmd[0]), math.tau)
+            cmd = _rz(-self.skew * math.sin(2.0 * nose) / 2.0) @ cmd
         self.vel += (cmd - self.vel) * min(1.0, DT / self.tau)
         if flying and t - self.t_twist < 1.0:
-            self.yaw_enu += self.wz * DT
+            self.yaw_enu += wz * DT
         self.p += self.vel * DT
         if self.p[2] >= 0.0:                                      # the floor
             self.p[2], self.vel[2] = 0.0, min(self.vel[2], 0.0)
@@ -102,10 +108,10 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
            carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
            state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None,
            doc: dict = DOC, tau: float = 0.3, lag_s: float | None = None, wall: Callable | None = None,
-           trail: list | None = None, delay: float = 0.0):
-    prm, _ = C.params_from_doc(doc, LAUNCH_PARAMS)
+           trail: list | None = None, delay: float = 0.0, skew: float = 0.0, prm_over: dict | None = None):
+    prm, _ = C.params_from_doc(doc, {**LAUNCH_PARAMS, **(prm_over or {})})
     m = C.Mission(prm)
-    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps, tau, delay), C.Vehicle(), None, S.Descent()
+    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps, tau, delay, skew), C.Vehicle(), None, S.Descent()
     track = S.Track()
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
@@ -457,3 +463,15 @@ def test_a_drone_arriving_at_0_3_mps_lands_within_10_cm_of_the_last_point():
         t += DT
     pad = S.on_odom(v, pad, "land", *sk.odom())
     assert not sk.armed and math.dist(v.pos[:2], target) < 0.1, v.pos
+
+
+@pytest.mark.parametrize("tau, delay, lag, limit", [(0.9, 0.6, 1.5, 0.10), (0.55, 0.15, 0.55, 0.07)])
+def test_the_window_route_tracks_with_the_t4s_nose_dependent_velocity_skew(tau, delay, lag, limit):
+    """T4 t7r1: with the nose 10-20 deg right of the track the velocity ran 11-23 deg left of its setpoint (PX4
+    heading = truth heading, estimate = truth: uneven drag, not a frame error). A nose kept near the track halves it."""
+    doc = json.loads((ROUTES.parent.parent / "start-2026-11-07-tape" / "routes" / "route_v7_window_sim.json").read_text())
+    trail: list = []
+    m, _, _ = flight(doc=doc, tau=tau, delay=delay, lag_s=lag, skew=0.8, trail=trail, limit_s=300.0)
+    assert m.result == "complete", (m.result, m.why)
+    path = np.stack([m.path.x, m.path.y], 1)
+    assert max(np.hypot(*(path - p[:2]).T).min() for _, ph, p in trail if ph == "follow") < limit
