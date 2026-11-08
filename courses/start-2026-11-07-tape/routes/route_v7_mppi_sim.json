@@ -1,0 +1,67 @@
+{
+ "from": "arnav-claude: SPARSE route for nav:=mppi on courses/start-2026-11-07-tape (Chelsea's tape map). Anchors only where the course forces them; MPPI plans the line between them and around anything depth sees. Every straight leg >= 0.40 m from walls+nets on the tape map at 0.7 m (drone radius 0.29). Two chicane anchors keep the line on the NORTH side of the boulder at (0.8,-2.35): with one leg (0.37 m) MPPI sometimes went round its south side towards the south net, which depth cannot see. Map anchors: CP2 centre (-1.098,2.153) +-0.45 m on its normal (0.876,0.482); tunnel x 2.25-2.31; window centre (-0.471,-2.272) +-0.5 m on its normal (-0.940,0.343); pad (-2.042,-0.792).",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch_sim",
+ "labels": [
+  "CP2 approach (gap normal)",
+  "CP2 gap centre",
+  "CP2 exit",
+  "north-east corner, tunnel entry above",
+  "tunnel exit (CP3)",
+  "chicane, north of the boulder (1/2)",
+  "chicane, north of the boulder (2/2)",
+  "window approach (window normal)",
+  "window centre (CP4 window)",
+  "window exit",
+  "pad centre (CP5)"
+ ],
+ "route": [
+  [
+   0.822,
+   -1.023
+  ],
+  [
+   1.039,
+   -1.417
+  ],
+  [
+   1.256,
+   -1.811
+  ],
+  [
+   0.986,
+   -4.765
+  ],
+  [
+   -1.764,
+   -4.825
+  ],
+  [
+   -2.564,
+   -3.815
+  ],
+  [
+   -3.164,
+   -2.915
+  ],
+  [
+   -3.558,
+   -2.515
+  ],
+  [
+   -3.386,
+   -2.044
+  ],
+  [
+   -3.214,
+   -1.574
+  ],
+  [
+   -1.906,
+   -0.473
+  ]
+ ],
+ "params": {
+  "height_m": 0.7,
+  "speed_mps": 0.15
+ }
+}

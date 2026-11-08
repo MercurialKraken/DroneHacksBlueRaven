@@ -281,6 +281,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     T = np.array([[r[1], r[2], r[3]] for r in track])
     rows = [k for k, r in enumerate(track) if r[4] == "FOLLOW"]
     clr = world.clearance(T[rows, :2], height) if rows else np.array([np.inf])
+    clr = np.where(np.isfinite(clr), clr, -1.0)                       # off the map = through the net: a touch, not NaN
     k_min = int(np.argmin(clr)) if rows else 0
     path_len = float(np.hypot(*np.diff(T[rows, :2], axis=0).T).sum()) if len(rows) > 1 else 0.0
     follow_s = (track[rows[-1]][0] - track[rows[0]][0]) if rows else 0.0
