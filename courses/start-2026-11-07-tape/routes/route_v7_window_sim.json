@@ -19,5 +19,5 @@
   [-3.387, -2.042],
   [-1.906, -0.473]
  ],
- "params": {"height_m": 0.7, "speed_mps": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
+ "params": {"height_m": 0.7, "speed_mps": 0.15, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
 }
