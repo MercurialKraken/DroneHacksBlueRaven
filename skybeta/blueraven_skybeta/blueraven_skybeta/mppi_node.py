@@ -24,7 +24,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
 from blueraven_skybeta import refnav_skybeta as S  # first: it puts the team repo (refnav/, nav/) on sys.path
-from blueraven_skybeta.mppi_follow import MppiFollow, cmd_msg, yaw_enu
+from blueraven_skybeta.mppi_follow import STEP_EVERY, MppiFollow, cmd_msg, yaw_enu
 from nav.mppi_ros import PREFIX, MppiPublisher
 from refnav import depth as D
 
@@ -32,6 +32,7 @@ RELIABLE = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPol
 LATCHED = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
 READY_FRAMES = 5            # "mppi_node ready" once this many depth frames were placed (fly_route.sh waits for it)
+DEPTH_PERIOD_S = 0.09       # depth frames processed at <= ~10 Hz (the camera sends ~30; only the newest is kept)
 
 
 class MppiNode(Node):
@@ -49,6 +50,9 @@ class MppiNode(Node):
         self.start_id: float | None = None
         self.t_odom, self.K, self.T, self.n_depth, self.ready = -1e9, None, None, 0, False
         self.n_no_pose = 0
+        self.n_depth_rx = 0                          # frames received (most are skipped: only the newest is used)
+        self._depth_msg: Image | None = None
+        self._t_depth_proc = -1e9
         self.logged_lost: str | None = None
         from tf2_ros import Buffer, TransformListener
         self.tf_buffer = Buffer()
@@ -88,6 +92,13 @@ class MppiNode(Node):
             self.K = np.array(m.k, float).reshape(3, 3)
 
     def _on_depth(self, m: Image) -> None:
+        """O(1) on purpose: only keep the newest frame. A RELIABLE reader that lags (decoding every ~512 KB frame at
+        30 Hz next to the MPPI step) makes DDS re-send fragments from the camera driver, which also feeds cuVSLAM:
+        skybeta-09 odometry fell to 9.7 Hz in the full nav:=mppi launch. Frames are processed in _tick at <= 10 Hz."""
+        self._depth_msg = m
+        self.n_depth_rx += 1
+
+    def _process_depth(self, m: Image) -> None:
         if self.mppi.nav is None or self.K is None:
             return
         if self.T is None:
@@ -107,6 +118,12 @@ class MppiNode(Node):
 
     def _tick(self) -> None:
         now = self._now()
+        # the newest depth frame, on the ticks MPPI doesn't step (MppiFollow steps every STEP_EVERY-th): <= 10 Hz,
+        # never in the same 50 ms as the ~30 ms MPPI step
+        if (self._depth_msg is not None and self.mppi.ticks % STEP_EVERY == 1 % STEP_EVERY
+                and now - self._t_depth_proc >= DEPTH_PERIOD_S):
+            m, self._depth_msg, self._t_depth_proc = self._depth_msg, None, now
+            self._process_depth(m)
         if self.mppi.nav is None or now - self.t_odom > S.HOLD_S:
             return                                   # no fresh odometry: no command (refnav holds, then lands)
         cmd = self.mppi.cmd
@@ -126,7 +143,8 @@ class MppiNode(Node):
 
     def _log(self) -> None:
         c = self.mppi.cmd
-        self.get_logger().info(f"depth frames {self.n_depth} (no pose {self.n_no_pose}), start "
+        self.get_logger().info(f"depth frames {self.n_depth} placed of {self.n_depth_rx} received (no pose "
+                               f"{self.n_no_pose}), start "
                                f"{self.start_id}, state {None if c is None else c.state}, ms "
                                f"{None if c is None or c.mppi is None else round(c.mppi.ms, 1)}")
 

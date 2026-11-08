@@ -380,3 +380,18 @@ def test_a_vio_jump_in_flight_lands_where_the_drone_really_is():
     after = traj[mf.traj_t >= mf.link.t_start + 6.0]                          # truth from the jump on
     assert np.linalg.norm(after - after[0], axis=1).max() < 0.2               # it did not chase the false position
     assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
+
+
+def test_mppi_nodes_depth_callback_only_keeps_the_newest_frame_and_runs_single_threaded():
+    """skybeta-09, full nav:=mppi launch: a lagging RELIABLE depth reader starved cuVSLAM (odometry 9.7 Hz).
+    The callback must stay O(1); frames are decoded/placed in the tick at <= ~10 Hz, off the MPPI-step ticks."""
+    import ast
+    pkg = ROOT / "skybeta" / "blueraven_skybeta" / "blueraven_skybeta"
+    tree = ast.parse((pkg / "mppi_node.py").read_text())
+    cb = next(f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and f.name == "_on_depth")
+    calls = {getattr(c.func, "attr", getattr(c.func, "id", "")) for c in ast.walk(cb) if isinstance(c, ast.Call)}
+    assert not calls & {"decode_depth", "on_depth", "_process_depth", "lookup_transform"}, calls
+    tick = next(f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and f.name == "_tick")
+    assert "_process_depth" in ast.unparse(tick) and "DEPTH_PERIOD_S" in ast.unparse(tick)
+    launch = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
+    assert "'OMP_NUM_THREADS': '1'" in launch and launch.count("additional_env=ONE_THREAD") == 2

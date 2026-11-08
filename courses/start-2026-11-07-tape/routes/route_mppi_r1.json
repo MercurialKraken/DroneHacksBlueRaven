@@ -1,0 +1,33 @@
+{
+ "from": "arnav-claude: route_v7_cp2_simple's map path (Darion's CP2 route 1: a 0.7 m-radius right arc, then straight east through the CP2 gap, ending 0.49 m past it) re-expressed from Darion's NEW real start, map (-2.515, 1.466), nose north, 0.552 m north of the old one. Its first target (the arc start) is now at the take-off point, so it is dropped. For NAV=mppi (MPPI builds its own smooth trajectory through these).",
+ "frame": "metres from the take-off pose: [forward, left]; launch = Darion's new real start (map -2.515, 1.466)",
+ "labels": [
+  "arc middle (45 deg)",
+  "arc end (heading through CP2)",
+  "past CP2: land"
+ ],
+ "route": [
+  [
+   0.482,
+   -0.205
+  ],
+  [
+   0.687,
+   -0.7
+  ],
+  [
+   0.687,
+   -1.976
+  ]
+ ],
+ "params": {
+  "height_m": 0.4,
+  "speed_mps": 0.1,
+  "arrive_m": 0.15,
+  "corridor_half_m": 0.35,
+  "stop_m": 0.65,
+  "min_corridor_coverage": 0.4,
+  "yaw_rate_dps": 30.0,
+  "fillet_m": 0.7
+ }
+}
