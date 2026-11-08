@@ -103,6 +103,16 @@
   "push_ff_fwd_mps": 0.12,
   "push_ff_right_mps": 0.1,
   "push_ff_follow": false,
-  "climb_tol_m": 0.05
+  "climb_tol_m": 0.05,
+  "fence": {
+   "fwd": [
+    -4.514,
+    1.582
+   ],
+   "left": [
+    -5.563,
+    0.533
+   ]
+  }
  }
 }
