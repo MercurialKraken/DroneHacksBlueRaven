@@ -41,7 +41,8 @@ def arguments(project: str | os.PathLike[str], *, height_m: float, hover_s: floa
               ros_args: Sequence[str] = ()) -> list[str]:
     project = Path(project).resolve()
     args = ["refnav", "--ros-args", *params_files(project)]
+    course = (project / "courses" / "ACTIVE").read_text(encoding="utf-8").strip()    # the course's default route
     # ROS infers CLI parameter types from their text: Python's 4 must reach
     # our DOUBLE declarations as 4.0, just like a fractional height does.
-    return args + ["-p", f"route_file:={project / 'route.json'}", "-p", f"height_m:={float(height_m)}",
+    return args + ["-p", f"route_file:={project / 'courses' / course / 'route.json'}", "-p", f"height_m:={float(height_m)}",
                    "-p", f"hover_s:={float(hover_s)}", *ros_args]

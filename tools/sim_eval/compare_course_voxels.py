@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SIM-ONLY check. Never import this from flight code.
 
-Compares the published course file's planning field (maps/course_sdf.npz) with the simulator's own
+Compares the published course file's planning field (courses/<name>/course_sdf.npz) with the simulator's own
 static collision voxels (dronehacks_sim), slice by slice at the given heights, and reports where
 the drone actually spawned against the course YAML's launch mark. Answers Task 1's open questions:
 is the transform between the course file and the sim world the identity, and does the sim's
@@ -31,7 +31,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 
 
 def slice_compare(cmap: CourseMap, grid, h: float, shift=(0.0, 0.0)):
@@ -60,7 +60,7 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SIM-ONLY: course file vs simulator collision voxels")
-    ap.add_argument("--config", default=str(ROOT / "maps" / "course.yaml"))
+    ap.add_argument("--config", default=str(course_dir() / "course.yaml"))
     ap.add_argument("--heights", type=float, nargs="*", help="default: build.plot_heights from the config")
     ap.add_argument("--search", type=float, default=0.30, help="search +-this many metres of x/y shift")
     ap.add_argument("--out", default="runs/course_compare")

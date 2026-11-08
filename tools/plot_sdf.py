@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OFFLINE (laptop): top-down slices of the course's signed distance fields, to check by eye.
 
-    python tools/plot_sdf.py maps/course.yaml            # -> maps/plots/sdf_z<height>.png
+    python tools/plot_sdf.py courses/<name>/course.yaml   # -> courses/<name>/plots/sdf_z<height>.png
 
 One PNG per height in build.plot_heights, with the planning field (left) and the localization
 field (right):
@@ -28,7 +28,7 @@ import yaml  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 
 SURFACE_LINE_M = 0.02
 
@@ -81,7 +81,7 @@ def plot_height(cmap: CourseMap, cfg: dict[str, Any], h: float, out: Path) -> No
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("config", nargs="?", default=str(ROOT / "maps" / "course.yaml"))
+    ap.add_argument("config", nargs="?", default=str(course_dir() / "course.yaml"))
     ap.add_argument("--out-dir", help="default: plots/ next to the config")
     args = ap.parse_args(argv)
     cfg_path = Path(args.config).resolve()

@@ -88,7 +88,7 @@ by default), so nobody arms into the square by accident.
 ## 1. Put the code on the drone
 
 The team workspace is `~/team_ws/src` on the drone host (`/root/team_ws/src` inside containers). The stack
-builds it with `colcon build --symlink-install` when it starts, so the package finds `nav/` and `maps/`
+builds it with `colcon build --symlink-install` when it starts, so the package finds `nav/` and `courses/`
 in the repo it sits in. Copy the **reviewed** commit (no credentials on the drone; a USB stick or `scp`
 from a laptop is fine):
 
@@ -205,7 +205,7 @@ by itself.
 ## 6. The route: refnav
 
 `ros2 launch blueraven_skybeta refnav.launch.py` starts the same flight interface and refnav flying
-`routes/route_v6_start2.json` (`route:=route_v6_start2_stage1` for stage 1) as waypoints: the route's own
+`courses/<course>/routes/route_v6_start2.json` (`course:=` defaults to `courses/ACTIVE`; `route:=route_v6_start2_stage1` for stage 1) as waypoints: the route's own
 corners joined by arcs at most 5 cm inside each corner, slower where they turn tighter, yaw rate at most
 45 deg/s, no map read. Blind by default (`depth_mode:=assisted` adds depth stops only, if a depth topic is
 allowed). Then it descends until PX4 lands and disarms. Put the drone on the launch mark facing the launch
@@ -213,7 +213,7 @@ heading; the route starts from the pose it has when the climb begins, and the lo
 pilot arms and switches whenever he is ready after `wait -> arm`; refnav waits as long as it takes. It
 sends twists only (`/skybeta/setpoint/twist`); odometry silent 0.25 s or `/skybeta/state` 0.5 s in the air
 stops it and lands; Offboard ending stops it for good. Check a route against the map before it flies:
-`python tools/check_waypoint_path.py routes/<route>.json` (`--launch launch_sim` for `*_sim` files).
+`python tools/check_waypoint_path.py <route> [--course NAME]` (`--launch launch_sim` for `*_sim` files).
 
 ## Parameters
 
@@ -221,7 +221,7 @@ stops it and lands; Offboard ending stops it for good. Check a route against the
 |---|---|---|
 | `height_m` | 0.70 | flight height above the launch point |
 | `hover_s` | 5.0 | seconds at height |
-| `launch_key` | `launch` | `maps/course.yaml` entry: `launch` (real mark) or `launch_sim` |
+| `launch_key` | `launch` | `courses/<course>/course.yaml` entry: `launch` (real mark) or `launch_sim` |
 | `odom_to_ned_yaw_offset_rad` | 0.0 | measured frame offset: passed to the interface (poses) and our node (twists) |
 | `anchor_setpoints` | false | the interface's translation fix |
 

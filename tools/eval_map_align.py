@@ -12,7 +12,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 from nav.frames import load_launch  # noqa: E402
 from nav.map_align import SE2, DriftCorrector, wrap  # noqa: E402
 from refnav import depth as D  # noqa: E402
@@ -63,8 +63,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("bag"); ap.add_argument("--launch-key", default="launch_sim"); ap.add_argument("--every", type=int, default=3)
     a = ap.parse_args(argv)
-    cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
-    L = load_launch(ROOT / "maps" / "course.yaml", a.launch_key)
+    cm = CourseMap.load(course_dir() / "course_sdf.npz")
+    L = load_launch(course_dir() / "course.yaml", a.launch_key)
     start = SE2(L["x"], L["y"], math.radians(L["yaw_deg"] - 90.0))
     dc = DriftCorrector(cm, start)
     R_bc = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], float); t_bc = np.array([0.116, 0.037, 0.029])

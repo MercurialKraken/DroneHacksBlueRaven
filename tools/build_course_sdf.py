@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OFFLINE (laptop) builder: the published course mesh -> the signed distance fields in an .npz.
 
-    python tools/build_course_sdf.py maps/course.yaml
+    python tools/build_course_sdf.py courses/<name>/course.yaml
 
 Every course-specific fact comes from the YAML: the mesh file, the grid, which named pieces go
 into which field, and the sanity points the result must satisfy. A different or updated course is
@@ -42,7 +42,7 @@ from scipy import ndimage
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 
 BUILDER_VERSION = 1
 
@@ -221,7 +221,7 @@ def check_sanity(cmap: CourseMap, checks: list[dict[str, Any]]) -> list[tuple[bo
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("config", nargs="?", default=str(ROOT / "maps" / "course.yaml"))
+    ap.add_argument("config", nargs="?", default=str(course_dir() / "course.yaml"))
     args = ap.parse_args(argv)
     cfg_path = Path(args.config).resolve()
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))

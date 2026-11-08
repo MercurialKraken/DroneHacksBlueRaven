@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -74,18 +73,17 @@ class RefNav(Node):
         if prm.path_source == "waypoints":
             self.get_logger().info(f"waypoints: the route's corners as arcs within {prm.corner_cut_m:g} m, no map")
             return None
-        root = Path(__file__).resolve().parents[1]
-        path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
-        course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value
+        from nav.course_map import CourseMap, course_dir
+        from nav.frames import load_launch
+
+        from . import map_route
+        path = self.declare_parameter("course_map", str(course_dir() / "course_sdf.npz")).value
+        course = self.declare_parameter("course_yaml", str(course_dir() / "course.yaml")).value
         key = self.declare_parameter("launch_key", "launch_sim").value      # the real course: launch
         margin = float(self.declare_parameter("map_margin_m", 0.20).value)
         shift = float(self.declare_parameter("map_max_shift_m", 0.3).value)
         if not path:
             return None
-        from nav.course_map import CourseMap
-        from nav.frames import load_launch
-
-        from . import map_route
         try:
             cm, launch = CourseMap.load(path), load_launch(course, key)
         except (OSError, KeyError, ValueError) as e:

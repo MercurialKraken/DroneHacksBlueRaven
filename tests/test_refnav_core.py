@@ -620,9 +620,10 @@ def test_aircraft_params_win_over_the_route_file() -> None:
 def test_devsim_flies_the_aircraft_params() -> None:
     from devsim.run import load_params
     from main import HEIGHT_M, HOVER_S
+    from nav.course_map import course_dir
     from refnav.launch import flight_params
     root = Path(__file__).resolve().parents[1]
-    prm = load_params(root / "route.json")
+    prm = load_params(course_dir() / "route.json")
     assert (prm.height_m, prm.hover_s, prm.depth_border_px) == (HEIGHT_M, HOVER_S, DEPTH_BORDER_PX)
     assert prm.yaw_rate_dps == flight_params(root)["yaw_rate_dps"]
 

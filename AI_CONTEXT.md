@@ -32,7 +32,7 @@ means a longer wall-time run; inspect actual sensor timestamps and health.
 - `learn/*.ipynb`: runnable lessons in a persistent Jupyter kernel. Read a cell,
   then Run it. Flight cells require explicit confirmation. Interrupting Python
   is not a Land command. Keep your own notes and saved outputs.
-- `main.py`, `flight.yaml`, `route.json`, `refnav/`, `tests/`: editable reference
+- `main.py`, `flight.yaml`, `courses/` (one folder per course: map, meshes, distance field, routes; `courses/ACTIVE` picks one), `refnav/`, `tests/`: editable reference
   mission and tests. The native example is the shortest path to inspect when
   you want to understand the underlying PX4 interface.
 

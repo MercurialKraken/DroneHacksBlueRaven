@@ -1,22 +1,26 @@
 #!/bin/bash
 # SIM-ONLY, inside the dronehacks_gpu container: one flight of the drone program as it runs on the drone.
-# Usage: run.sh [--depth none|sim] [--latency-ms MS] [--drop P] [--route FILE|none] [--timeout S] [--name NAME] [ARG:=VALUE ...]
+# Usage: run.sh [--course NAME] [--depth none|sim] [--latency-ms MS] [--drop P] [--route FILE|none] [--timeout S] [--name NAME] [ARG:=VALUE ...]
 set -o pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 MISSION=${MISSION:-blueraven_skybeta/blueraven.launch.py}    # PACKAGE/LAUNCH_FILE of the drone program
 YAW_OFF=-1.5708                                               # T4: cuVSLAM odom is -90 deg from PX4 NED
 SKYBETA_GIT=https://github.com/Artash-N/skybeta.git; SKYBETA_SHA=3c42933    # flight interface 0.3.3, as on skybeta-09
 WS=/tmp/drone_sim_ws; DASH=http://127.0.0.1:8080
-DEPTH=none; LATENCY_MS=0; DROP=0.01; ROUTE=$REPO/route.json; TIMEOUT=300; NAME=run
+WORLD_COURSE=$(readlink /opt/devenv/courses/active)          # the course the T4 world was built from (use_course.sh)
+COURSE=$WORLD_COURSE; DEPTH=none; LATENCY_MS=0; DROP=0.01; ROUTE=; TIMEOUT=300; NAME=run
 while [[ $# -gt 0 && $1 == --* ]]; do
   case $1 in
-    --depth) DEPTH=$2 ;; --latency-ms) LATENCY_MS=$2 ;; --drop) DROP=$2 ;;
+    --course) COURSE=$2 ;; --depth) DEPTH=$2 ;; --latency-ms) LATENCY_MS=$2 ;; --drop) DROP=$2 ;;
     --route) ROUTE=$2 ;; --timeout) TIMEOUT=$2 ;; --name) NAME=$2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
   shift 2
 done
 [[ $DEPTH == none || $DEPTH == sim ]] || { echo "--depth none|sim" >&2; exit 2; }
+[[ $COURSE == "$WORLD_COURSE" ]] || { echo "refused: the T4 world is course '$WORLD_COURSE': /opt/devenv/use_course.sh $COURSE first" >&2; exit 1; }
+[[ -f $REPO/courses/$COURSE/course.yaml ]] || { echo "refused: no courses/$COURSE in $REPO" >&2; exit 1; }
+ROUTE=${ROUTE:-$REPO/courses/$COURSE/route.json}
 source /etc/devenv.sh
 export BLUERAVEN_REPO=$REPO
 OUT=${DEVENV_HOST_HOME:-/home/flatypus}/bags/drone_sim_${NAME}_$(date -u +%Y%m%dT%H%M%SZ)
@@ -66,11 +70,11 @@ sys.exit(0 if m and abs((float(m.group(1)) - math.degrees($YAW_OFF) + 180) % 360
 
 start bag ros2 bag record -s mcap --use-sim-time -o "$OUT" -e \
   '^/(skybeta|refnav|blueraven)/|^/visual_slam/tracking/odometry$|^/fmu/out/(vehicle_local_position_v1|vehicle_status_v1|vehicle_land_detected|estimator_status_flags|vehicle_attitude)$|^/fmu/in/(vehicle_visual_odometry|trajectory_setpoint|offboard_control_mode|vehicle_command)$|^/sim/truth/|^/oak/stereo/camera_info$|^/tf(_static)?$|^/rosout$'
-start score python3 "$HERE/score.py" "$LOGS/score.json" "$ROUTE"
+start score python3 "$HERE/score.py" "$LOGS/score.json" "$ROUTE" "$REPO/courses/$COURSE/course.yaml"
 for _ in $(seq 60); do grep -q "Subscribed to topic" "$LOGS/bag.log" && grep -q ready "$LOGS/score.log" && break; sleep 0.5; done
 
-echo "mission: $MISSION odom_to_ned_yaw_offset_rad:=$YAW_OFF launch_key:=launch_sim $*  (repo $(git -C "$REPO" rev-parse --short HEAD 2> /dev/null))"
-start mission ros2 launch "$HERE/sim.launch.py" mission:="$MISSION" odom_to_ned_yaw_offset_rad:=$YAW_OFF launch_key:=launch_sim "$@"
+echo "mission: $MISSION course:=$COURSE odom_to_ned_yaw_offset_rad:=$YAW_OFF launch_key:=launch_sim $*  (repo $(git -C "$REPO" rev-parse --short HEAD 2> /dev/null))"
+start mission ros2 launch "$HERE/sim.launch.py" mission:="$MISSION" course:="$COURSE" odom_to_ned_yaw_offset_rad:=$YAW_OFF launch_key:=launch_sim "$@"
 python3 "$HERE/pilot.py" "$TIMEOUT" --ros-args -p use_sim_time:=true | tee "$LOGS/pilot.log"
 verdict=${PIPESTATUS[0]}
 sleep 2

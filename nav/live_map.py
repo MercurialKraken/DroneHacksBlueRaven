@@ -1,6 +1,6 @@
 """Live obstacles from depth, combined with the static course map. Runtime: numpy only.
 
-    course = CourseMap.load("maps/course_sdf.npz")
+    course = CourseMap.load(course_dir() / "course_sdf.npz")
     live = LiveObstacleLayer(course)                    # same 5 cm grid as the course map
     live.integrate(depth_m, K, T_map_cam)               # every depth frame, in the `map` frame
     cmap = CombinedMap(course, live)                    # drop-in for CourseMap in a planner
@@ -23,7 +23,7 @@ What the live layer records, and why:
     any ray has reached; the distance query does not inflate unknown space (the static map is the
     prior there), so a planner that must not fly into unseen space asks `observed()` as well.
 
-Frames: `map` is the course file's frame (x east, y north, z up, metres; see maps/README.md).
+Frames: `map` is the course file's frame (x east, y north, z up, metres; see courses/<name>/course.yaml).
 T_map_cam is a 4x4 transform from the camera's OPTICAL frame (x right, y down, z forward) to map.
 Depth is metres along the optical axis; 0, negative or non-finite means no return.
 """

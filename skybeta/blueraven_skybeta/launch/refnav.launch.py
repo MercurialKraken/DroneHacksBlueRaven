@@ -1,7 +1,8 @@
 """The organizers' flight interface (blueraven.launch.py's, unchanged) plus refnav flying a route file's
-waypoints (routes/<route>.json, forward/left from the take-off pose). Nothing reads the map in flight.
+waypoints (courses/<course>/routes/<route>.json, forward/left from the take-off pose). Nothing reads the map in flight.
 
-    ros2 launch blueraven_skybeta refnav.launch.py                                 # the drone: full course
+    ros2 launch blueraven_skybeta refnav.launch.py                                 # the drone: full course, courses/ACTIVE
+    ros2 launch blueraven_skybeta refnav.launch.py course:=v3-published route:=route_v5
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_stage1   # through CP2 and land
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_sim use_sim_time:=true \
         depth_topic:=/camera/depth/image_raw depth_info_topic:=/camera/depth/camera_info \
@@ -29,7 +30,8 @@ def generate_launch_description():
     refnav = Node(
         package='blueraven_skybeta', executable='refnav_mission', name='refnav', output='screen', emulate_tty=True,
         parameters=[str(ROOT / 'flight.yaml'), {
-            'route_file': [str(ROOT / 'routes') + '/', LaunchConfiguration('route'), '.json'],
+            'route_file': [str(ROOT / 'courses') + '/', LaunchConfiguration('course'), '/routes/', LaunchConfiguration('route'),
+                           '.json'],
             'path_source': 'waypoints', 'corner_cut_m': 0.05,
             'height_m': LaunchConfiguration('height_m'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -49,8 +51,10 @@ def generate_launch_description():
         DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
         DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),
         DeclareLaunchArgument('use_sim_time', default_value='false', description="'true' on the T4 simulator"),
+        DeclareLaunchArgument('course', default_value=(ROOT / 'courses' / 'ACTIVE').read_text().strip(),
+                              description="courses/<course>/: the course the route belongs to"),
         DeclareLaunchArgument('route', default_value='route_v6_start2',
-                              description="routes/<route>.json: Chelsea's format; *_sim files start at the sim spawn"),
+                              description="courses/<course>/routes/<route>.json: *_sim files start at the sim spawn"),
         # blueraven.launch.py's own defaults, declared here too so this file can read them for refnav
         DeclareLaunchArgument('odometry_topic', default_value='/visual_slam/tracking/odometry'),
         DeclareLaunchArgument('odom_to_ned_yaw_offset_rad', default_value='0.0'),

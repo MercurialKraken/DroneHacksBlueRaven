@@ -14,7 +14,7 @@ from refnav import follow as F
 from refnav import map_route as M
 
 ROOT = Path(__file__).resolve().parents[1]
-V3 = ROOT / "tests" / "data" / "course_v3_published"      # the published course, frozen (see its README)
+V3 = ROOT / "courses" / "v3-published"      # the published course: these tests pin its spots
 CM = CourseMap.load(V3 / "course_sdf.npz")
 LAUNCH = load_launch(V3 / "course.yaml", "launch_sim")
 Z = 0.8 + LAUNCH["z"]
@@ -22,7 +22,7 @@ MAP_MARGIN_M = 0.20            # refnav.node's map_margin_m
 
 
 def _route_ned():
-    pts = json.loads((ROOT / "routes" / "route_v5.json").read_text())["route"]   # a fixed route: the band tests pin its spots
+    pts = json.loads((V3 / "routes" / "route_v5.json").read_text())["route"]   # a fixed route: the band tests pin its spots
     return [(0.0, 0.0)] + [(f, -l) for f, l in pts]              # forward/left from a north-facing launch
 
 
@@ -111,6 +111,6 @@ def test_the_flown_route_clears_every_surface_at_its_height() -> None:
     """route.json at main.py's height (the window route at the window's centre height) keeps 0.40 m everywhere."""
     import re
     height = float(re.search(r"^HEIGHT_M = ([0-9.]+)", (ROOT / "main.py").read_text(), re.M).group(1))
-    pts = json.loads((ROOT / "route.json").read_text())["route"]
+    pts = json.loads((V3 / "route.json").read_text())["route"]
     path = M.builder(CM, LAUNCH, height + LAUNCH["z"], M.DRONE_RADIUS_M + MAP_MARGIN_M, 0.3)([(0.0, 0.0)] + [(f, -l) for f, l in pts])
     assert np.nanmin(path.clearance) >= 0.40

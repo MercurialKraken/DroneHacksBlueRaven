@@ -32,7 +32,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
-from nav.course_map import CourseMap
+from nav.course_map import CourseMap, course_dir
 from nav.frames import load_launch
 from nav.map_align import SE2, CorrectorParams, DriftCorrector, correction_ned, wrap
 from refnav import depth as D
@@ -57,10 +57,10 @@ class MapAlignNode(Node):
         self.base_frame = p("base_frame", "base_link")
         self.rate_hz = float(p("rate_hz", 5.0))
         self.min_accepted = int(p("min_accepted", 3))
-        launch = load_launch(p("course_yaml", str(ROOT / "maps" / "course.yaml")), p("launch_key", "launch_sim"))
+        launch = load_launch(p("course_yaml", str(course_dir() / "course.yaml")), p("launch_key", "launch_sim"))
         self.launch_z = launch["z"]
         self.start = SE2(launch["x"], launch["y"], math.radians(launch["yaw_deg"] - 90.0))
-        cm = CourseMap.load(p("course_map", str(ROOT / "maps" / "course_sdf.npz")))
+        cm = CourseMap.load(p("course_map", str(course_dir() / "course_sdf.npz")))
         self.dc = DriftCorrector(cm, self.start, CorrectorParams(tau_s=float(p("tau_s", 2.0))))
         self.K = None; self.q = None; self.pos = None; self.extrinsic = None
         self.t_last = -1e9; self.accepted = 0; self.skips: dict[str, int] = {}

@@ -8,7 +8,7 @@ Run from the repository root, with the onboard services (cuVSLAM, vision bridge,
 Inputs (all standard ROS):
   depth        sensor_msgs/Image (16UC1 mm or 32FC1 m) + CameraInfo           depth_topic, depth_info_topic
   pose         TF map <- the depth image's frame_id, at the image's stamp. The chain is
-               map -> odom (this node, from maps/course.yaml, until Task 2 publishes a corrected one)
+               map -> odom (this node, from the active course's course.yaml, until Task 2 publishes a corrected one)
                -> base_link (onboard/adapters/px4_odom.py, PX4's estimate) -> camera (static TF)
   health       std_msgs/Bool, true = the estimator feeding PX4 is healthy        health_topic
   correction   geometry_msgs/PoseStamped from nav.map_align_node (Task 2): the SE2 drift correction
@@ -57,7 +57,7 @@ from tf2_ros import Buffer, StaticTransformBroadcaster, TransformListener
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 from nav.frames import (correction_in_odom, load_launch, map_from_odom, quaternion_z,  # noqa: E402
                         yaw_from_quaternion)
 from nav.live_map import LiveObstacleLayer, LiveParams, PoseGate  # noqa: E402
@@ -87,8 +87,8 @@ class LiveMapNode(Node):
     def __init__(self) -> None:
         super().__init__("blueraven_live_map")
         dp = self.declare_parameter
-        course_path = Path(dp("course_map", str(ROOT / "maps" / "course_sdf.npz")).value)
-        config_path = Path(dp("course_config", str(ROOT / "maps" / "course.yaml")).value)
+        course_path = Path(dp("course_map", str(course_dir() / "course_sdf.npz")).value)
+        config_path = Path(dp("course_config", str(course_dir() / "course.yaml")).value)
         self.launch_key = dp("launch_key", "launch").value
         self.map_frame = dp("map_frame", "map").value
         self.odom_frame = dp("odom_frame", "odom").value

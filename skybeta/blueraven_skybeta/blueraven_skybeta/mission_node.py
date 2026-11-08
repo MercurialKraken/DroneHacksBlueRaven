@@ -27,6 +27,7 @@ from blueraven_skybeta.mission_core import MissionParams, SkybetaMission, _repo_
 ROOT = _repo_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from nav.course_map import course_dir
 from nav.frames import (MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC, load_launch,  # noqa: E402
                         pose_msg_fields, quaternion_z, transform_from_pose_fields, yaw_from_quaternion)
 
@@ -42,7 +43,7 @@ class SkybetaMissionNode(Node):
         # from its default and rejects an int for a double at start-up); casts below restore the intended types
         from rcl_interfaces.msg import ParameterDescriptor
         loose = ParameterDescriptor(dynamic_typing=True)
-        cfg = Path(dp("course_config", str(ROOT / "maps" / "course.yaml")).value)
+        cfg = Path(dp("course_config", str(course_dir() / "course.yaml")).value)
         launch_key = dp("launch_key", "launch").value                  # the real mark on the drone
         # the SAME value the flight interface gets: it corrects poses for it, but not twists, so we do
         self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0, loose).value)

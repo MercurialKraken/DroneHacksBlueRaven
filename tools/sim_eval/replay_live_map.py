@@ -8,7 +8,7 @@ and nothing is commanded. Two live layers run side by side on every depth frame:
             Unexplained returns here are real differences between the course map and the sim world
             (training props, layout changes), or depth errors. No pose gate.
   estimate  pose from TF map <- camera, built from the bag's /tf (px4_odom's odom -> base_link) and
-            map -> odom from maps/course.yaml (--launch-key), through the same PoseGate as the node.
+            map -> odom from the course.yaml (--launch-key), through the same PoseGate as the node.
             Shows what the live map would have done in flight, including around VIO jumps.
 
     python3 tools/sim_eval/replay_live_map.py ~/bags/<run> --out runs/live_<run>
@@ -34,7 +34,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 from nav.frames import correction_in_odom, load_launch, map_from_odom, yaw_from_quaternion  # noqa: E402
 from nav.live_map import LiveObstacleLayer, LiveParams, PoseGate  # noqa: E402
 from refnav.depth import decode_depth, quat_to_mat  # noqa: E402
@@ -71,8 +71,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="SIM-ONLY: replay a bag through the live map")
     ap.add_argument("bag")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--config", default=str(ROOT / "maps" / "course.yaml"))
-    ap.add_argument("--course-map", default=str(ROOT / "maps" / "course_sdf.npz"))
+    ap.add_argument("--config", default=str(course_dir() / "course.yaml"))
+    ap.add_argument("--course-map", default=str(course_dir() / "course_sdf.npz"))
     ap.add_argument("--launch-key", default="launch_sim")
     ap.add_argument("--depth-scale", type=float, default=1.0)
     ap.add_argument("--max-rate-hz", type=float, default=5.0)

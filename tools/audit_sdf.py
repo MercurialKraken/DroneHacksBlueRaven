@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OFFLINE (laptop): how far the course map's planning field is from the EXACT distance to the mesh.
 
-    python tools/audit_sdf.py maps/course.yaml            # -> maps/audit/report.txt + audit_z*.png
+    python tools/audit_sdf.py courses/<name>/course.yaml   # -> courses/<name>/audit/report.txt + audit_z*.png
 
 The map is built on a 5 cm grid (from 1.67 cm voxels) and read by trilinear interpolation, so it
 carries a small error. This measures it, on a dense grid at flight heights everywhere within
@@ -29,7 +29,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 from build_course_sdf import parse_obj_groups, select_groups  # noqa: E402
 
 
@@ -56,7 +56,7 @@ def exact_free_distance(mesh: trimesh.Trimesh, pts: np.ndarray, chunk: int = 200
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("config", nargs="?", default=str(ROOT / "maps" / "course.yaml"))
+    ap.add_argument("config", nargs="?", default=str(course_dir() / "course.yaml"))
     ap.add_argument("--heights", type=float, nargs="*", default=[0.7, 1.0, 1.3])
     ap.add_argument("--spacing", type=float, default=0.025)
     ap.add_argument("--band", type=float, default=0.6, help="only points this close to a surface (m)")

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """OFFLINE (laptop): the clearance of the path the drone flies for a route file (waypoint mode), on a course map.
 
-    python tools/check_waypoint_path.py routes/route_v6_start2.json                      # the real mark, maps/course_sdf.npz
-    python tools/check_waypoint_path.py routes/route_v6_start2_sim.json --launch launch_sim --map other.npz
-    python tools/check_waypoint_path.py routes/x.json --pose -2.515,0.914,90             # map x, y and yaw (deg) of take-off
+    python tools/check_waypoint_path.py route_v6_start2                                  # courses/ACTIVE: its routes/ and map
+    python tools/check_waypoint_path.py route_v5 --course v3-published --launch launch_sim
+    python tools/check_waypoint_path.py x.json --pose -2.515,0.914,90                    # map x, y and yaw (deg) of take-off
 
 The path is built exactly as refnav.launch.py's mission builds it (the route's corners as arcs within corner_cut_m),
 placed at the launch pose and flight height, and measured against the map's planning field. The flight reads none
@@ -23,7 +23,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
+from nav.course_map import CourseMap, course_dir  # noqa: E402
 from nav.frames import load_launch  # noqa: E402
 from refnav import core as C  # noqa: E402
 from refnav import follow as F  # noqa: E402
@@ -50,22 +50,23 @@ def check(doc: dict[str, Any], cm: CourseMap, launch: dict[str, float]) -> dict[
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("route", help="route file: {route: [[forward, left], ...], params: {...}}")
-    ap.add_argument("--map", default=str(ROOT / "maps" / "course_sdf.npz"))
-    ap.add_argument("--course", default=str(ROOT / "maps" / "course.yaml"), help="for --launch and base_link_z")
+    ap.add_argument("route", help="a name in the course's routes/, or a route file (*.json)")
+    ap.add_argument("--course", help="courses/<course>/: its course.yaml and course_sdf.npz (default: courses/ACTIVE)")
     ap.add_argument("--launch", default="launch", help="course.yaml entry: launch (the real mark) or launch_sim")
     ap.add_argument("--pose", help="x,y,yaw_deg of the take-off pose in the map frame, instead of --launch")
     a = ap.parse_args(argv)
-    launch = load_launch(a.course, a.launch)
+    d = course_dir(a.course)
+    route = Path(a.route) if a.route.endswith(".json") else d / "routes" / f"{a.route}.json"
+    launch = load_launch(d / "course.yaml", a.launch)
     if a.pose:
         launch["x"], launch["y"], launch["yaw_deg"] = (float(v) for v in a.pose.split(","))
-    doc = json.loads(Path(a.route).read_text(encoding="utf-8"))
-    r = check(doc, CourseMap.load(a.map), launch)
+    doc = json.loads(route.read_text(encoding="utf-8"))
+    r = check(doc, CourseMap.load(d / "course_sdf.npz"), launch)
     labels = doc.get("labels", []) if isinstance(doc, dict) else []
     k = r["near_corner"]
     name = "take-off" if k == 0 else f"corner {k}" + (f" ({labels[k - 1]})" if k <= len(labels) and labels[k - 1] else "")
-    print(f"{a.route}: {r['length']:.2f} m at z {r['z']:.2f} m, take-off ({launch['x']:.3f}, {launch['y']:.3f}) "
-          f"yaw {launch['yaw_deg']:.1f} deg, map {a.map}")
+    print(f"{route}: {r['length']:.2f} m at z {r['z']:.2f} m, take-off ({launch['x']:.3f}, {launch['y']:.3f}) "
+          f"yaw {launch['yaw_deg']:.1f} deg, course {d.name}")
     print(f"minimum clearance {r['min']:.3f} m (drone radius {M.DRONE_RADIUS_M} m: {r['min'] - M.DRONE_RADIUS_M:+.3f} m "
           f"to spare) at map ({r['at_map'][0]:.3f}, {r['at_map'][1]:.3f}), {r['at_s']:.2f} m along, near {name}")
     if r["outside_map"]:

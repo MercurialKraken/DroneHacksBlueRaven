@@ -1,12 +1,12 @@
 """Signed distance fields of the published course, in the `map` frame. Runtime: numpy only.
 
-    cm = CourseMap.load("maps/course_sdf.npz")
+    cm = CourseMap.load(course_dir() / "course_sdf.npz")
     d = cm.distance(points, field="planning")        # (N,3) metres -> (N,) signed metres
     g = cm.gradient(points, field="planning")        # (N,3) -> (N,3) unit vectors
     d, g = cm.query(points, field="localization")   # both at once (one lookup)
 
 Frame `map`: the published course file's coordinates, metres, Z up. For the DroneHacks 2026 OBJ
-that is x east, y north, origin at the floor centre (see maps/README.md).
+that is x east, y north, origin at the floor centre (see courses/start-2026-11-07/README.md).
 
 Sign: positive in free space, negative inside an object, about 0 on a surface. The gradient is
 the direction of increasing distance, i.e. AWAY from the nearest surface. Midway between two
@@ -18,7 +18,7 @@ cell. Anything outside the box spanned by the voxel centres, or a non-finite poi
 for distance and gradient alike: the caller decides (the planner treats nan as blocked,
 localization ignores the point).
 
-The file is built offline by tools/build_course_sdf.py from maps/course.yaml.
+The file is built offline by tools/build_course_sdf.py from courses/<name>/course.yaml.
 """
 from __future__ import annotations
 
@@ -27,6 +27,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+COURSES = Path(__file__).resolve().parents[1] / "courses"
+
+
+def course_dir(name: str | None = None) -> Path:
+    """courses/<name>: one course's course.yaml, meshes, course_sdf.npz and routes. None: the one courses/ACTIVE names."""
+    return COURSES / (name or (COURSES / "ACTIVE").read_text().strip())
 
 _RESERVED = frozenset({"field_names", "origin", "cell", "meta_json"})
 _O = np.arange(2)

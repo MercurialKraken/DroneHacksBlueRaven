@@ -11,7 +11,7 @@ it is not a display copy of a hidden managed controller.
 | `refnav/node.py` | Subscribe to real ROS 2 sensor/PX4 messages; publish Offboard setpoints and vehicle commands | `RefNav.__init__`, `_tick`, `_command` |
 | `refnav/follow.py` | Smooth path through the route, speed profile, the reference the aircraft follows | `fillet_path`, `Follower.step` |
 | `refnav/depth.py` | Decode depth and measure observed free space along the path ahead | `DepthFrame`, `path_clearance` |
-| `refnav/launch.py`, `flight.yaml`, `route.json` | Standard ROS deployment arguments/settings shared by hardware and sim | `arguments` |
+| `refnav/launch.py`, `flight.yaml`, `courses/ACTIVE` + its `route.json` | Standard ROS deployment arguments/settings shared by hardware and sim | `arguments` |
 | `refnav/gps.py` | Read native GPS before the GPS-only lesson; no publishers | `wait_for_gps` |
 | `tests/test_refnav_core.py` | Unit tests for the actual local flight/depth package | `python3 -m pytest -q tests` |
 | `flight-source.json` | Hashes of the initial baseline copied into this project | Initial provenance, not your current run manifest |

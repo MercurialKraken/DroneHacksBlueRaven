@@ -26,7 +26,7 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
                  also calls /skybeta/hold. Silence means a re-arm cannot hand control back to this
                  node: the interface requires a setpoint from it in the last second.
 
-Frames: odom is the stack's ENU startup frame; `map` is the course frame (maps/course.yaml).
+Frames: odom is the stack's ENU startup frame; `map` is the course frame (courses/<name>/course.yaml).
 map <- odom is yaw + translation (nav.frames.map_from_startup_odom).
 Drift: INIT's map <- odom is handed to map_align once (Command.map_from_odom_init, published latched
 on nav.frames.MAP_FROM_ODOM_INIT_TOPIC); map_align starts from it and publishes the corrected
@@ -45,14 +45,14 @@ import numpy as np
 
 
 def _repo_root() -> Path:
-    """The team repository (nav/, maps/): found above this file (a --symlink-install build, the
+    """The team repository (nav/, courses/): found above this file (a --symlink-install build, the
     skybeta default, resolves back to the source), or named by BLUERAVEN_REPO."""
     import os
     env = os.environ.get("BLUERAVEN_REPO")
     for p in ([Path(env)] if env else []) + list(Path(__file__).resolve().parents):
         if (p / "nav" / "course_map.py").exists():
             return p
-    raise ImportError("blueraven_skybeta needs the team repository (nav/, maps/): clone it into "
+    raise ImportError("blueraven_skybeta needs the team repository (nav/, courses/): clone it into "
                       "~/team_ws/src or set BLUERAVEN_REPO")
 
 

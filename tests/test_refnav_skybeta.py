@@ -22,7 +22,8 @@ from refnav import depth as D  # noqa: E402
 from refnav import follow as F  # noqa: E402
 
 DT = 0.05                                     # refnav's 20 Hz tick
-DOC = json.loads((ROOT / "routes" / "route_v6_start2.json").read_text())        # Chelsea's file, unchanged
+ROUTES = ROOT / "courses" / "start-2026-11-07" / "routes"
+DOC = json.loads((ROUTES / "route_v6_start2.json").read_text())        # Chelsea's file, unchanged
 LAUNCH_PARAMS = {"depth_mode": "blind", "pilot_arms": True, "wait_s": math.inf, "arm_wait_s": math.inf,
                  "land_timeout_s": math.inf, "height_m": 0.7, "path_source": "waypoints",
                  "corner_cut_m": 0.05}                                             # refnav.launch.py's
@@ -171,7 +172,7 @@ def test_waypoints_fly_within_the_corner_cut_and_turn_only_while_moving():
 @pytest.mark.parametrize("name", ["route_v6_start2", "route_v6_start2_sim", "route_v6_start2_stage1",
                                   "route_v6_start2_stage1_sim"])
 def test_chelseas_route_files_load_unchanged(name):
-    prm, unknown = C.params_from_doc(json.loads((ROOT / "routes" / f"{name}.json").read_text()), LAUNCH_PARAMS)
+    prm, unknown = C.params_from_doc(json.loads((ROUTES / f"{name}.json").read_text()), LAUNCH_PARAMS)
     assert prm.speed_mps == 0.3 and not unknown
 
 

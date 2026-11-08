@@ -1,4 +1,4 @@
-"""The `map` <- `odom` transform at launch, from maps/course.yaml. Pure (numpy; pyyaml to read the file).
+"""The `map` <- `odom` transform at launch, from courses/<name>/course.yaml. Pure (numpy; pyyaml to read the file).
 
 `map` is the course file's frame (x east, y north, z up). `odom` is PX4's local frame as
 onboard/adapters/px4_odom.py publishes it: ENU with x = PX4 east and y = PX4 north, origin at

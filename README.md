@@ -22,7 +22,7 @@ Use Reset simulation in the Session UI when you need a fresh simulated vehicle.
 The cloud companion also provides `python` as Python 3 when no interpreter of
 that name has already been installed. Outside the cloud, use the reviewed
 local/hardware deployment configuration. This source imports no runtime library:
-`flight.yaml`, `route.json` and `refnav/launch.py` are ordinary editable files.
+`flight.yaml`, `courses/<course>/route.json` and `refnav/launch.py` are ordinary editable files.
 `/etc/flyx/mission.yaml` (or `DRONE_PARAMS_FILE`) may supply the deployment's ROS
 parameters. The hardware default clock is system time; simulation deployment
 selects simulated time. Both use the native topic/frame contract documented in
@@ -37,6 +37,15 @@ nodes, launch configuration and process manager. See `onboard/README.md`.
 `python3 onboard/services.py status` names the running source and log files;
 stop/start explicitly after editing perception code. Startup never arms.
 
+## Courses (`courses/`)
+
+One folder per course holds everything that must match: `course.yaml`, the meshes under `course/`, the distance
+field `course_sdf.npz`, the routes under `routes/` and `route.json` (the sim-spawn route `main.py` flies).
+`courses/ACTIVE` names the default course; every map, route and tool default reads it. Pick one per command
+with `course:=NAME` (`refnav.launch.py`), `--course NAME` (`tools/check_waypoint_path.py`, `tools/drone_sim/run.sh`).
+On the T4, `/opt/devenv/use_course.sh NAME REPO` copies `REPO/courses/NAME`, rebuilds the Gazebo world and
+occupancy from it and switches the dashboard's map and route; Reset world loads it. A new course is a new folder.
+
 ## Drone-faithful sim runs on the T4 (`tools/drone_sim/`)
 
 SIM-ONLY. `tools/drone_sim/run.sh` flies the drone program on the T4 the way it runs on skybeta-09: the
@@ -48,13 +57,16 @@ lets `pilot.py` arm and switch to Position like the safety pilot, and scores aga
 It leaves nothing running. Run inside the `dronehacks_gpu` container, one flight at a time:
 
 ```sh
+MISSION=blueraven_skybeta/refnav.launch.py tools/drone_sim/run.sh --route courses/start-2026-11-07/routes/route_v6_start2_sim.json \
+  --name full route:=route_v6_start2_sim use_sim_time:=true
 MISSION=blueraven_skybeta/blueraven.launch.py tools/drone_sim/run.sh --route none --name hover hover_s:=10.0
 ```
 
 - `MISSION`: PACKAGE/LAUNCH_FILE of the drone program; every `ARG:=VALUE` goes to that launch file.
 - `--depth none|sim`: `sim` publishes the sim's stereo depth as `/oak/stereo/image_raw` + `camera_info` (640x400 16UC1 mm).
 - `--latency-ms MS`, `--drop P`: added vision latency and frame drop probability on the cuVSLAM stereo input (default 0 and 0.01, the sim's own).
-- `--route FILE|none`: route scored for completion (default `route.json`); `--timeout S`: wall seconds before the pilot lands it.
+- `--course NAME`: must be the course the T4 world was built from (default: that one); it is passed to the mission as `course:=NAME`.
+- `--route FILE|none`: route scored for completion (default the course's `route.json`); `--timeout S`: wall seconds before the pilot lands it.
 
 The score (`score.json` in the bag folder `~/bags/drone_sim_NAME_<UTC>/`) gives route points reached, flight time,
 minimum truth clearance, estimate error p95 (PX4 xy against truth), landing distance and whether PX4 disarmed

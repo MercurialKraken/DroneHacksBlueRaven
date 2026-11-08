@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """SIM-ONLY scorer: Gazebo truth against what the drone did. Never import this from flight code.
 
-    python3 score.py OUT.json ROUTE_JSON|none      runs until SIGTERM, then writes OUT.json and prints it
+    python3 score.py OUT.json ROUTE_JSON|none COURSE_YAML      runs until SIGTERM, then writes OUT.json and prints it
 
-Route points are [forward, left] from the sim launch mark (maps/course.yaml launch_sim); reached = truth within 0.30 m.
+Route points are [forward, left] from the course's sim launch mark (launch_sim); reached = truth within 0.30 m.
 Clearance is the truth centre's distance to the nearest occupied 5 cm voxel of the sim world (floor excluded), airborne only.
 """
 import json
@@ -23,21 +23,20 @@ from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from scipy.ndimage import distance_transform_edt
 
-REPO = Path(__file__).resolve().parents[2]
 OCCUPANCY = '/opt/devenv/occupancy-5cm.npz'
 REACH_M = 0.30
 AIRBORNE_M = 0.15       # truth height above the take-off height
 
 
 class Score(Node):
-    def __init__(self, route_file):
+    def __init__(self, route_file, course_yaml):
         super().__init__('sim_score', parameter_overrides=[Parameter('use_sim_time', value=True)])
         occ = np.load(OCCUPANCY)
         grid = occ['occupied'].copy()
         self.res, self.origin = float(occ['resolution_m']), occ['origin_enu_m']
         grid[:, :, :int(round(-self.origin[2] / self.res))] = False          # the floor slab below z = 0
         self.clear = distance_transform_edt(~grid) * self.res
-        L = yaml.safe_load((REPO / 'maps' / 'course.yaml').read_text())['launch_sim']
+        L = yaml.safe_load(Path(course_yaml).read_text())['launch_sim']
         a = math.radians(L['yaw_deg'])
         fwd, left = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
         pts = [] if route_file == 'none' else json.loads(Path(route_file).read_text())['route']
@@ -96,9 +95,9 @@ class Score(Node):
 
 
 def main():
-    out, route = sys.argv[1], sys.argv[2]
+    out, route, course_yaml = sys.argv[1:4]
     rclpy.init()
-    s = Score(route)
+    s = Score(route, course_yaml)
     stop = []
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
