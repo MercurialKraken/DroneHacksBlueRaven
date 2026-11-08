@@ -20,8 +20,9 @@ DESCEND_MPS = 0.35          # PX4's land detector needs a commanded descent >= 1
 GROUND_PRESS_MPS = 0.60     # on the ground GROUND_WAIT_S without PX4 disarming: press down firmer
 GROUND_WAIT_S = 3.0
 GROUND_BAND_M = 0.06        # "on the ground": within this of the pad's height
-STATE_STALE_S = 0.5         # /skybeta/state is 5 Hz
-ODOM_STALE_S = 0.25         # cuVSLAM odometry is 30 Hz
+STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
+ODOM_STALE_S = 1.0          # real skybeta-09 odometry arrives with gaps up to 0.39 s under load
+HOLD_S = 0.25               # a shorter silence than STALE holds position (zero twist) instead of landing
 _Q_X180 = (0.0, 1.0, 0.0, 0.0)  # FLU <-> FRD, and ENU-about-the-pad <-> NED-about-the-pad
 
 
@@ -126,14 +127,15 @@ def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset
 def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, state: dict[str, Any] | None,
             t_odom: float, t_state: float, now: float, yaw_rate_dps: float, yaw_offset_rad: float
             ) -> tuple[tuple[float, float, float, float] | None, str | None]:
-    """-> (the twist to publish this tick or None, why to land now). A stale pose or state in the air stops the
-    drone and lands it; on the ground nothing is sent, so the interface never enters Offboard on it."""
+    """-> (the twist to publish this tick or None, why to land now). In the air a silence over HOLD_S holds still,
+    over the STALE limits it lands; on the ground nothing is sent, so the interface never enters Offboard on it."""
     stale = (f"odometry silent for {now - t_odom:.2f} s" if now - t_odom > ODOM_STALE_S else
              f"/skybeta/state silent for {now - t_state:.2f} s" if now - t_state > STATE_STALE_S else None)
+    hold = now - t_odom > HOLD_S or now - t_state > HOLD_S
     if out.phase == "land":
         return descent.twist(now, v, state), None
-    if stale and out.phase in C.AIRBORNE:
+    if (stale or hold) and out.phase in C.AIRBORNE:
         return (0.0, 0.0, 0.0, 0.0), stale
-    if stale or pad is None:
+    if hold or pad is None:
         return None, None
     return twist(out, v, pad, yaw_rate_dps, yaw_offset_rad), None

@@ -232,6 +232,13 @@ def test_a_silent_pose_or_state_in_flight_stops_and_lands_at_once(gap):
     assert m.land_reason.startswith("landing requested"), m.land_reason
 
 
+def test_a_short_odometry_gap_in_flight_holds_still_and_the_route_continues():
+    m, sk, sent = flight(odom_gap=(40.0, 40.4))                   # skybeta-09 showed 0.39 s gaps under load
+    assert [tw for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.4] and all(
+        tw == (0.0, 0.0, 0.0, 0.0) for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.4)
+    assert (m.result, m.land_reason) == ("complete", "route complete")
+
+
 def test_the_take_off_pose_is_logged_again_only_when_it_moves():
     pad = S.Pad(1.0, 2.0, 0.0, 0.3)
     assert S.moved(pad, None) and not S.moved(S.Pad(1.01, 2.0, 0.0, 0.3 + math.radians(0.5)), pad)
