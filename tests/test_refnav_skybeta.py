@@ -45,9 +45,13 @@ class Stack:
     as the interface assumes for poses; a twist is only enu_to_ned'd. The vision frame starts at `start`."""
 
     def __init__(self, offset: float, start_yaw_enu: float, detect_mps: float = 0.275, tau: float = 0.3,
-                 delay: float = 0.0, skew: float = 0.0) -> None:
+                 delay: float = 0.0, skew: float = 0.0, push_body: tuple[float, float] = (0.0, 0.0),
+                 climb_push: tuple[float, float] = (0.0, 0.0)) -> None:
         self.off, self.tau, self.delay = offset, tau, delay   # PX4's xy velocity response: lag tau after a dead time
         self.skew = skew        # the T4: velocity turns ~skew x the nose's angle off it, the other way (uneven drag)
+        # the REAL drone (flight 160449): PX4 delivers the twist plus a push fixed to the airframe, (forward, left) m/s,
+        # in the air; climb_push adds to it while climbing (the take-off drift)
+        self.push_body, self.climb_push = push_body, climb_push
         self.queue: list[tuple[float, np.ndarray]] = []
         self.detect_mps = detect_mps                  # PX4's land detector: commanded descent it needs on the ground
         self.p = np.zeros(3)                          # PX4 NED
@@ -88,6 +92,14 @@ class Stack:
         if self.skew and np.hypot(*cmd[:2]) > 1e-3:
             nose = math.remainder(math.pi / 2 - self.yaw_enu + self.off - math.atan2(cmd[1], cmd[0]), math.tau)
             cmd = _rz(-self.skew * math.sin(2.0 * nose) / 2.0) @ cmd
+        if flying and self.p[2] < -0.02:
+            pf, pl = self.push_body
+            if self.vel[2] < -0.1:                                # climbing (NED: up is negative)
+                pf, pl = pf + self.climb_push[0], pl + self.climb_push[1]
+            if pf or pl:
+                c, s = math.cos(self.yaw_enu), math.sin(self.yaw_enu)
+                push = _rz(self.off) @ _enu_to_ned(np.array([pf * c - pl * s, pf * s + pl * c, 0.0]))
+                cmd = cmd + np.r_[push[:2], 0.0]
         self.vel += (cmd - self.vel) * min(1.0, DT / self.tau)
         if flying and t - self.t_twist < 1.0:
             self.yaw_enu += wz * DT
@@ -108,11 +120,13 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
            carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
            state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None,
            doc: dict = DOC, tau: float = 0.3, lag_s: float | None = None, wall: Callable | None = None,
-           trail: list | None = None, delay: float = 0.0, skew: float = 0.0, prm_over: dict | None = None):
+           trail: list | None = None, delay: float = 0.0, skew: float = 0.0, prm_over: dict | None = None,
+           push_body: tuple[float, float] = (0.0, 0.0), climb_push: tuple[float, float] = (0.0, 0.0)):
     prm, _ = C.params_from_doc(doc, {**LAUNCH_PARAMS, **(prm_over or {})})
     m = C.Mission(prm)
-    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps, tau, delay, skew), C.Vehicle(), None, S.Descent()
-    track = S.Track()
+    sk = Stack(offset, start_yaw_enu, detect_mps, tau, delay, skew, push_body, climb_push)
+    v, pad, descent = C.Vehicle(), None, S.Descent()
+    track, integ = S.Track(), S.XYIntegral()
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
     t = DT
@@ -130,7 +144,7 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.yaw_enu += carry[2]
             carry = None
         tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, offset,
-                             tau if lag_s is None else lag_s, prm.speed_mps)
+                             tau if lag_s is None else lag_s, prm.speed_mps, integ, prm.ki_xy)
         if land:
             m.request_land(land)
         if tw is not None:
@@ -475,3 +489,78 @@ def test_the_window_route_tracks_with_the_t4s_nose_dependent_velocity_skew(tau, 
     assert m.result == "complete", (m.result, m.why)
     path = np.stack([m.path.x, m.path.y], 1)
     assert max(np.hypot(*(path - p[:2]).T).min() for _, ph, p in trail if ph == "follow") < limit
+
+
+# ---- the take-off hold as a gate + the position integral (Chelsea, 2026-11-07; real flight 160449) ----------------
+R1_DOC = json.loads((ROUTES.parent.parent / "start-2026-11-07-tape" / "routes" / "route_v7_cp2_simple_sim.json").read_text())
+REAL_PUSH = (-0.056, 0.100)       # 160449 follow phase: PX4 delivered this much LESS than commanded, body (forward, left) m/s
+REAL_CLIMB = (-0.30, 0.06)        # + this while climbing: reproduces 160449's ~0.4 m back-left take-off drift at 0.7 m
+GATED = {"height_m": 0.4, "speed_mps": 0.10, "hover_s": 3.0, "hover_tol_m": 0.05, "hover_dwell_s": 1.0,
+         "hover_max_s": 40.0, "hover_timeout": "land", "ki_xy": 0.08}
+
+
+def _gated_flight(push=REAL_PUSH, climb=REAL_CLIMB, **over):
+    trail: list = []
+    m, sk, sent = flight(doc=R1_DOC, prm_over={**GATED, **over}, tau=0.55, lag_s=0.55, push_body=push,
+                         climb_push=climb, trail=trail, limit_s=250.0)
+    start = next(((t, pos) for t, ph, pos in trail if ph == "follow"), None)
+    path = np.c_[m.path.x, m.path.y]
+    off = [float(np.min(np.hypot(path[:, 0] - p[0], path[:, 1] - p[1]))) for t, ph, p in trail if ph == "follow"]
+    return m, start, off
+
+
+def test_the_real_push_without_the_integral_reproduces_160449s_steady_offset():
+    m, start, off = _gated_flight(ki_xy=0.0, hover_tol_m=0.0, hover_s=10.0)     # route1-chelsea before this change
+    assert start is not None and math.hypot(*start[1][:2]) > 0.15                # the hold did NOT get it back...
+    assert 0.18 < float(np.median(off)) < 0.26                                  # ...and it flies ~0.22 m off (real: 0.222)
+
+
+def test_the_gated_hold_with_the_integral_flies_back_over_the_take_off_point_against_the_real_push():
+    m, start, off = _gated_flight()
+    assert m.result == "complete"
+    assert math.hypot(*start[1][:2]) <= 0.05                                    # the route starts at the take-off point
+    assert float(np.percentile(off, 95)) < 0.04                                 # and the push no longer offsets it
+
+
+def test_without_the_integral_the_gate_never_opens_against_a_steady_push_and_lands():
+    m, start, off = _gated_flight(ki_xy=0.0)
+    assert start is None and m.result.startswith("landed: not back within 0.05 m of the take-off point")
+
+
+@pytest.mark.parametrize("deg", [0, 90, 180, 270])
+@pytest.mark.parametrize("mag", [0.05, 0.15])
+def test_a_push_of_any_direction_and_size_is_flown_back_before_the_route(deg, mag):
+    a = math.radians(deg)
+    m, start, off = _gated_flight(push=(mag * math.cos(a), mag * math.sin(a)),
+                                  climb=(0.3 * math.cos(a + 0.7), 0.3 * math.sin(a + 0.7)))
+    assert m.result == "complete" and math.hypot(*start[1][:2]) <= 0.05 and float(np.percentile(off, 95)) < 0.05
+
+
+def test_with_no_push_the_gate_and_integral_change_nothing():
+    m, start, off = _gated_flight(push=(0.0, 0.0), climb=(0.0, 0.0))
+    assert m.result == "complete" and math.hypot(*start[1][:2]) < 0.01 and float(np.percentile(off, 95)) < 0.02
+
+
+def test_the_hold_timeout_can_start_the_route_instead_of_landing():
+    m, start, off = _gated_flight(ki_xy=0.0, hover_max_s=8.0, hover_timeout="start")
+    assert start is not None and not m.result.startswith("landed: not back within")     # it flew the route from there
+
+
+@pytest.mark.parametrize("bad", [{"hover_timeout": "hover"}, {"hover_tol_m": 0.05, "hover_s": 10.0, "hover_max_s": 5.0},
+                                 {"ki_xy": -0.1}])
+def test_bad_hold_parameters_are_refused(bad):
+    with pytest.raises(ValueError):
+        C.params_from_doc(R1_DOC, {**LAUNCH_PARAMS, **GATED, **bad})
+
+
+def test_the_integral_is_body_frame_bounded_and_reset_outside_the_hold_and_follow():
+    i = S.XYIntegral()
+    for k in range(400):                                   # a 1 m error held for 20 s: the bound, not 1.6 m/s
+        n, e = i.step(k * DT, 1.0, 0.0, math.pi / 2, 0.08)
+    assert math.hypot(n, e) == pytest.approx(S.KI_MAX_MPS) and n > 0      # north error -> north push, any heading
+    n2, e2 = i.step(400 * DT, 0.0, 0.0, 0.0, 0.08)                          # the drone turned: the learned push turns too
+    assert (n2, e2) == pytest.approx((0.0, -S.KI_MAX_MPS), abs=1e-9)
+    j = S.XYIntegral()
+    for k in range(100):                                   # along the path (the reference's lead) is never integrated
+        j.step(k * DT, 0.5, 0.0, 0.0, 0.08, tangent=(1.0, 0.0))
+    assert (j.f, j.r) == (0.0, 0.0)

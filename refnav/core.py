@@ -75,6 +75,14 @@ class Params:
     climb_tol_m: float = 0.15
     climb_rate_mps: float = 0.5
     hover_s: float = 0.0                        # hold at height_m this long after the climb (0: straight on)
+    # The hold as a GATE (Chelsea, 2026-11-07): the climb drifts the drone (real flight 160449: 0.38 m back-left), so the
+    # route starts only once it is back over the take-off point, whatever the drift's size or direction.
+    hover_tol_m: float = 0.0                    # > 0: after hover_s, start once within this of the take-off xy...
+    hover_dwell_s: float = 1.0                  # ...for this long (0: hover_s alone, as before)
+    hover_max_s: float = 30.0                   # not back by then: hover_timeout
+    hover_timeout: str = "land"                 # "land", or "start" the route from where it is
+    ki_xy: float = 0.0                          # the skybeta adapter's integral gain (1/s^2) on the position error, in the
+                                                # body frame: a steady push is learned and cancelled (0: P only, as before)
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
@@ -134,6 +142,12 @@ class Params:
                 near = "the take-off point" if i == 0 else f"point {i}"
                 raise ValueError(f"route point {i + 1} {tuple(q)} is within 1 cm of {near}")
             prev = q
+        if self.hover_timeout not in ("land", "start"):
+            raise ValueError(f"hover_timeout must be 'land' or 'start', not {self.hover_timeout!r}")
+        if self.hover_tol_m > 0 and not self.hover_max_s >= self.hover_s:
+            raise ValueError(f"hover_max_s ({self.hover_max_s:g}) must be at least hover_s ({self.hover_s:g})")
+        if self.ki_xy < 0 or self.hover_tol_m < 0 or self.hover_dwell_s < 0:
+            raise ValueError("ki_xy, hover_tol_m and hover_dwell_s cannot be negative")
         if self.path_source not in PATH_SOURCES:
             raise ValueError(f"path_source must be one of {', '.join(PATH_SOURCES)}, not {self.path_source!r}")
         if self.path_source == "waypoints":
@@ -201,6 +215,7 @@ class Output:
     velocity: tuple[float, float] | None = None   # (vn, ve) feed-forward with the setpoint, follow mode only
     accel: tuple[float, float] | None = None      # (an, ae) feed-forward, follow mode only
     yawspeed: float | None = None                 # rad/s feed-forward: the slew this tick, follow mode only
+    tangent: tuple[float, float] | None = None    # (n, e) unit direction of the path at the reference, refnav follow only
     stream: bool = False              # publish offboard_control_mode + the setpoint this tick
     commands: list[str] = field(default_factory=list)   # "offboard" | "arm" | "land" | "disarm" (checked)
     events: list[str] = field(default_factory=list)
@@ -264,6 +279,8 @@ class Mission:
         self.path: F.Path | None = None             # through home and the targets, with its speed profile: built on the
         self.speed: np.ndarray | None = None        # ground before arming, as building it takes longer than a tick
         self.t_phase: float | None = None
+        self.t_within: float | None = None          # hover gate: since when the drone is within hover_tol_m of home
+        self.hold_m: float | None = None            # hover gate: its latest distance from home (status)
         self.t_started: float | None = None         # the first time this mission saw (its clock): where a replay starts
         self.t_last: float | None = None
         self.t_cmd: float | None = None
@@ -511,13 +528,32 @@ class Mission:
             target = self.home[2] - p.height_m
             self.sp[2] = max(target, self.sp[2] - p.climb_rate_mps * dt)
             if self.sp[2] <= target + 1e-9 and abs(v.pos[2] - target) < p.climb_tol_m:
-                if p.hover_s > 0:
-                    self._set("hover", now, out, f"holding {p.hover_s:.0f} s at {p.height_m:.1f} m")
+                if p.hover_s > 0 or p.hover_tol_m > 0:
+                    self.t_within, self.hold_m = None, None
+                    self._set("hover", now, out, f"holding {p.hover_s:.0f} s at {p.height_m:.1f} m" + (
+                        f", then until within {p.hover_tol_m:g} m of the take-off point for {p.hover_dwell_s:g} s "
+                        f"(at most {p.hover_max_s:.0f} s, then {p.hover_timeout})" if p.hover_tol_m > 0 else ""))
                 else:
                     self._start(now, out, v)
         elif ph == "hover":
-            if now - self.t_phase >= p.hover_s:
-                self._start(now, out, v)
+            held = now - self.t_phase
+            if p.hover_tol_m <= 0:
+                if held >= p.hover_s:
+                    self._start(now, out, v)
+            else:
+                d = math.hypot(v.pos[0] - self.sp[0], v.pos[1] - self.sp[1]) if v.pos is not None else math.inf
+                self.hold_m = d
+                self.t_within = (self.t_within if self.t_within is not None else now) if d <= p.hover_tol_m else None
+                if held >= p.hover_s and self.t_within is not None and now - self.t_within >= p.hover_dwell_s:
+                    out.events.append(f"back over the take-off point: {d:.3f} m after {held:.1f} s")
+                    self._start(now, out, v)
+                elif held >= p.hover_max_s:
+                    why = f"not back within {p.hover_tol_m:g} m of the take-off point after {held:.0f} s ({d:.2f} m off)"
+                    if p.hover_timeout == "start":
+                        out.events.append(f"{why}: starting the route from here")
+                        self._start(now, out, v)
+                    else:
+                        self._land(now, out, why)
         elif ph == "follow":
             self._follow(now, dt, out, v)
 
@@ -635,6 +671,8 @@ class Mission:
         self._slew_yaw(self.cmd.yaw - self.corr.yaw, dt)
         self.sp[0], self.sp[1] = back.point(*self.cmd.pos)
         out.velocity, out.accel = back.vector(*self.cmd.vel), back.vector(*self.cmd.acc)
+        psi = float(fol.path.psi[int(fol.path.index(fol.s_ref))])
+        out.tangent = back.vector(math.cos(psi), math.sin(psi))
         out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
         if fol.s_hat > self.best_s + 0.1:
             self.best_s, self.t_best = fol.s_hat, now
@@ -696,6 +734,7 @@ class Mission:
                 "depth_reject": None if self.depth_reject is None else self.depth_reject[1],
                 "mppi": self.ext,
                 "health_bad_s": (None if math.isinf(self.health.bad_for(now)) else round(self.health.bad_for(now), 2)),
+                "hold_m": None if self.hold_m is None or math.isinf(self.hold_m) else round(self.hold_m, 3),
                 **self._follow_status(), **self.counts}
 
     def _follow_status(self) -> dict[str, Any]:
