@@ -2,11 +2,11 @@
 
 Copied from competitor_example/launch/competitor.launch.py (skybeta 0.3.3): the flight_interface
 node and its arguments are unchanged, auto_offboard_on_arm defaults to true as the guide requires.
-Only the competitor node is swapped for ours.
+Only the competitor node is swapped for ours. No map, planner or map alignment can be started from
+here: flight position is raw odometry in the take-off frame (Arnav's directive, 2026-11-07).
 
     ros2 launch blueraven_skybeta blueraven.launch.py                      # a HOVER (the default)
-    ros2 launch blueraven_skybeta blueraven.launch.py mission:=course height_m:=0.7 cruise_mps:=0.3 cp4:=gate_b
-    ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=run1_cp1_real.json   # backup
+    ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=<name>.json
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -27,18 +27,14 @@ INTERFACE_ARGS = [
     ('odom_to_ned_yaw_offset_rad', '0.0', 'measured constant yaw between vision odom and PX4 (fixes rotation)'),
 ]
 MISSION_ARGS = [
-    ('mission', 'hover', "'hover' (take off, hold hover_s, land: first flights), 'course' or 'route' (hardcoded)"),
+    ('mission', 'hover', "'hover' (take off, hold hover_s, land) or 'route' (fly route_file's corners, land)"),
     ('hover_s', '5.0', 'hover: seconds to hold at height_m before landing'),
     ('route_file', '', "route: {\"route\": [[forward_m, left_m], ...]} from take-off; a bare name is in routes/"),
     ('route_max_radius_m', '0.0', 'route: corner arc radius; 0 = stop and turn at every corner'),
     ('route_hover_s', '3.0', 'route: seconds to hover over the take-off point before flying'),
     ('max_yaw_rate_dps', '45.0', 'cap on the turn rate, deg/s (an in-place 90 deg turn at 45 slipped VIO on the T4)'),
-    ('launch_key', 'launch', "course.yaml entry: 'launch' (the real mark) or 'launch_sim'"),
     ('height_m', '0.7', 'flight height above the launch point, metres'),
     ('cruise_mps', '0.3', 'cruise speed, m/s'),
-    ('cp4', 'gate_b', "checkpoint 4 route: 'gate_b' or 'window'"),
-    ('keep_centre_m', '0.02', 'planner: how much of the centred path a shortcut may lose (< 0: tight)'),
-    ('wall_centring', 'false', "course: steer toward the REAL corridor centre seen in depth (needs the depth node)"),
     ('competitor', 'true', 'also start the mission node'),
 ]
 
@@ -53,10 +49,7 @@ def generate_launch_description():
     mission = Node(
         package='blueraven_skybeta', executable='mission', name='blueraven_mission',
         output='screen', emulate_tty=True, condition=IfCondition(LaunchConfiguration('competitor')),
-        parameters=[{n: LaunchConfiguration(n)
-                     for n in ('mission', 'hover_s', 'route_file', 'route_max_radius_m', 'route_hover_s',
-                               'max_yaw_rate_dps', 'launch_key', 'height_m', 'cruise_mps', 'cp4', 'keep_centre_m',
-                               'wall_centring')} | {
+        parameters=[{n: LaunchConfiguration(n) for n, _, _ in MISSION_ARGS if n != 'competitor'} | {
                     'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
                     'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],   # twists too
     )

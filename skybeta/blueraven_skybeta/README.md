@@ -8,8 +8,7 @@ never requests a mode. The safety pilot arms and switches to Position; that is t
 | Mission | What it does | Needs |
 |---|---|---|
 | `hover` (**default**) | take off to `height_m`, hold `hover_s` over the take-off point, descend until landed and disarmed | odometry only: no map, no route |
-| `course` | plan the route from `maps/` at start-up (`nav/route_planner.py`), follow it, land at its end | the course map; optionally depth (`wall_centring:=true`) |
-| `route` | **hardcoded backup**: take off, hover `route_hover_s`, fly a route file's corners (forward, left from take-off), stopping to turn at each, land at the last | odometry and a file in `routes/`; no map, no planner, no map_align |
+| `route` | take off, hover `route_hover_s`, fly a route file's corners (forward, left from take-off), land at the last | odometry and a file in `routes/`; no map |
 
 Everything below is **written from the docs and the unit tests; none of it has run on the drone yet.**
 Check each step's expected output and stop at the first surprise.
@@ -91,7 +90,7 @@ by default), so nobody arms into the square by accident.
 ## 1. Put the code on the drone
 
 The team workspace is `~/team_ws/src` on the drone host (`/root/team_ws/src` inside containers). The stack
-builds it with `colcon build --symlink-install` when it starts, so the package finds `nav/` and `maps/`
+builds it with `colcon build --symlink-install` when it starts, so the package finds `nav/`
 in the repo it sits in. Copy the **reviewed** commit (no credentials on the drone; a USB stick or `scp`
 from a laptop is fine):
 
@@ -205,74 +204,55 @@ and takes over at **any** unexpected motion.
 Pass (sw-claude's checklist step 1): no VIO jumps; horizontal drift p95 under 0.15 m; lands and disarms
 by itself.
 
-## 6. Route mission: the hardcoded runs (CP1 first)
+## 6. Route mission: the hard-coded course
 
 ```bash
-ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=run1t_cp1_turn_real.json \
-  height_m:=0.7 odom_to_ned_yaw_offset_rad:=<MEASURED>      # NODE, drone on the mark facing course north
+# NODE, drone on the mark facing course north
+ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=<name>.json height_m:=0.7 odom_to_ned_yaw_offset_rad:=<MEASURED>
+# then count processes before arming: one flight_interface, one blueraven_mission (Shiori's checklist)
 ```
 
-Take off, hover `route_hover_s` (3 s) over the take-off point, fly the file's corners at `cruise_mps`, stop and turn
-in place at every corner (`route_max_radius_m` 0), land at the last corner. A bare file name is looked up in
-`routes/` (the one copy: edit it there). A bad file is refused at start-up and nothing is published. **Expect** in
-the log: `mission ROUTE (hardcoded, take-off frame: x forward, y left) from .../routes/<file>: N corners [...]`.
+Take off, hover `route_hover_s` (3 s) over the take-off point, fly the file's corners at `cruise_mps`, land at
+the last corner. A route file is `{"route": [[forward_m, left_m], ...]}`, metres from the take-off pose (the
+take-off point itself is implied). A bare file name is looked up in `routes/` (the one copy: edit it there with
+nano and relaunch, no rebuild). A bad file is refused at start-up and nothing is published. **Expect** in the
+log: `mission ROUTE (take-off frame: x forward, y left) from .../routes/<file>: N corners [...]`.
 
-| File (`_real` from the real mark, `_sim` from the sim spawn) | Flies | Ends |
-|---|---|---|
-| `run1_cp1` | 1.39 m forward, then to 1.74 m (to CP1) | 6.5 cm past CP1's line, 0.40 m from the north net |
-| `run1t_cp1_turn` | the same, then turns right and flies 1.05 m east | in the corridor east of CP1 |
-| `run2a_cp2` / `run2b_cp3` / `run2c_full` | the planner's route to CP2 / CP3 / the pad | right after that checkpoint |
+**No map at runtime.** The field was rebuilt and there is no map of it (Arnav's directive, 2026-11-07): flight
+position is raw odometry in the take-off frame. Course mode, the start-up planner, map alignment and the
+map-based wall centring were removed from this package; nothing here can start them.
 
-All come from one planner run (`routes/make_routes.py` regenerates them; the digest is in each file's `from`).
-
-**Before the first route flight:**
+**Before a route flight:**
 - **The frame offset must be known.** The route is flown with twists, which the interface does NOT rotate by
   the frame offset (poses it does). Our node rotates them by `odom_to_ned_yaw_offset_rad`; with the wrong value
   the drone flies off at that angle (T4: -90 deg). Measure it on the bench (`yaw_offset_probe`, section 4.2)
   or from the hover bag, and pass it.
 - **Point the drone exactly along course north** on the mark: the route is relative to the take-off heading.
-  3 deg off moves the CP1 end by about 9 cm and the far end of the maze by about 30 cm.
-- **Measure the real course.** The numbers come from the published map. On the net, measure from the mark to
-  CP1's line and to the north net, and edit `routes/run1*_real.json` (nano; relaunch, no rebuild). Keep the end
-  point 0.40 m from the net (radius 0.28 + margin).
-- **CP1 and the whole drone:** `maps/course.yaml` says the whole drone must cross a checkpoint line. On the map
-  the north net is only about 0.47 m past CP1's line, so the drone's centre crosses by 6.5 cm and its body does
-  not. If the real course has the same geometry, ask the organizers how CP1 is scored.
-
-Run order at practice: `run1_cp1`, then `run1t_cp1_turn`, then `run2a`, `run2b`, `run2c`; stop at the first
-that touches a net.
-
-## 7. Course mission (later)
-
-`mission:=course launch_key:=launch cp4:=gate_b` (or `window`). The route is planned at start-up and
-refused (nothing published) if a checkpoint can't be crossed. `keep_centre_m` (0.02) keeps the route
-centred in corridors. `wall_centring:=true` also steers toward the real corridor centre seen in Darion's
-depth (`/blueraven/depth/image_raw`; run his depth node too): **off until it has been checked on real
-depth**. With map_align running, the node publishes `/blueraven/map_from_odom_init` once and follows
-`/blueraven/map_from_odom`.
+  3 deg off moves a point 2 m away by about 10 cm.
+- **Corners:** `route_max_radius_m` 0 stops and turns in place at every corner. An in-place 90 deg turn at
+  45 deg/s slipped cuVSLAM 0.4 m on the T4: lower `max_yaw_rate_dps`, or use arcs (`route_max_radius_m` > 0,
+  turning while moving), only as tested in the sim.
+- **Staged:** first take-off -> through the CP2 gap -> land, then extend the file.
 
 ## Parameters
 
 | Name | Default | |
 |---|---|---|
-| `mission` | `hover` | `hover`, `course` or `route` |
+| `mission` | `hover` | `hover` or `route` |
 | `route_file` | (none) | route: a `.json` path, or a bare name in `routes/` |
 | `route_hover_s` | 3.0 | route: hover before flying (0 = go at once) |
 | `route_max_radius_m` | 0.0 | route: corner arcs (0 = stop and turn) |
+| `max_yaw_rate_dps` | 45.0 | cap on the turn rate |
 | `height_m` | 0.70 | flight height above the launch point |
 | `hover_s` | 5.0 | hover: seconds at height |
-| `launch_key` | `launch` | `maps/course.yaml` entry: `launch` (real mark) or `launch_sim` |
-| `cruise_mps` | 0.30 | course speed |
-| `cp4` | `gate_b` | `gate_b` or `window` |
-| `keep_centre_m` | 0.02 | planner centring (< 0: the tight default) |
-| `wall_centring` | false | course: depth-based corridor centring |
+| `cruise_mps` | 0.30 | route speed |
 | `odom_to_ned_yaw_offset_rad` | 0.0 | measured frame offset: passed to the interface (poses) and our node (twists) |
 | `anchor_setpoints` | false | the interface's translation fix |
 
 ## Not tested
 
 Never run under ROS or on the drone. Tested only as unit tests against a kinematic toy drone
-(`tests/test_skybeta_mission.py`, `tests/test_wall_centring*.py`): the phase logic, the aborts, restarts,
-the hover, the drift interface and centring. Unknown until the bench: real `/skybeta/state` contents, the
+(`tests/test_skybeta_mission.py`): the phase logic, the aborts, restarts, the hover and the route.
+The hover flew on skybeta-09 on 2026-11-07; the route has not flown. Unknown until the bench: real `/skybeta/state` contents, the
 interface's behaviour at the handover, PX4's tracking, the frame offset, and whether a twist descent
 lands and disarms cleanly.

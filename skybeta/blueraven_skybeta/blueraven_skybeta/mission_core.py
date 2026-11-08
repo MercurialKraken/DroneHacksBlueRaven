@@ -7,21 +7,22 @@ node wraps this class; everything that decides what to publish is here, so it is
 
 Sequence (the safety pilot arms, then switches to Position; the interface enters Offboard ONCE):
   INIT           nothing is published. Wait for fresh state and odometry, PX4 reporting landed, and
-                 the drone sitting still on the launch mark for settle_s, then fix map <- odom from
-                 the current pose (the odom origin is wherever the stack started, not the mark).
+                 the drone sitting still on the launch mark for settle_s, then fix the take-off frame
+                 from the current pose (the odom origin is wherever the stack started, not the mark).
   WAIT_OFFBOARD  publish a pose at the current position every tick (the interface only enters
                  Offboard if our node sent a setpoint in the last second). No movement. If odometry
                  is lost or jumps here, the stack may have restarted with a new origin (it restarts
-                 on clock steps): back to INIT, which fixes map <- odom again and re-sends it.
+                 on clock steps): back to INIT, which fixes the take-off frame again.
   TAKEOFF        offboard_active: a pose at the take-off point with z ramped up to the flight
                  height. Poses persist, so a stalled node leaves the drone holding.
   HOVER          (mission "hover", the first flights) the same pose for hover_s, then DESCEND over
-                 the take-off point. (mission "route": route_hover_s, then FOLLOW.) In TAKEOFF and HOVER, drifting more than hold_max_err_m from
-                 the take-off point means PX4 holds somewhere else than we command (the guide's
-                 EKF-vs-odom frame offset): DESCEND straight down at once, without steering.
-  FOLLOW         (mission "course" or "route") a TWIST every tick: the reference's feed-forward velocity plus a P term towards
-                 the reference point, and a yaw rate towards the path heading ahead. Poses are
-                 position-only through the interface, so a pose reference would crawl.
+                 the take-off point. (mission "route": route_hover_s, then FOLLOW.) In TAKEOFF and
+                 HOVER, drifting more than hold_max_err_m from the take-off point means PX4 holds
+                 somewhere else than we command (the guide's EKF-vs-odom frame offset): DESCEND
+                 straight down at once, without steering.
+  FOLLOW         (mission "route") a TWIST every tick: the reference's feed-forward velocity plus a P
+                 term towards the reference point, and a yaw rate towards the path heading ahead.
+                 Poses are position-only through the interface, so a pose reference would crawl.
   DESCEND        a downward twist (descend_mps), xy held over the end of the route, refreshed every
                  tick (twists expire after 1 s), until PX4 reports landed and disarmed.
   DONE / ABORTED nothing is ever published again. Abort: offboard_active drops (the pilot or a
@@ -30,18 +31,15 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
                  also calls /skybeta/hold. Silence means a re-arm cannot hand control back to this
                  node: the interface requires a setpoint from it in the last second.
 
-Frames: odom is the stack's ENU startup frame. The route and the course map are in `map` (the
-course frame, maps/course.yaml). map <- odom is yaw + translation (nav.frames.map_from_startup_odom).
-Drift: INIT's map <- odom is handed to map_align once (Command.map_from_odom_init, published latched
-on nav.frames.MAP_FROM_ODOM_INIT_TOPIC); map_align starts from it and publishes the corrected
-map <- odom (MAP_FROM_ODOM_TOPIC), which on_map_from_odom takes in place of INIT's. When those stop,
-the last one stays in use: drift since then is uncorrected, but nothing jumps back.
+Frames: odom is the stack's ENU startup frame. `map` here is the TAKE-OFF frame (TAKEOFF_FRAME):
++x forward and +y left from the drone's pose at INIT, z up from the pad; map <- odom is the yaw and
+translation fixed at INIT (nav.frames.map_from_startup_odom) and never changes in flight. Flight
+position is raw odometry, nothing else: NO course map, NO map alignment or drift correction (the
+field was rebuilt and there is no map of it: Arnav's directive, 2026-11-07). The drone's heading on the
+pad sets where every corner lands.
 
-Mission "route" (the hardcoded backup): a fixed list of corners from a route file, as (forward, left)
-metres from the take-off pose (load_route). `map` is then the take-off frame itself (launch =
-TAKEOFF_FRAME): no course map, no planner, no map_align (nothing is handed to it and its corrections,
-in the course frame, are refused). The drone flies on odometry alone, so its heading on the pad sets
-where every corner lands.
+Mission "route": a list of corners from a route file, as (forward, left) metres from the take-off pose
+(load_route).
 """
 from __future__ import annotations
 
@@ -55,29 +53,27 @@ import numpy as np
 
 
 def _repo_root() -> Path:
-    """The team repository (nav/, maps/): found above this file (a --symlink-install build, the
-    skybeta default, resolves back to the source), or named by BLUERAVEN_REPO."""
+    """The team repository (nav/): found above this file (a --symlink-install build, the skybeta
+    default, resolves back to the source), or named by BLUERAVEN_REPO."""
     import os
     env = os.environ.get("BLUERAVEN_REPO")
     for p in ([Path(env)] if env else []) + list(Path(__file__).resolve().parents):
-        if (p / "nav" / "course_map.py").exists():
+        if (p / "nav" / "path_geometry.py").exists():
             return p
-    raise ImportError("blueraven_skybeta needs the team repository (nav/, maps/): clone it into "
+    raise ImportError("blueraven_skybeta needs the team repository (nav/): clone it into "
                       "~/team_ws/src or set BLUERAVEN_REPO")
 
 
 if str(_repo_root()) not in sys.path:
     sys.path.insert(0, str(_repo_root()))
-from nav.frames import MAP_FROM_ODOM_STALE_S, map_from_startup_odom, pose_xyz_yaw  # noqa: E402
-from nav.path_geometry import build_path  # noqa: E402
-from nav.wall_centring import CentringParams, WallCentring  # noqa: E402
+from nav.frames import map_from_startup_odom  # noqa: E402  (pure transforms, no map)
+from nav.path_geometry import build_path  # noqa: E402  (called without a map: corners only)
 
 
 @dataclass
 class MissionParams:
-    mission: str = "hover"              # "hover": take off, hold hover_s over the take-off point, land
-                                        # (first flights: no route, no map needed). "course": fly the route.
-                                        # "route": fly a hardcoded route file in the take-off frame (no map)
+    mission: str = "hover"              # "hover": take off, hold hover_s over the take-off point, land.
+                                        # "route": fly a route file's corners in the take-off frame, land
     hover_s: float = 5.0
     hold_max_err_m: float = 0.40        # TAKEOFF/HOVER: further than this from the take-off point means
                                         # PX4 isn't holding where we think (frame offset?): land straight down
@@ -117,20 +113,15 @@ class MissionParams:
     odom_jump_mps: float = 3.0          # is a reset (the stack restarts on clock steps), not motion
     odom_jump_deg: float = 30.0         # same for heading, with odom_jump_dps
     odom_jump_dps: float = 360.0
-    settle_s: float = 2.0               # the drone must sit still this long before map <- odom is fixed
+    settle_s: float = 2.0               # the drone must sit still this long before the take-off frame is fixed
     settle_tol_m: float = 0.02
     settle_tol_deg: float = 1.0
-    corr_stale_s: float = MAP_FROM_ODOM_STALE_S   # map_align's map <- odom older than this is reported stale
     drone_radius: float = 0.28
     margin: float = 0.10
-    max_radius_m: float = 1.0           # largest corner arc; 0 makes every corner a stop-and-turn
-    route_max_radius_m: float = 0.0     # the same for mission "route": stop and turn at every corner, since
-                                        # without the map an arc can't be sized against the real walls
+    route_max_radius_m: float = 0.0     # mission "route": largest corner arc; 0 = stop and turn at every
+                                        # corner (no map to size an arc against the real walls)
     route_hover_s: float = 3.0          # mission "route": hover this long over the take-off point before
                                         # flying (VIO settles, the team sees a stable hover); 0 = go at once
-    wall_centring: bool = False         # course: shift the reference toward the REAL corridor centre seen in
-                                        # depth (nav.wall_centring); needs on_depth_points. Off until benched
-    centring_cap_m: float = 0.15
     pose_buffer_s: float = 2.0          # odometry kept to place a depth frame at its capture time
     pose_gap_s: float = 0.15            # refuse to interpolate across a bigger odometry gap
 
@@ -143,7 +134,6 @@ class Command:
     pose_yaw: float | None = None                            # odom ENU yaw; None = hold heading
     twist: tuple[float, float, float, float] | None = None   # odom ENU (vx, vy, vz, yaw_rate)
     call_hold: bool = False                                  # call /skybeta/hold (once, on abort)
-    map_from_odom_init: np.ndarray | None = None             # publish once, latched (the tick INIT ends)
     why: str = ""
     events: list[str] = field(default_factory=list)
 
@@ -152,7 +142,7 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-MISSIONS = ("hover", "course", "route")
+MISSIONS = ("hover", "route")       # no "course": the map-based mission is gone with the map
 TAKEOFF_FRAME = {"x": 0.0, "y": 0.0, "yaw_deg": 0.0, "z": 0.0}   # mission "route": map = the take-off pose
                                                                   # (+x forward, +y left, z up from the pad)
 ROUTE_LEG_MIN_M = 0.05      # shorter legs are duplicates: no heading to fly
@@ -161,9 +151,8 @@ ROUTE_REACH_MAX_M = 10.0    # no corner further than this from the take-off poin
 
 
 def load_route(path: str | Path) -> list[tuple[float, float]]:
-    """The corners of a route file, {"route": [[forward_m, left_m], ...]} (nav.route_planner's --out
-    format; other keys are ignored), as map corners for mission "route": the take-off point (0, 0)
-    first. Raises ValueError, naming the problem, for anything that isn't a sane route."""
+    """The corners of a route file, {"route": [[forward_m, left_m], ...]} (other keys are ignored), as
+    take-off-frame corners for mission "route": the take-off point (0, 0) first. Raises ValueError, naming the problem, for anything that isn't a sane route."""
     import json
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -190,28 +179,22 @@ def load_route(path: str | Path) -> list[tuple[float, float]]:
 
 
 class SkybetaMission:
-    def __init__(self, params: MissionParams, launch: dict[str, float], corners_map: Any = None,
-                 course_map: Any = None) -> None:
+    def __init__(self, params: MissionParams, corners: Any = None) -> None:
+        """corners: mission "route" only, the take-off-frame corners from load_route ((0, 0) first)."""
         self.p = params
-        self.launch = launch
-        self.z_map = launch["z"] + params.height_m
+        self.launch = TAKEOFF_FRAME
+        self.z_map = params.height_m
         if params.mission not in MISSIONS:
             raise ValueError(f"mission must be one of {MISSIONS}, not {params.mission!r}")
         self.path = None
         if params.mission == "route":
-            if launch != TAKEOFF_FRAME or course_map is not None:
-                raise ValueError("mission 'route' flies in the take-off frame: launch TAKEOFF_FRAME, no course map")
-            if corners_map is None or len(corners_map) < 2 or tuple(corners_map[0][:2]) != (0.0, 0.0):
+            if corners is None or len(corners) < 2 or tuple(corners[0][:2]) != (0.0, 0.0):
                 raise ValueError("mission 'route' needs corners starting at the take-off point (load_route)")
-        if params.mission in ("course", "route"):
-            if corners_map is None or len(corners_map) < 2:
-                raise ValueError(f"mission {params.mission!r} needs a route of at least 2 corners")
-            C = np.asarray(corners_map, dtype=float)
-            self.path = build_path(C[:, :2], course_map, params.drone_radius, params.margin, z=self.z_map,
-                                   max_radius=(params.route_max_radius_m if params.mission == "route"
-                                               else params.max_radius_m))
-        self.centring = (WallCentring(course_map, CentringParams(cap_m=params.centring_cap_m))
-                         if (params.wall_centring and params.mission == "course" and course_map is not None) else None)
+            C = np.asarray(corners, dtype=float)
+            self.path = build_path(C[:, :2], None, params.drone_radius, params.margin, z=self.z_map,
+                                   max_radius=params.route_max_radius_m)
+        elif corners is not None:
+            raise ValueError(f"mission {params.mission!r} takes no route")
         self.poses: list[tuple[float, float, float, float, float]] = []   # (stamp, x, y, z, yaw) in odom
         self.t_hover: float | None = None
         self.t_ramp_done: float | None = None
@@ -236,9 +219,6 @@ class SkybetaMission:
         self.t_fixed = -math.inf            # when INIT last fixed map <- odom
         self.n_init = 0
         self.odom_jump: str | None = None   # set by on_odom, consumed by step
-        self.t_corr = -math.inf             # last map_align correction taken
-        self.n_corr = 0
-        self.corr_step_max_m = 0.0          # largest move of the drone's map position by one correction
         self.takeoff: tuple[float, float, float, float] | None = None   # (x, y, z_target, z_ref) odom
         self.s_ref = 0.0
         self.s_proj = 0.0
@@ -275,34 +255,10 @@ class SkybetaMission:
             while self.settle and t - self.settle[0][0] > 2.0 * self.p.settle_s:
                 self.settle.pop(0)
 
-    def on_map_from_odom(self, t: float, T: Any, stamp: float | None = None) -> str | None:
-        """map_align's corrected map <- odom (MAP_FROM_ODOM_TOPIC), used from the next tick on.
-        Takes x, y and yaw; z stays INIT's (map_align corrects only those three, and this way a bad z
-        can't move the flight height). Ignored until INIT has fixed its own, which map_align starts
-        from, and if stamped before the latest INIT (computed against an older odom origin).
-        map_align gates its own updates; the largest step is reported. Returns why a message
-        was ignored, or None if it was taken."""
-        if self.p.mission == "route":
-            return "mission 'route' flies in the take-off frame, not the course frame map_align corrects"
-        if self.T_map_odom is None:
-            return "before INIT fixed map <- odom"
-        if stamp is not None and stamp < self.t_fixed:
-            return "stamped before the latest INIT"
-        T = np.asarray(T, dtype=float)
-        if T.shape != (4, 4) or not np.all(np.isfinite(T)):
-            return "not a finite 4x4 transform"
-        T_new = pose_xyz_yaw(T[0, 3], T[1, 3], self.T_map_odom[2, 3], math.atan2(T[1, 0], T[0, 0]))
-        if self.odom is not None:
-            p = np.array([*self.odom[:3], 1.0])
-            step = float(np.linalg.norm((T_new @ p - self.T_map_odom @ p)[:2]))
-            self.corr_step_max_m = max(self.corr_step_max_m, step)
-        self._set_T(T_new)
-        self.t_corr, self.n_corr = float(t), self.n_corr + 1
-        return None
-
     def pose_at(self, stamp: float) -> tuple[tuple[float, float, float, float], float] | None:
         """Odometry (x, y, z, yaw) interpolated at a capture stamp, and the yaw rate there; None if the stamp
-        is outside the buffer or falls in a gap over pose_gap_s (never extrapolates)."""
+        is outside the buffer or falls in a gap over pose_gap_s (never extrapolates). For placing depth
+        frames later (the nav core); unused by the blind route."""
         P = self.poses
         if len(P) < 2 or not P[0][0] <= stamp <= P[-1][0]:
             return None
@@ -315,45 +271,14 @@ class SkybetaMission:
         pose = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), _wrap(a[3] + f * dyaw))
         return pose, (dyaw / (t1 - t0) if t1 > t0 else 0.0)
 
-    def on_depth_points(self, t: float, stamp: float, pts_base: Any) -> str | None:
-        """Wall points from one depth frame, in base_link (x forward, y left, z up), captured at `stamp`.
-        Feeds wall centring; returns why the frame wasn't used, or None."""
-        if self.centring is None:
-            return "wall centring is off"
-        if self.phase != "FOLLOW" or self.T_map_odom is None:
-            return f"not following ({self.phase})"
-        at = self.pose_at(stamp)
-        if at is None:
-            return "no odometry at the frame's capture time"
-        (x, y, z, yaw), rate = at
-        B = np.asarray(pts_base, dtype=float).reshape(-1, 3)
-        c, s = math.cos(yaw), math.sin(yaw)
-        odom = np.c_[c * B[:, 0] - s * B[:, 1] + x, s * B[:, 0] + c * B[:, 1] + y, B[:, 2] + z]
-        T = self.T_map_odom
-        pts_map = odom @ T[:3, :3].T + T[:3, 3]
-        drone = (T @ [x, y, z, 1.0])[:3]
-        s_at = self.path.project(drone[:2], self.s_proj - 0.5, self.s_proj + 0.5)
-        m = self.centring.measure(pts_map, drone, self.path, s_at, yaw_rate=rate)
-        self.centring.update(t, m)
-        return None if m.ok else m.why
-
     def status(self, t: float) -> dict[str, Any]:
-        """For /blueraven/mission/status: phase, progress, and which map <- odom is in use."""
-        src = None
-        if self.T_map_odom is not None:
-            src = "init" if self.n_corr == 0 else ("live" if t - self.t_corr <= self.p.corr_stale_s else "stale")
-        moved = None
-        if self.T_init is not None and self.odom is not None:
-            p = np.array([*self.odom[:3], 1.0])
-            moved = round(float(np.linalg.norm((self.T_map_odom @ p - self.T_init @ p)[:2])), 3)
+        """For /blueraven/mission/status: phase, progress, and where the drone is in the take-off frame."""
+        here = None
+        if self.T_map_odom is not None and self.odom is not None:
+            here = [round(float(v), 2) for v in self._to_map(*self.odom[:3])]
         return {"mission": self.p.mission, "phase": self.phase, "why": self.why, "s_ref": round(self.s_ref, 2),
                 "length": None if self.path is None else round(float(self.path.length), 2),
-                "inits": self.n_init, "map_from_odom": src,
-                "corr_age_s": None if self.n_corr == 0 else round(t - self.t_corr, 2),
-                "corr_n": self.n_corr, "corr_step_max_m": round(self.corr_step_max_m, 3),
-                "corr_from_init_m": moved,
-                "centring_m": None if self.centring is None else round(self.centring.offset, 3),
-                "centring_why": None if (self.centring is None or self.centring.last is None) else self.centring.last.why}
+                "inits": self.n_init, "takeoff_frame_xyz": here}
 
     # --------------------------------------------------------------- helpers
     def _set_T(self, T: np.ndarray) -> None:
@@ -422,12 +347,11 @@ class SkybetaMission:
 
         if self.phase == "WAIT_OFFBOARD":
             # Before take-off a lost or reset odometry means the stack may have restarted with a new
-            # origin, so INIT's map <- odom is no longer true: fix it again (still on the mark).
+            # origin, so INIT's take-off frame is no longer true: fix it again (still on the mark).
             odom_lost = self.odom is None or t - self.t_odom > p.odom_stale_s
             if jump or odom_lost:
-                self._set("INIT", f"{jump or 'odometry lost'} before take-off: re-fixing map <- odom", out)
+                self._set("INIT", f"{jump or 'odometry lost'} before take-off: re-fixing the take-off frame", out)
                 self.T_map_odom = self.T_odom_map = self.T_init = None
-                self.n_corr, self.t_corr, self.corr_step_max_m = 0, -math.inf, 0.0
                 self.settle = [(self.t_odom, self.odom)] if (self.odom and jump) else []
 
         if self.phase == "INIT":
@@ -436,7 +360,7 @@ class SkybetaMission:
             if not fresh:
                 self.why = f"waiting: {why}"
             elif st.get("landed") is not True:
-                self.why = "waiting: /skybeta/state doesn't report landed (map <- odom is fixed on the mark)"
+                self.why = "waiting: /skybeta/state doesn't report landed (the take-off frame is fixed on the mark)"
             elif (off := self._frame_offset(st)) is not None and off > p.frame_offset_max_m:
                 self.why = (f"waiting: odometry and PX4's local position disagree by {off:.2f} m in x/y "
                             f"(> {p.frame_offset_max_m:.2f}): restart the stack with the drone level and still")
@@ -446,9 +370,7 @@ class SkybetaMission:
                 self._set_T(map_from_startup_odom(self.launch, self.odom))
                 self.T_init = self.T_map_odom.copy()
                 self.t_fixed, self.n_init = t, self.n_init + 1
-                if p.mission != "route":                    # the take-off frame means nothing to map_align
-                    out.map_from_odom_init = self.T_init.copy()
-                self._set("WAIT_OFFBOARD", "map <- odom fixed; streaming a hold at the current position", out)
+                self._set("WAIT_OFFBOARD", "take-off frame fixed; streaming a hold at the current position", out)
             out.phase, out.why = self.phase, self.why
             if self.phase == "INIT":
                 return out
@@ -566,10 +488,7 @@ class SkybetaMission:
             ref = path.sample(self.s_ref)
             psi = float(ref["psi"])
             vff = (v * math.cos(psi), v * math.sin(psi))
-            shift = 0.0
-            if self.centring is not None:                      # toward the REAL corridor centre seen in depth
-                shift = self.centring.update(t, None)           # advances hold/decay; frames update it too
-            rx, ry = float(ref["x"]) - shift * math.sin(psi), float(ref["y"]) + shift * math.cos(psi)
+            rx, ry = float(ref["x"]), float(ref["y"])
             ex, ey, ez = rx - pm[0], ry - pm[1], self.z_map - pm[2]
             vx, vy = vff[0] + p.kp_xy * ex, vff[1] + p.kp_xy * ey
             vz = p.kp_z * ez
@@ -627,7 +546,7 @@ class SkybetaMission:
             x, y, z, _ = self.odom
             if self.land_xy_odom is not None:                          # hover: over the take-off point
                 ox, oy = p.kp_xy * (self.land_xy_odom[0] - x), p.kp_xy * (self.land_xy_odom[1] - y)
-            elif self.path is not None and self.T_map_odom is not None:   # course: over the route's end
+            elif self.path is not None and self.T_map_odom is not None:   # route: over the route's end
                 pm = self._to_map(x, y, z)
                 end = self.path.point_at(self.path.length)
                 ox, oy = self._vec_to_odom(p.kp_xy * (end[0] - pm[0]), p.kp_xy * (end[1] - pm[1]))
