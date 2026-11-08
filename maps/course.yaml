@@ -10,7 +10,7 @@
 
 # 2026-11-07 evening: the organizers REBUILT THE START (no exact dimensions, by design). Maze dividers
 # M1, M2, M3 are gone; a back wall (Wall A) and a diagonal (Wall B) are new, with a cone in the CP2 gap.
-# They come from Darion's corrected drawing (~19:35; approximate), added as a small
+# They come from Darion's FINAL map (~19:48, from his on-site tape), added as a small
 # extra mesh. CP1 is removed; CP2 is the gap between Wall A and Wall B. The rest is unchanged.
 # NOT FOR FLIGHT AT RUNTIME (Arnav's directive): this map is for sims, offline checks and waypoints.
 course:
@@ -47,10 +47,10 @@ checkpoints:
   # CP1 was REMOVED with the rebuilt start (2026-11-07; the organizers haven't said otherwise).
   - id: CP2
     name: the gap between Wall A's east end and Wall B's north-east end (rebuilt start)
-    line: [[-1.277, 2.640], [-1.023, 1.932]]    # wall end to wall end, ~0.75 m (Darion's corrected drawing)
-    direction: [0.941, 0.338]                   # the gap's normal, about 20 deg north of east
+    line: [[-1.339, 2.591], [-0.857, 1.715]]    # wall end to wall end, ~0.75 m (Darion's corrected drawing)
+    direction: [0.876, 0.482]                   # the gap's normal, about 20 deg north of east
     confirmed: false
-    # The 0.30 m cone ("Boulder 6") stands inside the gap; flying at 0.7 m passes 0.4 m over it.
+    # The 0.30 m cone ("Boulder 6") stands just west of the gap; at 0.7 m the drone passes 0.4 m above its top.
   - id: CP3
     name: tunnel south exit
     line: [[1.581, -0.305], [3.042, -0.305]]    # the tube's open south end, inner width
@@ -88,11 +88,11 @@ zones:
 # launch heading, up the first corridor): whichever is easier to tape. Wall ends are the faces AT the CP2 gap;
 # each wall's thickness lies on the side away from the gap.
 rebuilt_start:
-  source: "Darion's corrected drawing (2026-11-07 ~19:35), approximate; replace with tape measurements"
+  source: "Darion's FINAL map (2026-11-07 ~19:48), from his on-site tape: Wall A's east end 1 in E and 1 in N of the red floor line's corner; CP2 gap 1.00 m; Wall B's NE end 20 in E of the southbound red line; Wall B's SW end unchanged"
   frame: course
-  wall_a: [[-2.743, 2.640], [-1.277, 2.640]]    # west end, EAST end (the gap side)
-  wall_b: [[-1.747, 0.762], [-1.023, 1.932]]    # south-west end, NORTH-EAST end (the gap side)
-  cone: [-1.369, 2.335]                         # centre: a cone ~0.30 m tall, modelled as a box
+  wall_a: [[-2.743, 2.591], [-1.339, 2.591]]    # west end, EAST end (the gap side)
+  wall_b: [[-1.747, 0.762], [-0.857, 1.715]]    # south-west end, NORTH-EAST end (the gap side)
+  cone: [-1.431, 2.286]                         # centre: a cone ~0.30 m tall, modelled as a box
   wall_thickness: 0.1016                        # 4 in, as the published walls
   wall_height: 1.727
   cone_size: 0.23

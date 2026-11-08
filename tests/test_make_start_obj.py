@@ -55,7 +55,8 @@ def test_cp2_follows_the_wall_ends_and_points_away_from_the_launch_mark():
     rs = {**CFG["rebuilt_start"], "wall_a": [[-2.743, 2.700], [-1.200, 2.700]]}   # a taped Wall A
     new = yaml.safe_load(M.sync_cp2(text, M.start_geometry({**CFG, "rebuilt_start": rs})))
     cp2 = next(c for c in new["checkpoints"] if c["id"] == "CP2")
-    assert cp2["line"] == [[-1.2, 2.7], [-1.023, 1.932]]
+    b_end = [round(v, 3) for v in M.start_geometry(CFG)["B"][1].tolist()]     # Wall B's gap end, unchanged
+    assert cp2["line"] == [[-1.2, 2.7], b_end]
     n, line = np.asarray(cp2["direction"]), np.asarray(cp2["line"])
     assert abs(np.linalg.norm(n) - 1.0) < 2e-3 and abs(n @ (line[1] - line[0])) < 2e-3   # the gap's unit normal
     assert n @ (line.mean(axis=0) - [LAUNCH["x"], LAUNCH["y"]]) > 0                       # away from the mark

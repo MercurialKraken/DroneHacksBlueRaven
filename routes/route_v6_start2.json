@@ -1,12 +1,12 @@
 {
- "from": "tools/make_route_v6.py on maps/course.yaml dronehacks-2026-v3-start2 (start rebuilt 2026-11-07, Darion's corrected drawing, approximate), launch_key launch, 0.7 m, CP4 Gate B. CP2 by hand: gap widest point (-1.155, 2.300) map, clearance 0.357 m (drone radius 0.28); approach/exit 0.45 m along the normal. Rest: the planner from the exit point, digest 9a3b97ccccbb.",
+ "from": "tools/make_route_v6.py on maps/course.yaml dronehacks-2026-v3-start2 (start rebuilt 2026-11-07, Darion's corrected drawing, approximate), launch_key launch, 0.7 m, CP4 Gate B. CP2 by hand: gap widest point (-1.098, 2.153) map, clearance 0.489 m (drone radius 0.28); approach/exit 0.45 m along the normal. Rest: the planner from the exit point, digest cbfc23af2aeb.",
  "frame": "metres from the take-off pose: [forward, left]; launch_key launch",
  "labels": ["lead-in", "CP2 approach", "CP2 gap centre", "CP2 exit", "", "", "CP3 approach", "CP3", "", "", "", "", "", "", "", "", "", "CP4 Gate B approach", "CP4 Gate B", "", "", "", "", "CP5"],
  "route": [
   [0.500, 0.000],
-  [1.234, -0.936],
-  [1.386, -1.360],
-  [1.538, -1.783],
+  [1.022, -1.023],
+  [1.239, -1.417],
+  [1.456, -1.811],
   [0.836, -4.365],
   [0.536, -4.665],
   [-0.914, -4.815],
