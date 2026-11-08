@@ -1,0 +1,23 @@
+{
+ "from": "Splice: Chelsea's route_v6_start2 points 1-5 (take-off, CP2, to the tunnel) + last night's FlyX window route (hinson/follow 956f533 route.json, flown at 0.7 m from launch_sim) points 9-18 unchanged in the course frame. launch_key launch_sim, 0.7 m, CP4 window.",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch_sim",
+ "labels": ["Chelsea v6 #1: lead-in", "Chelsea v6 #2: CP2 approach", "Chelsea v6 #3: CP2 gap centre", "Chelsea v6 #4: CP2 exit", "Chelsea v6 #5", "FlyX 956f533 #9: tunnel entrance (handoff)", "FlyX 956f533 #10", "FlyX 956f533 #11", "FlyX 956f533 #12", "FlyX 956f533 #13: CP3 (tunnel exit)", "FlyX 956f533 #14", "FlyX 956f533 #15", "FlyX 956f533 #16", "FlyX 956f533 #17: CP4 window", "FlyX 956f533 #18: CP5"],
+ "route": [
+  [0.500, 0.000],
+  [0.822, -1.022],
+  [1.039, -1.417],
+  [1.256, -1.811],
+  [0.636, -4.365],
+  [0.513, -4.817],
+  [0.055, -4.826],
+  [-0.657, -4.826],
+  [-1.369, -4.826],
+  [-1.712, -4.817],
+  [-2.762, -3.817],
+  [-2.912, -2.817],
+  [-3.487, -2.317],
+  [-3.387, -2.042],
+  [-1.906, -0.473]
+ ],
+ "params": {"height_m": 0.7, "speed_mps": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
+}
