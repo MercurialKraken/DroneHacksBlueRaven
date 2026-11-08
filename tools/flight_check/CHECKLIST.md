@@ -7,6 +7,11 @@ rules.
 
 ## Before every flight
 
+- [ ] **No PX4 parameter has been changed on the drone.** Organizers (2026-11-07): almost no team
+      that modified PX4 parameters has been able to fly; keep the default PID / flight-controller
+      configuration. Team rule: no agent writes any PX4 parameter (no `param set`, no QGC edits);
+      reading is fine. Fix problems on our side (setpoints, speeds, timing) instead.
+
 - [ ] Safety pilot ready on RC, kill switch tested on the ground, net closed, nobody inside.
 - [ ] **People out of the camera's view.** The bench test (2026-11-06) saw 10–30 m VIO jumps when
       people moved in view or the lens was covered.
@@ -69,8 +74,9 @@ Each step is worth doing only once the previous one passed.
 
 Landing note (Darion's end-to-end sim hover, 2026-11-07): PX4's land detector only declares
 "landed" when the commanded descent is at least 1.1 x `LNDMC_Z_VEL_MAX` (0.275 m/s with the
-v1.16 defaults). At 0.2 m/s the drone sat armed on the floor for 63 s. Check `LNDMC_Z_VEL_MAX`,
-`MPC_LAND_CRWL` and `MPC_LAND_SPEED` on the drone before step 3.
+v1.16 defaults). At 0.2 m/s the drone sat armed on the floor for 63 s. So descend faster; do
+**not** lower the parameter. `LNDMC_Z_VEL_MAX`, `MPC_LAND_CRWL` and `MPC_LAND_SPEED` may be
+**read** on the drone to confirm the threshold, never changed.
 
 **Before leaving the drone:** after a stack restart the competitor window runs the organizers'
 example (arm + Position = a 5 m square at 1.5 m). Power down, or set `COMPETITOR_PKG` to the
