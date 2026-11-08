@@ -32,6 +32,7 @@ MISSION_ARGS = [
     ('route_file', '', "route: {\"route\": [[forward_m, left_m], ...]} from take-off; a bare name is in routes/"),
     ('route_max_radius_m', '0.0', 'route: corner arc radius; 0 = stop and turn at every corner'),
     ('route_hover_s', '3.0', 'route: seconds to hover over the take-off point before flying'),
+    ('max_yaw_rate_dps', '45.0', 'cap on the turn rate, deg/s (an in-place 90 deg turn at 45 slipped VIO on the T4)'),
     ('launch_key', 'launch', "course.yaml entry: 'launch' (the real mark) or 'launch_sim'"),
     ('height_m', '0.7', 'flight height above the launch point, metres'),
     ('cruise_mps', '0.3', 'cruise speed, m/s'),
@@ -53,8 +54,9 @@ def generate_launch_description():
         package='blueraven_skybeta', executable='mission', name='blueraven_mission',
         output='screen', emulate_tty=True, condition=IfCondition(LaunchConfiguration('competitor')),
         parameters=[{n: LaunchConfiguration(n)
-                     for n in ('mission', 'hover_s', 'route_file', 'route_max_radius_m', 'route_hover_s', 'launch_key',
-                               'height_m', 'cruise_mps', 'cp4', 'keep_centre_m', 'wall_centring')} | {
+                     for n in ('mission', 'hover_s', 'route_file', 'route_max_radius_m', 'route_hover_s',
+                               'max_yaw_rate_dps', 'launch_key', 'height_m', 'cruise_mps', 'cp4', 'keep_centre_m',
+                               'wall_centring')} | {
                     'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
                     'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],   # twists too
     )
