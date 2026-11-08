@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 NAV_OFFBOARD = 14
-AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap")
+AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg")
 
 
 @dataclass
@@ -30,7 +30,20 @@ class Params:
     # centre, on gap_past_m beyond it, and land. Launch-relative numbers on the tape course (pad: north = forward from
     # the launch mark, east = right): best turn at 1.10-1.12 m east -> 28.6 deg north of east (the gap normal is 28.8),
     # 0.50 m from both Wall A's end and Wall B's tip. On the T4 the spawn is 0.2 m further north: gap_n_m 1.039.
-    turn_e_m: float = 1.10          # 0 disables the gap leg (then: translate until the wall ends, as before)
+    # ROUTE MODE (Darion, default): after the stop at P1 (0.60 m from Wall A on depth), straight legs with turns of
+    # exactly 90/45 deg made IN PLACE at turn_rate_dps (the gyro's rate loop): 90 right -> east to P2 -> 45 left ->
+    # through the CP2 gap to P3 -> 45 right -> east to P4 (about halfway to the tunnel) -> land. Checked on the course
+    # SDF at 0.4 m: >= 0.39 m from every wall (tightest: the barrier behind the launch); the 0.30 m CP2 cone passes
+    # ~0.10 m BELOW the drone (height is from the pad, so the drone's bottom is at 0.40 m). T4: p3_n_m 1.357.
+    route_mode: bool = True
+    p3_n_m: float = 1.557           # P3: 0.45 m past the CP2 gap centre on the 45 deg leg (whole drone across)
+    p3_e_m: float = 1.735
+    p4_e_m: float = 2.80            # P4: due east of P3, map (0.28, 2.47)
+    turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
+    turn_dwell_s: float = 1.0       # still, after each turn
+    pause_s: float = 1.5            # stop at each waypoint before turning
+    leg_mps: float = 0.12
+    turn_e_m: float = 1.10          # (gap mode, route_mode False) 0 disables the gap leg: translate until the wall ends
     gap_n_m: float = 1.239
     gap_e_m: float = 1.417
     gap_past_m: float = 0.50
@@ -161,8 +174,14 @@ class WallSeek:
     var_count: int = 0
     t_slow: dict = field(default_factory=dict)   # per integral: since when the drone has been slow on that axis
     var_armed: bool = False         # the cuVSLAM-variance check is live (after lift-off and var_check_after_m forward)
-    leg: tuple | None = None        # gap leg: (start (n, e), end (n, e), unit (n, e), length)
+    leg: tuple | None = None        # current straight leg: (start (n, e), end (n, e), unit (n, e), length)
     s_ref: float = 0.0
+    plan: list = field(default_factory=list)   # route mode: remaining steps
+    turn: tuple | None = None       # (sign, degrees, hold point)
+    turned: float = 0.0             # degrees commanded so far in this turn
+    last_wz: float = 0.0            # deg/s commanded last tick
+    t_turned: float | None = None
+    hold_pt: tuple | None = None
     dt: float = 0.0
     i_n: float = 0.0                # integral share, north (standoff loop and north holds)
     i_e: float = 0.0                # integral share, east (east holds)
@@ -409,8 +428,11 @@ class WallSeek:
             ok = abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps
             self.t_in_tol = (self.t_in_tol if self.t_in_tol is not None else i.now) if ok else None
             if self.t_in_tol is not None and i.now - self.t_in_tol >= p.settle_s:
-                self.clear_count, self.last_seq = 0, i.depth_seq
-                self._set("translate", i.now, f"stopped {rng:.2f} m from the wall: translating right")
+                if p.route_mode:
+                    self._route_start(i, n, e)
+                else:
+                    self.clear_count, self.last_seq = 0, i.depth_seq
+                    self._set("translate", i.now, f"stopped {rng:.2f} m from the wall: translating right")
             else:
                 vn = self._wall_vn(rng, self.vn_depth, -p.xy_hold_cap_mps, p.xy_hold_cap_mps)
                 return Output(self.phase, self.why, (vn, self._hold(0.0, e, ve_m), self._vz(i), self._wz(i)))
@@ -442,6 +464,42 @@ class WallSeek:
                 return Output(self.phase, self.why,
                               (self._hold(self.n_hold, n, vn_m, "i_n"), self._east_ve(e, ve_m), self._vz(i), self._wz(i)))
 
+        if self.phase == "turn":
+            sign, angle, (hn, he) = self.turn
+            self.turned += abs(self.last_wz) * self.dt            # the angle commanded so far (deg), tick by tick
+            rem = angle - self.turned
+            if rem <= 1e-3 and self.t_turned is None:
+                self.t_turned = i.now
+            if self.t_turned is not None and i.now - self.t_turned >= p.turn_dwell_s:
+                self._next_step(i, n, e)
+            else:
+                # the gyro's rate loop turns it; the last tick is trimmed so the turn is exactly `angle`
+                rate = 0.0 if rem <= 1e-3 else min(p.turn_rate_dps, rem / max(self.dt, 0.02))
+                self.last_wz = rate
+                wz = sign * math.radians(rate)
+                return Output(self.phase, self.why,
+                              (self._hold(hn, n, vn_m, "i_n"), self._hold(he, e, ve_m), self._vz(i), wz))
+
+        if self.phase == "pause":
+            hn, he = self.hold_pt
+            if i.now - self.t_phase >= p.pause_s:
+                self._next_step(i, n, e)
+            else:
+                return Output(self.phase, self.why,
+                              (self._hold(hn, n, vn_m, "i_n"), self._hold(he, e, ve_m), self._vz(i), 0.0))
+
+        if self.phase == "leg":
+            (tn, te), (gn, ge), (un, ue), total = self.leg
+            s_now = (n - tn) * un + (e - te) * ue
+            if s_now >= total - 0.03:
+                self._next_step(i, n, e)
+            elif self.ahead_f is not None and self.ahead_f < p.contact_m and i.now - i.t_depth <= p.depth_hold_s:
+                self._land(i, f"surface {self.ahead_f:.2f} m ahead on a leg")
+            elif i.now - self.t_phase > p.translate_timeout_s:
+                self._land(i, f"leg did not finish within {p.translate_timeout_s:.0f} s")
+            else:
+                return Output(self.phase, self.why, (*self._leg_cmd(n, e, vn_m, ve_m, p.leg_mps), self._vz(i), 0.0))
+
         if self.phase == "gap":
             (tn, te), (gn, ge), (un, ue), total = self.leg
             s_now = (n - tn) * un + (e - te) * ue                 # progress along the leg
@@ -468,6 +526,58 @@ class WallSeek:
         if self.phase == "land":
             return self._descend(i, armed, offboard)
         return Output(self.phase, self.why)
+
+    # ------------------------------------------------------------------ route mode (Darion): straight legs, 90/45 turns
+    def _route_start(self, i: Inputs, n: float, e: float) -> None:
+        """Stopped at P1 (the depth standoff). P2 is due east of P1, placed so the 45 deg leg lands exactly on P3;
+        P3 is past the CP2 gap; P4 due east of P3 (about halfway to the tunnel). Turns happen while stopped."""
+        p = self.p
+        p3 = (p.p3_n_m, p.p3_e_m)
+        p2 = (n, p3[1] - (p3[0] - n))                        # 45 deg leg from P2 to P3
+        p4 = (p3[0], p.p4_e_m)
+        self.plan = [("turn", -90.0), ("leg", p2), ("pause", None), ("turn", +45.0), ("leg", p3), ("pause", None),
+                     ("turn", -45.0), ("leg", p4)]
+        self.log.append(f"{i.now:.2f} route: P1 ({n:.2f}, {e:.2f}) -> P2 ({p2[0]:.2f}, {p2[1]:.2f}) -> "
+                        f"P3 ({p3[0]:.2f}, {p3[1]:.2f}) -> P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
+        self._next_step(i, n, e)
+
+    def _next_step(self, i: Inputs, n: float, e: float) -> None:
+        if not self.plan:
+            self._land(i, "route complete")
+            return
+        kind, arg = self.plan.pop(0)
+        if kind == "turn":
+            sign = 1.0 if arg > 0 else -1.0                  # + = left (counter-clockwise), - = right
+            self.turn = (sign, abs(arg), (n, e))
+            self.turned, self.last_wz, self.t_turned = 0.0, 0.0, None
+            self._set("turn", i.now, f"turning {abs(arg):.0f} deg {'left' if arg > 0 else 'right'} in place at "
+                                     f"{self.p.turn_rate_dps:.0f} deg/s")
+        elif kind == "pause":
+            self.hold_pt = (n, e)
+            self._set("pause", i.now, f"stopped at ({n:.2f}, {e:.2f}) for {self.p.pause_s:.1f} s")
+        else:
+            dn, de = arg[0] - n, arg[1] - e
+            d = math.hypot(dn, de)
+            u = (dn / d, de / d) if d > 1e-6 else (1.0, 0.0)
+            self.leg, self.s_ref = ((n, e), arg, u, d), 0.0
+            self._set("leg", i.now, f"straight {d:.2f} m to ({arg[0]:.2f}, {arg[1]:.2f}), heading "
+                                    f"{math.degrees(math.atan2(u[0], u[1])):.0f} deg north of east")
+
+    def _leg_cmd(self, n: float, e: float, vn_m: float, ve_m: float, v: float) -> tuple[float, float]:
+        """Carrot on a stick: a reference point advancing along the straight leg at v (never > 0.2 m ahead of the
+        drone's progress), tracked with P + the learned push; feed-forward v along the leg."""
+        p = self.p
+        (tn, te), _, (un, ue), total = self.leg
+        s_now = (n - tn) * un + (e - te) * ue
+        self.s_ref = min(self.s_ref + v * self.dt, s_now + 0.20, total)
+        rn, re = tn + self.s_ref * un, te + self.s_ref * ue
+        ff = v if self.s_ref < total else 0.0
+        cap = 2 * v
+        vn = _clamp(ff * un + p.k_xy * ((rn - n) - p.lag_s * (vn_m - ff * un)) + self._integrate("i_n", rn - n, vn_m - ff * un),
+                    -cap, cap)
+        ve = _clamp(ff * ue + p.k_xy * ((re - e) - p.lag_s * (ve_m - ff * ue)) + self._integrate("i_e", re - e, ve_m - ff * ue),
+                    -cap, cap)
+        return vn, ve
 
     def _start_gap(self, i: Inputs, n: float, e: float) -> None:
         """A straight leg from here through the CP2 gap's centre, on past it by gap_past_m (nose still north)."""

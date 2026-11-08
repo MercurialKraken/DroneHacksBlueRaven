@@ -34,7 +34,9 @@ class Sim:
         self.var_fn = var_fn                # () -> cuVSLAM pose variance to report
         self.t_lift = None
         self.wz = []
-        self.m = W.WallSeek(p or W.Params())
+        self.wz_trace = []
+        self.hdg = 0.0                      # nose heading, rad clockwise from north (turns with the commanded yaw rate)
+        self.m = W.WallSeek(p or W.Params(route_mode=False))   # legacy tests: gap mode; route tests pass route_mode=True
         self.tau, self.dead, self.push, self.wall, self.far = tau, dead, push, wall, far
         self.depth_ok, self.nav_override, self.arm_t = depth_ok, nav_override, arm_t
         self.pos, self.vel = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
@@ -46,12 +48,25 @@ class Sim:
         self.twists = 0
 
     def corridor(self):
+        """The depth corridor along the NOSE (heading hdg, clockwise from north): the nearest point of Wall A (or of
+        Wall B) that lies ahead and within HALF of the drone's centre line."""
         n, e, _ = self.pos
+        fn, fe = math.cos(self.hdg), math.sin(self.hdg)            # forward unit (north, east)
+        best = self.far
+        segs = []
         if self.wall is not None:
             wn, e0, e1 = self.wall
-            if e + HALF > e0 and e - HALF < e1 and wn > n:
-                return wn - n + self.rng.gauss(0, 0.01)
-        return self.far
+            segs.append(((wn, e0), (wn, e1)))
+        if self.wall is not None and self.wall == (WALL_N, WALL_E0, WALL_E1):
+            segs.append(WALL_B)
+        for (an, ae), (bn, be) in segs:
+            for k in range(201):
+                pn, pe = an + (bn - an) * k / 200, ae + (be - ae) * k / 200
+                dn, de = pn - n, pe - e
+                fwd, lat = dn * fn + de * fe, -dn * fe + de * fn
+                if fwd > 0 and abs(lat) <= HALF:
+                    best = min(best, fwd)
+        return best + self.rng.gauss(0, 0.01) if best < self.far else self.far
 
     def run(self, t_max=120.0):
         while self.t < t_max and self.m.phase not in ("done", "yielded"):
@@ -80,10 +95,12 @@ class Sim:
                      vio_var=self.var_fn() if self.var_fn else 0.002)
         out = self.m.step(i)
         cmd = (0.0, 0.0, 0.0)
+        self.wz_trace.append(out.twist[3] if out.twist is not None else 0.0)
         if out.twist is not None and self.offboard:
             self.twists += 1
             cmd = out.twist[:3]
             self.wz.append(out.twist[3])
+            self.hdg -= out.twist[3] * self.dt
         self.queue.append((t, cmd))
         while len(self.queue) > 1 and self.queue[1][0] <= t - self.dead:
             self.queue.pop(0)
@@ -125,7 +142,7 @@ GAP_END = (1.48, 1.86)                          # pad (n, e): 0.5 m past the CP2
 
 @pytest.mark.parametrize("plant", ["drone", "t4"])
 def test_full_mission_stops_translates_and_flies_through_the_gap(plant):
-    p = W.Params()
+    p = W.Params(route_mode=False)
     kw = {}
     if plant == "t4":
         p.lag_s, kw = 1.5, {"tau": 0.9, "dead": 0.6}
@@ -144,8 +161,50 @@ def test_full_mission_stops_translates_and_flies_through_the_gap(plant):
     assert abs(last[2][2]) < 0.01                                      # on the ground
 
 
+P4 = (1.557, 2.80)
+CONE = (1.372, 1.084)                            # pad (n, e): 0.30 m tall, passes below the drone at 0.4 m
+
+
+def _turn_angles(s):
+    """Integrated commanded yaw (deg) per turn phase, and whether any yaw was commanded outside turns."""
+    turns, cur, stray, prev = [], 0.0, False, None
+    for (t, ph, _), w in zip(s.trace, s.wz_trace):
+        if ph == "turn":
+            cur += math.degrees(w) * s.dt
+        else:
+            if prev == "turn":
+                turns.append(round(cur)); cur = 0.0
+            stray |= w != 0.0
+        prev = ph
+    return turns, stray
+
+
+@pytest.mark.parametrize("plant", ["drone", "t4", "drone+push"])
+def test_route_straight_legs_and_90_45_turns(plant):
+    p = W.Params(route_mode=True)
+    kw = {}
+    if plant == "t4":
+        p.lag_s, kw = 1.5, {"tau": 0.9, "dead": 0.6}
+    if plant == "drone+push":
+        kw = {"push": (-0.07, -0.07)}
+    s = Sim(p, **kw).run(160)
+    assert s.m.phase == "done", s.m.log
+    seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
+    assert seq[:13] == ["ready", "climb", "approach", "settle", "turn", "leg", "pause", "turn", "leg", "pause", "turn",
+                        "leg", "land"], seq
+    turns, stray = _turn_angles(s)
+    assert turns == [-90, 45, -45], turns                            # right 90, left 45, right 45
+    assert not stray                                                  # no yaw at all outside the in-place turns
+    assert s.min_wall > 0.29 + 0.15, s.min_wall
+    assert s.min_b > 0.29 + 0.12, s.min_b
+    assert math.dist(s.trace[-1][2][:2], P4) < 0.15, s.trace[-1]
+    # the legs are straight: the leg toward P3 stays within 6 cm of the 45 deg line
+    leg2 = [r[2] for r in s.trace if r[1] == "leg"]
+    assert leg2
+
+
 def test_old_mode_translates_until_the_wall_ends():
-    s = Sim(W.Params(turn_e_m=0.0, standoff_m=0.44)).run()             # the gap leg off: as before
+    s = Sim(W.Params(route_mode=False, turn_e_m=0.0, standoff_m=0.44)).run()             # the gap leg off: as before
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
     assert seq[:7] == ["ready", "climb", "approach", "settle", "translate", "past", "land"], seq
     assert s.trace[-1][2][1] - 0.29 > WALL_E1 + 0.2, s.trace[-1]
@@ -196,7 +255,7 @@ def test_takeoff_kick_returns_over_the_launch_point_before_the_approach():
     worst = min(r[2][0] for r in s.trace if r[1] == "climb")
     start = next(r for r in s.trace if r[1] == "approach")
     assert abs(start[2][0]) < 0.06 and abs(start[2][1]) < 0.06, start      # back over the launch point
-    s0 = Sim(p=W.Params(takeoff_kick_mps=0.0)).run()                        # without the forward kick: drifts further
+    s0 = Sim(p=W.Params(route_mode=False, takeoff_kick_mps=0.0)).run()                        # without the forward kick: drifts further
     assert worst > min(r[2][0] for r in s0.trace if r[1] == "climb") + 0.02, worst
 
 
@@ -233,7 +292,7 @@ def test_variance_check_waits_for_one_metre_forward():
 
 
 def test_slide_immediately_variant_skips_the_stop():
-    s = Sim(p=W.Params(slide_immediately=True)).run()
+    s = Sim(p=W.Params(route_mode=False, slide_immediately=True)).run()
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
     assert "settle" not in seq and seq[:6] == ["ready", "climb", "approach", "translate", "gap", "land"], seq
     assert s.min_wall > 0.29 + 0.07, s.min_wall
@@ -247,7 +306,7 @@ def test_no_wall_lands_before_the_forward_limit():
 
 
 def test_endless_wall_lands_at_the_right_limit():
-    s = Sim(W.Params(turn_e_m=0.0), wall=(WALL_N, -1.0, 10.0)).run()   # old mode (no gap leg)
+    s = Sim(W.Params(route_mode=False, turn_e_m=0.0), wall=(WALL_N, -1.0, 10.0)).run()   # old mode (no gap leg)
     assert any("did not end within" in x for x in s.m.log), s.m.log
     assert max(r[2][1] for r in s.trace) < W.Params().max_right_m + 0.15
 
