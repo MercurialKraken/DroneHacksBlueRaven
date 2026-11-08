@@ -138,7 +138,7 @@ def test_nav_must_be_refnav_or_mppi():
 
 # ---------------------------------------------------------------------------------------------- flights
 def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None,
-           plant: tuple[float, float] = (0.3, 0.0)):
+           plant: tuple[float, float] = (0.3, 0.0), jitter_m: float = 0.0):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
     so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone."""
     w0, start, yaw_map, _, _ = tape_course()
@@ -151,9 +151,11 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []
+    rng = np.random.default_rng(7)
     t = DT
     while t < limit_s and m.phase != "done":
         p, q, vf = sk.odom()
+        p = tuple(np.add(p, np.r_[rng.normal(0.0, jitter_m, 2), 0.0])) if jitter_m else p     # VIO jitter per sample
         pad, t_odom = S.on_odom(v, pad, m.phase, p, q, vf), t
         mf.on_odom(t, p, q, vf)
         m.on_health(t, S.healthy(state, t_state, t))
@@ -208,10 +210,12 @@ def test_depth_lost_in_flight_slows_then_lands_3_s_later():
     assert "SLOW" in states and not sk.armed
 
 
-def test_a_wall_across_the_gap_blocks_or_sticks_and_lands_without_contact():
+@pytest.mark.parametrize("jitter_m", [0.0, 0.003, pytest.param(0.006, marks=pytest.mark.xfail(
+    strict=True, reason="33506a2 fades the grid per metre of odometry jitter: at 6 mm/sample wall B fades while it waits"))])
+def test_a_wall_across_the_gap_blocks_or_sticks_and_lands_without_contact(jitter_m):
     w = start_world(TAPE / "course.yaml")
     shut = World(w.x_range, w.y_range, boxes=[*w.boxes, (-1.45, -0.80, 1.90, 2.40, WALL)], polys=w.polys, nets=w.nets)
-    m, sk, traj, states, _, mf = flight(world=shut)
+    m, sk, traj, states, _, mf = flight(world=shut, jitter_m=jitter_m)
     assert m.land_reason.startswith(("MPPI stuck", "MPPI blocked")), (m.land_reason, states[-5:])
     assert shut.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
 

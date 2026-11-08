@@ -14,6 +14,7 @@ from pathlib import Path
 from blueraven_skybeta.mission_core import _repo_root
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -28,11 +29,11 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(str(Path(__file__).resolve().with_name('blueraven.launch.py'))),
         launch_arguments={'competitor': 'false', 'odom_to_ned_yaw_offset_rad': offset}.items(),
     )
+    route_file = [str(ROOT / 'courses') + '/', LaunchConfiguration('course'), '/routes/', LaunchConfiguration('route'), '.json']
     refnav = Node(
         package='blueraven_skybeta', executable='refnav_mission', name='refnav', output='screen', emulate_tty=True,
         parameters=[str(ROOT / 'flight.yaml'), {
-            'route_file': [str(ROOT / 'courses') + '/', LaunchConfiguration('course'), '/routes/', LaunchConfiguration('route'),
-                           '.json'],
+            'route_file': route_file,
             'path_source': 'waypoints', 'corner_cut_m': 0.05,
             'xtrack_slow_m': 0.08, 'xtrack_stop_m': 0.20,       # 0.20 m off the path the reference waits for it
             # nose within ~0.5 m of the path ahead: on the T4 the velocity drifts ~0.75 x the nose's angle off it, the other way
@@ -52,7 +53,21 @@ def generate_launch_description():
             'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
             'odom_to_ned_yaw_offset_rad': offset}],
     )
+    mppi = {k: PythonExpression(['float(', LaunchConfiguration(k), ')'])
+            for k in ('mppi_v_cruise_mps', 'mppi_tau_s', 'mppi_dead_time_s', 'height_m')}
+    # MPPI in shadow: its own process at low priority, publishing only /blueraven/mppi/*; never commands the drone
+    shadow = Node(
+        package='blueraven_skybeta', executable='mppi_shadow', name='mppi_shadow', output='screen', prefix='nice -n 10',
+        condition=IfCondition(LaunchConfiguration('mppi_shadow')),
+        parameters=[{**mppi, 'route_file': route_file,
+                     'use_sim_time': LaunchConfiguration('use_sim_time'),
+                     'odometry_topic': LaunchConfiguration('odometry_topic'),
+                     'depth_topic': LaunchConfiguration('depth_topic'),
+                     'depth_info_topic': LaunchConfiguration('depth_info_topic')}],
+    )
     return LaunchDescription([
+        DeclareLaunchArgument('mppi_shadow', default_value='false',
+                              description='true: MPPI runs alongside refnav on the same inputs, publishing /blueraven/mppi/* only'),
         # blind: refnav's own depth checks off. nav:=mppi reads /oak/stereo/image_raw (on-camera depth) whatever this is
         DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
         DeclareLaunchArgument('nav', default_value='refnav', description="follower: 'refnav' or 'mppi'"),
@@ -73,4 +88,4 @@ def generate_launch_description():
         # blueraven.launch.py's own defaults, declared here too so this file can read them for refnav
         DeclareLaunchArgument('odometry_topic', default_value='/visual_slam/tracking/odometry'),
         DeclareLaunchArgument('odom_to_ned_yaw_offset_rad', default_value='0.0'),
-        interface, refnav])
+        interface, refnav, shadow])
