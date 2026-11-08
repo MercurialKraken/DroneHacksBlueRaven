@@ -1,0 +1,96 @@
+TEAM 20 BLUE RAVEN - PRESENTATION NOTES
+Kept by Chelsea, with her Claude. Started 2026-11-07, late evening; Shiori is away for the night, so this file holds the
+notes she was collecting. Add to it; it is for the final presentation, not for code.
+
+===========================================================================================================
+1. WHERE WE STAND (2026-11-07, night)
+===========================================================================================================
+- Route 1 (take-off -> through the first checkpoint, CP1 = what our map calls CP2 -> land) FLEW AUTONOMOUSLY on the
+  real drone (skybeta-09), refnav blind, 0.15 m/s arc. Hinson: first team to score points. Flight 160449 was the
+  empty-room dry run.
+- No team has passed the first checkpoint yet. Next checkpoint: CP3 = the tunnel's south exit (10 points).
+- The course changed late in the day: the old CP2 became CP1; one wall near it is slanted, another moved; the CAD and
+  drawings were never exact ("at least minimally different from real life") and now even less so.
+
+===========================================================================================================
+2. HOW THE TEAM ADAPTED: DIFFERING IDEAS AND DECISIONS (for the "process" part of the talk)
+===========================================================================================================
+- Hard code first, generalise for the submission: the agreed plan was to get a hard-coded run scoring, then submit
+  the generalised (MPPI + centreline) solution with the repository.
+- Maps: Arnav first wanted NO signed-distance field / no map in flight (the map isn't accurate enough) and to rely on
+  centreline + MPPI; he later overrode his own no-map rule. Mapping went to Chelsea + Hinson. The map is used OFFLINE
+  only: to place waypoints and check clearances, never to correct drift in flight.
+- Measuring the course: a lidar scan + cross-section plan (Darion) was SCRAPPED in favour of Darion's tape measure,
+  "embracing the uncertainty".
+- Route ownership: Chelsea = route 1 (to the first checkpoint), Hinson = route 2 (full course through the window).
+- Safety rules we kept: never change PX4 parameters on the drone (organizers) - fix things on our side; the team
+  approves before any arming; the T4 simulator is one flight at a time (SIM CLAIM / SIM FREE).
+
+THREE PARALLEL SOLUTIONS (decided 2026-11-07 night; the team disagreed, so we try all three):
+- ARNAV - obstacle avoidance (MPPI on live depth). His view: hard coding is not a real solution without obstacle
+  avoidance. Now also adding a disturbance estimate to MPPI (see 4).
+- DARION - wall following: fly forward until a wall is detected, then follow it, keeping a constant distance on the
+  right. His view: get points on the board first.
+- CHELSEA - "route1-chelsea", hard coded: remember the take-off position, take off (it drifts), RETURN to the
+  remembered take-off position, then fly the hard-coded trajectory. Her hypothesis: the trajectory is right
+  regardless of speed; the error comes from the drift accumulated during take-off (vibrations).
+  Chelsea and Darion coordinate on the hard-coded solution.
+
+===========================================================================================================
+3. SIMULATION vs REALITY - WHAT SURPRISED US (good material: "why a sim pass isn't a real pass")
+===========================================================================================================
+Found in the T4 simulator, fixed before flying:
+- A 90 deg corner at 0.15 m/s became a yaw in place: cuVSLAM lost ~14 m (no parallax; the real drone's VIO has no
+  IMU fusion). Fix: a gradual 3-target ARC (radius 0.7 m), turning while moving, yaw capped at 30 deg/s.
+- Speed and yaw cap are coupled: 0.3 m/s + 30 deg/s crashed into a wall beside the window in the sim (the nose lagged
+  the turn); 0.15 + 30 and 0.3 + 45 passed. Rule of thumb (Darion): corner radius >= speed / yaw rate.
+- The drone moves toward its NOSE more than toward the commanded velocity (Darion, from the sim bags).
+
+Found only on the REAL drone (the sim did not show them):
+- Take-off drift: ~0.38 m back-left during the 3.8 s climb. Real motion (Hinson: the room's wall stayed still in the
+  depth images), not a VIO jump. The first attempt landed early on it (0.46 m > the 0.40 m safety guard).
+- A steady ~0.22 m offset to the LEFT of the direction of travel for the whole route; refnav never closed it, and
+  because it is > its 0.20 m "wait" threshold the reference kept waiting: 74 s instead of ~20 s (0.04-0.05 m/s).
+- PX4 achieved only ~15% of the commanded velocity along the command; the shortfall is a steady body-frame push
+  ~0.10 m/s left + ~0.06 m/s back. In the sim, with the same code and route: 105%, offset 0.05 m.
+- Ruled out (with numbers): PX4 heading vs VIO (within 1 deg), PX4's velocity estimate (matches VIO motion), the
+  flight interface (passes the command straight through). The estimate was consistent: PX4 and VIO within 4 cm.
+- On the ground before arming, PX4 read a steady tilt of 1.2 deg right-down / 0.9 deg nose-down: either the floor at
+  the launch mark is not level, or the IMU level calibration/mounting is off (a 1 deg bias is enough for 0.1 m/s).
+  Cheap check: a phone level on the floor and on the drone.
+- Integration lessons: depth subscribed "best effort" got 2 frames in 60 s across processes on the drone (RELIABLE:
+  677); MPPI in refnav's single thread delayed odometry (35 -> 55 ms); every launcher failure that night came from
+  ros2 CLI calls hanging on a cold ROS daemon after a reboot (the launcher now uses process counts and logs only).
+
+Hypotheses for the left offset (open):
+- H1 (Chelsea): the take-off disturbance shifts the drone and the error is carried along.
+- H2 (Arnav): control / PIDs - PX4 doesn't deliver the commanded velocity, and refnav's correction is proportional
+  only, so a steady 0.11 m/s shortfall leaves 0.11 / 0.5 = 0.22 m - exactly the offset seen.
+- Check of H1 on flight 160449 (one flight only - the push may not repeat): refnav DID fly out the backward part of
+  the take-off drift (-0.35 -> ~0 m in ~4 s), but the left part grew (0.19 -> 0.29 m) while it was being pulled back,
+  and after the turn the drone sat 0.20 m FORWARD of the path (left of its new direction), not where a carried-over
+  take-off offset would put it. So in that flight the take-off drift and the steady offset look like two symptoms of
+  one push. route1-chelsea's 10 s hold over the take-off point tests H1 directly on the next flight.
+
+===========================================================================================================
+4. WHAT EACH SOLUTION NEEDS NEXT
+===========================================================================================================
+- route1-chelsea: tools/make_route_cp2_simple.py -> routes/route1-chelsea{,_sim}.json (route 1 + refnav hover_s 10 s).
+  No new code. T4 run, then the drone. Watch the hold: back on the take-off point (H1 supported) or settling ~0.2 m
+  to one side (a persistent push).
+- Toward CP3 (10 points): route 1 + Hinson's tunnel waypoints + land past CP3 (8.2 m) keeps >= 0.32 m map clearance
+  with a 0.25 m offset to EITHER side - designed not to assume the offset repeats.
+- MPPI (Arnav): blocked on the real drone until the depth QoS (RELIABLE), its own thread/process, and a disturbance
+  estimate are in. Ground check on the drone already passed (odometry 30 Hz, EV age 35 ms with MPPI looping).
+- Wall following (Darion): uses live depth like MPPI, so the same depth QoS lesson applies.
+- Data: the launcher now records PX4's own setpoints (/fmu/in/trajectory_setpoint, vehicle_local_position_setpoint,
+  vehicle_attitude_setpoint) so the next flight shows how hard PX4 tilts against the push.
+
+===========================================================================================================
+5. NUMBERS WORTH A SLIDE
+===========================================================================================================
+- Real VIO: 29.7 Hz, gaps <= 73 ms, EV age p50 35 ms, fusion 100% (Darion).
+- Route 1 real flight: 74 s follow, self-disarm; take-off drift 0.38 m; steady offset 0.22 m; 15% of commanded
+  velocity achieved along the command; sim: 105%, 0.05 m.
+- Arc route 1 in the sim: 2/2 passes, CP crossed 1.6-2.9 cm from centre, VIO error <= 0.020 m through the turn.
+- Analysis files: /srv/team/real_drone/flights_2026-11-07/analysis_chelsea_160449/ on the T4 (plots, CSV, scripts).

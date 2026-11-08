@@ -51,6 +51,13 @@ FILLET_M = ARC_RADIUS_M         # refnav rounds each target's corner with an arc
                                 # the 3 targets into three 0.3 m arcs, ~38 deg/s at 0.2 m/s); at the arc's radius it flies
                                 # the arc itself (corner_cut_m 0.05 trims the middle one to ~0.6 m): ~19 deg/s
 STEP_M = 0.005                  # leg sampling for the clearances
+NAME_CHELSEA = "route1-chelsea"  # the same route, but it first RETURNS to the take-off point (Chelsea, 2026-11-07):
+HOVER_S = 10.0                  # refnav's hover_s. After the climb it holds this long over the take-off xy it remembered
+                                # before lifting off (the climb setpoint never moves north/east), so a take-off drift is
+                                # flown back out BEFORE the route starts. Chelsea's hypothesis: the offset seen in flight
+                                # 160449 is the take-off drift carried along. The hold also tests it: back on the point =
+                                # supported; settling ~0.2 m to one side = a persistent push instead. Time-based, not
+                                # converge-based (no code change); 10 s ~ 4-5 time constants of refnav's position loop
 
 
 def samples(p: np.ndarray, q: np.ndarray) -> np.ndarray:
@@ -151,16 +158,19 @@ def main() -> int:
                f"({E[0]:.3f}, {E[1]:.3f}). Clearance (exact) {', '.join(f'{w} {d:.3f} m' for w, d in ex.items())}, "
                f"turn shift {TURN_SHIFT_M:+.3f} m from the best; map min {min(on_map):.3f} m. {cone[0].upper()}{cone[1:]}.")
         pts = ",\n".join(f"  [{fw:.3f}, {lf:.3f}]" for fw, lf in route)
-        text = ('{\n "from": ' + json.dumps(src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
-                'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
-                ',\n "route": [\n' + pts + '\n ],\n "params": ' + json.dumps(fly) + '\n}\n')
-        json.loads(text)
-        out = ROOT / "routes" / f"{NAME}{suffix}.json"
-        out.write_text(text, encoding="utf-8")
-        if COPY_TO.is_dir():
-            shutil.copyfile(out, COPY_TO / out.name)
-        print(f"wrote routes/{out.name}" + (f" and {COPY_TO.relative_to(ROOT).as_posix()}/{out.name}"
-                                            if COPY_TO.is_dir() else ""))
+        back = (f"{NAME_CHELSEA}: after the climb, HOLD {HOVER_S:.0f} s over the take-off point remembered before "
+                "lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below. ")
+        for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, {**fly, "hover_s": HOVER_S}, back)):
+            text = ('{\n "from": ' + json.dumps(note + src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
+                    'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
+                    ',\n "route": [\n' + pts + '\n ],\n "params": ' + json.dumps(prm) + '\n}\n')
+            json.loads(text)
+            out = ROOT / "routes" / f"{name}{suffix}.json"
+            out.write_text(text, encoding="utf-8")
+            if COPY_TO.is_dir():
+                shutil.copyfile(out, COPY_TO / out.name)
+            print(f"wrote routes/{out.name}" + (f" and {COPY_TO.relative_to(ROOT).as_posix()}/{out.name}"
+                                                if COPY_TO.is_dir() else ""))
     return 0
 
 
