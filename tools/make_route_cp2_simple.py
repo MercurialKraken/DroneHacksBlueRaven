@@ -34,13 +34,21 @@ from nav.frames import load_launch  # noqa: E402
 
 NAME = "route_v7_cp2_simple"
 COPY_TO = ROOT / "courses" / "start-2026-11-07-tape" / "routes"   # hinson/real-drone's per-course layout (same bytes)
-HEIGHT_M, SPEED_MPS = 0.7, 0.15  # fixed 0.7 m; 0.15 m/s: the T4 run (refnav, 2026-11-07) drifted 0.15 m left on each
-                                  # leg (PX4's velocity response ~11 deg off its setpoint, refnav gain 0.5); that
-                                  # cross-track error scales with speed, so half the speed ~halves it at the CP2 gap
+HEIGHT_M, SPEED_MPS = 0.7, 0.2   # fixed 0.7 m; 0.2 m/s, a compromise from two T4 runs (refnav, 2026-11-07): at 0.3 the
+                                  # legs drifted 0.15 m left (less since refnav's nose fix 2b9a76e: 0.08 m at 0.15);
+                                  # at 0.15 the 90 deg corner became a yaw in place and cuVSLAM diverged (no parallax;
+                                  # worse on skybeta-09, whose cuVSLAM has no IMU: Darion). On the arc this is ~16 deg/s
+YAW_RATE_DPS = 30.0               # refnav's yaw-rate cap for this route (default 45): Darion's ask for the visual-only VIO.
+                                  # NOTE flight.yaml's yaw_rate_dps (45) is a ROS parameter and WINS over this; FILLET_M
+                                  # keeps the turn under ~20 deg/s whichever cap applies
 CROSS_MARGIN_M = 0.20           # the end: the drone's centre this far beyond its radius past CP2's line
 TURN_SHIFT_M = 0.0              # move the turn, so the whole rightward leg, this far forward (+: towards Wall A and
                                 # the cone) or back (-: towards Wall B) from the best-clearance place
-ARC_RADIUS_M = 0.5              # the turn's arc: it starts this far before the corner and ends this far after it
+ARC_RADIUS_M = 0.7              # the turn's arc: it starts this far before the corner and ends this far after it
+                                # (the wider, the more the drone translates per degree turned: VIO parallax)
+FILLET_M = ARC_RADIUS_M         # refnav rounds each target's corner with an arc of at most this (its default 0.3 turns
+                                # the 3 targets into three 0.3 m arcs, ~38 deg/s at 0.2 m/s); at the arc's radius it flies
+                                # the arc itself (corner_cut_m 0.05 trims the middle one to ~0.6 m): ~19 deg/s
 STEP_M = 0.005                  # leg sampling for the clearances
 
 
@@ -79,7 +87,7 @@ def main() -> int:
     cone_base = [g["cone"] + d for d in ([-h, -h], [h, -h], [h, h], [-h, h])]
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     fly = {**json.loads((ROOT / "route.json").read_text(encoding="utf-8"))["params"],
-           "height_m": HEIGHT_M, "speed_mps": SPEED_MPS}
+           "height_m": HEIGHT_M, "speed_mps": SPEED_MPS, "yaw_rate_dps": YAW_RATE_DPS, "fillet_m": FILLET_M}
     past = R + CROSS_MARGIN_M
     for key, suffix in (("launch", ""), ("launch_sim", "_sim")):
         L = load_launch(COURSE, key)
