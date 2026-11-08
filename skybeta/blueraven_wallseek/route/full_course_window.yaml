@@ -1,0 +1,52 @@
+# Darion's full course (wall-seek method): straight legs, full stops, slow in-place turns, depth fixes on known walls.
+# Course: start-2026-11-08 with Wall C (no cone), CP4 through the WINDOW. Planned and clearance-checked by darion-claude
+# on 2026-11-08 against the course SDF + Wall C (drone radius 0.29 + 0.10 margin): every leg >= 0.39 m from walls
+# (tightest: the window frame's sides, 0.457 - 0.29 = 0.167 m each side; the chicane wall's tip 0.41 m).
+#
+# Frame 'map' (course.yaml): metres, x east, y north, origin the floor's centre. The mission flies in its pad frame
+# (north = the nose on the launch mark, east = its right, origin = the launch point) and converts these points with
+# `launch`. Every depth fix shifts the remaining points by the measured drift (capped by fix_max_m).
+#
+# Before the steps, the mission's own start runs unchanged: take off to height_m, forward until Wall A is standoff_m
+# ahead (depth), full stop = P1.
+
+launch: {x: -2.515, y: 1.466, yaw_deg: 90.0}   # Pixhawk 110 cm south of the top red tape line's top edge, nose north
+
+# Wall faces the depth camera reads: a point ON the face and the face's unit normal pointing to the drone's side.
+walls:
+  wall_a:  {point: [-2.515, 2.591],    normal: [0.0, -1.0]}          # south face, 1.125 m ahead of the launch (Darion)
+  wall_c:  {point: [0.1319, 0.5233],   normal: [-0.4540, 0.8910]}    # NW face: centre line (0.155,0.478)-(1.592,1.210), 4 in thick
+  barrier: {point: [0.0, 0.410],       normal: [0.0, -1.0]}          # south face (centre 0.457, ~9 cm thick)
+  c2a:     {point: [-0.4245, -2.2896], normal: [0.9396, -0.3424]}    # east face of the window's wall (10 cm thick)
+
+steps:
+  - {fix: wall_a}                         # P1 (stopped by depth): fix north
+  - {face: [-0.662, 2.265]}
+  - {leg: [-0.662, 2.265], name: P2}      # through the CP2 gap
+  - {face: [0.456, 2.090]}
+  - {leg: [0.456, 2.090], name: P3}
+  - {face: [1.046, 0.932]}                # a point on Wall C, 1.0 m from its west end: face it head-on (yaw -63 deg)
+  - {approach: wall_c, standoff: 0.80, max_m: 0.60, name: S3}
+  - {fix: wall_c}
+  - {face: [2.3115, 1.850]}
+  - {leg: [2.3115, 1.850], name: P4}      # north of the tunnel's mouth
+  - {height: 0.85}                        # the tube's free space is centred ~0.94 m up: only 0.36 m clearance at 0.40
+  - {face: [2.400, -1.100]}
+  - {leg: [2.400, -1.100], name: P5}      # through the tunnel: CP3 (whole drone past y -0.305)
+  - {face: [0.183, -1.900]}
+  - {leg: [0.183, -1.900], name: P6}      # round the chicane wall's tip, at 0.85 (0.5 m boulders nearby)
+  - {face: [0.844, -0.100]}               # up the chicane corridor: the barrier ~2.3 m ahead
+  - {fix: barrier}                        # fix north (the window's along-wall axis is 94% north)
+  - {height: 0.72}                        # window: sill 0.305, top 1.219; 0.20 m over the chicane boulder beside W0
+  - {face: [0.934, -1.774]}
+  - {leg: [0.934, -1.774], name: W1}
+  - {face: [-0.146, -1.380]}              # the window's wall, 0.95 m north of the window's centre: face it square on
+  - {approach: c2a, standoff: 0.80, max_m: 0.50, name: S6}
+  - {fix: c2a}                            # fix across the wall
+  - {face: [0.427, -2.600]}
+  - {leg: [0.427, -2.600], name: W0}      # slide along the wall to square in front of the window
+  - {face: [-0.4715, -2.2725]}            # the window's centre
+  - {clear: 1.30}                         # go / no-go: depth must see THROUGH the window (nothing within 1.30 m)
+  - {leg: [-0.988, -2.084], name: W2}     # through the window: CP4 (+5), whole drone 0.26 m past its line
+  - {face: [-2.042, -0.792]}
+  - {leg: [-2.042, -0.792], name: PAD}    # the pad's centre: land (CP5)

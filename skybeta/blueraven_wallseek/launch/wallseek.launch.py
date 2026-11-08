@@ -30,7 +30,9 @@ MISSION_ARGS = [
     # Wall A) = map y 1.466 (was 0.914): Wall A 1.125 m ahead, the CP2 gap centre 0.687 m north / 1.417 m east of launch.
     ('gap_n_m', '0.687'),
     # route mode (default, v3): P1 by depth (0.80 m), face P2 (past the CP2 gap centre), straight to it, face P4, land
-    ('p2_past_m', '0.45'), ('p4_e_m', '2.80'), ('turn_rate_dps', '15.0'), ('leg_mps', '0.12'),
+    ('p2_past_m', '0.45'), ('p4_e_m', '2.80'), ('turn_rate_dps', '15.0'),
+    ('leg_mps', '0.15'),            # Darion, full course: 0.15 (0.12 on the P2-only route)
+    ('fix_max_m', '0.25'),          # full course: a depth fix bigger than this is a wrong reading, not applied
     ('leg_climb_to_m', '0.0'),      # gradual climb during the gap leg: off
     ('p1_climb_to_m', '0.0'),       # climb at P1 off: the CP2 cone was removed, fly at 0.40 (0.50 cleared it)
     ('approach_mps', '0.15'), ('translate_mps', '0.10'),
@@ -49,6 +51,10 @@ def generate_launch_description():
                                          description='the route ends and lands at P2, just past the CP2 gap'),
                    DeclareLaunchArgument('slide_immediately', default_value='false',
                                          description='variant: no hover stop at the wall, slide right at once'),
+                   DeclareLaunchArgument('full_course', default_value='true',
+                                         description='Darion: the whole course from route_file after P1 (false: land at P2)'),
+                   DeclareLaunchArgument('route_file', default_value='',
+                                         description='full-course route (empty: the package\'s route/full_course_window.yaml)'),
                    DeclareLaunchArgument('use_sim_time', default_value='false'),
                    DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
                    DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info')])
@@ -66,6 +72,8 @@ def generate_launch_description():
                        'slide_immediately': PythonExpression(["'", LaunchConfiguration('slide_immediately'),
                                                               "'.lower() == 'true'"]),
                        'land_at_p2': PythonExpression(["'", LaunchConfiguration('land_at_p2'), "'.lower() == 'true'"]),
+                       'full_course': PythonExpression(["'", LaunchConfiguration('full_course'), "'.lower() == 'true'"]),
+                       'route_file': LaunchConfiguration('route_file'),
                        'odometry_topic': LaunchConfiguration('odometry_topic'),
                        'depth_topic': LaunchConfiguration('depth_topic'),
                        'depth_info_topic': LaunchConfiguration('depth_info_topic'),

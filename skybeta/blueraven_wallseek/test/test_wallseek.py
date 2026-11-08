@@ -409,3 +409,152 @@ def test_marginal_variance_does_not_land_a_good_flight():
     s.run(160)
     assert not any("variance" in x for x in s.m.log), s.m.log
     assert any("route complete" in x for x in s.m.log), s.m.log
+
+
+# ---------------------------------------------------------------------- full course (Darion, route/full_course_window.yaml)
+ROUTE_FILE = Path(__file__).resolve().parents[1] / "route" / "full_course_window.yaml"
+LAUNCH_MAP = (-2.515, 1.466)
+H_WC = 0.0508                                   # Wall C half thickness
+_WC = ((0.155, 0.478), (1.592, 1.210))
+_NC = (-math.sin(math.radians(27)), math.cos(math.radians(27)))
+COURSE_MAP = [                                  # wall FACES in the map frame (x east, y north), 2D at window height
+    ((-2.748, 2.591), (-1.333, 2.591)),                                   # Wall A, south face (Darion's measurement)
+    ((-1.747, 0.762), (-0.851, 1.715)),                                   # Wall B
+    tuple((x + H_WC * _NC[0], y + H_WC * _NC[1]) for x, y in _WC),        # Wall C, NW face
+    tuple((x - H_WC * _NC[0], y - H_WC * _NC[1]) for x, y in _WC),        # Wall C, SE face
+    ((-3.048, 0.410), (1.592, 0.410)), ((-3.048, 0.504), (1.592, 0.504)), # barrier, both faces
+    ((1.582, 1.210), (1.582, -0.305)), ((3.042, 1.210), (3.042, -0.305)), # the tube's inner walls
+    ((1.547, 0.382), (0.982, -1.111)),                                    # chicane wall
+    ((-0.983, 0.410), (-0.983, -0.620)),                                  # A1
+    ((0.164, -0.570), (-0.315, -1.843)), ((-0.628, -2.702), (-0.730, -3.000)),   # C2b / C2a, the window between
+]
+PAD_MAP = (-2.042, -0.792)
+
+
+def to_pad(x, y):
+    return y - LAUNCH_MAP[1], x - LAUNCH_MAP[0]
+
+
+def full_params(**kw):
+    return W.Params(route_mode=True, full_course=True, leg_mps=0.15, max_forward_m=0.70, gap_n_m=0.687,
+                    var_check_after_m=0.45, **kw)
+
+
+def load_full_route():
+    import yaml
+    return W.load_route(yaml.safe_load(ROUTE_FILE.read_text(encoding="utf-8")))
+
+
+class FullSim(Sim):
+    """The whole course in the pad frame: the corridor is 9 rays across the drone's width (HALF each side) along
+    the nose, nearest-10% like the real one (so angled walls read short), up to 4 m; min_clear tracks the closest
+    approach of the drone's CENTRE to any wall face."""
+
+    def __init__(self, p=None, walls=COURSE_MAP, **kw):
+        super().__init__(p or full_params(), wall=None, **kw)
+        self.m.route = load_full_route()
+        self.segs = [(to_pad(*a), to_pad(*b)) for a, b in walls]
+        self.min_clear, self.min_clear_at = math.inf, None
+
+    def corridor(self):
+        n, e, _ = self.pos
+        fn, fe = math.cos(self.hdg), math.sin(self.hdg)
+        rn, re = -fe, fn                                          # right of the nose, (north, east)
+        hits = []
+        for lat in np.linspace(-HALF, HALF, 9):
+            on, oe = n + lat * rn, e + lat * re
+            best = math.inf
+            for (an, ae), (bn, be) in self.segs:
+                sn, se = bn - an, be - ae
+                den = fn * se - fe * sn
+                if abs(den) < 1e-9:
+                    continue
+                t = ((an - on) * se - (ae - oe) * sn) / den          # along the ray
+                u = ((an - on) * fe - (ae - oe) * fn) / den          # along the segment
+                if 0.0 <= u <= 1.0 and 0.15 < t < best:
+                    best = t
+            if best <= 4.0:
+                hits.append(best)
+        if len(hits) < 3:
+            return self.far
+        return float(np.percentile(hits, 10)) + self.rng.gauss(0, 0.01)
+
+    def step(self):
+        super().step()
+        if self.pos[2] > 0.1:
+            d = min(seg_dist(self.pos[:2], a, b) for a, b in self.segs)
+            if d < self.min_clear:
+                self.min_clear, self.min_clear_at = d, tuple(round(c, 2) for c in self.pos[:2])
+
+
+def true_map(sim):
+    n, e, _ = sim.pos
+    return e + LAUNCH_MAP[0], n + LAUNCH_MAP[1]
+
+
+def crossed(sim, check):
+    return any(check(e + LAUNCH_MAP[0], n + LAUNCH_MAP[1]) for _, _, (n, e, _) in sim.trace)
+
+
+def test_route_file_loads_and_rejects_bad_walls():
+    r = load_full_route()
+    assert r["launch"] == (-2.515, 1.466, 90.0) and len(r["steps"]) > 20
+    with pytest.raises(ValueError):
+        W.load_route({"launch": {"x": 0, "y": 0}, "walls": {}, "steps": [{"fix": "nowhere"}]})
+    with pytest.raises(ValueError):
+        W.load_route({"launch": {"x": 0, "y": 0}, "steps": [{"teleport": [0, 0]}]})
+
+
+def test_map_to_pad_and_the_predicted_range():
+    m = W.WallSeek(full_params()); m.route = load_full_route()
+    assert m.map_to_pad(-2.515, 2.591) == pytest.approx((1.125, 0.0))           # Wall A: 1.125 m straight ahead
+    rng, dist, cos = m.predict_range("wall_a", 0.325, 0.0, 0.0)                   # at P1 facing north
+    assert rng == pytest.approx(0.80, abs=1e-3) and cos == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("plant", ["drone", "t4"])
+def test_full_course_flies_every_checkpoint_and_lands_on_the_pad(plant):
+    tau, dead, lag = (0.55, 0.25, 0.55) if plant == "drone" else (1.4, 0.3, 1.5)
+    s = FullSim(full_params(lag_s=lag), tau=tau, dead=dead).run(420)
+    log = "\n".join(s.m.log)
+    assert "route complete" in log and s.m.phase == "done", log
+    assert crossed(s, lambda x, y: 1.58 < x < 3.04 and y < -0.305 - 0.29), "CP3: the whole drone out of the tunnel"
+    assert crossed(s, lambda x, y: x < -0.6 and -2.7 < y < -1.8), "CP4: through the window"
+    x, y = true_map(s)
+    assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"CP5: landed at ({x:.2f}, {y:.2f})"
+    assert s.min_clear > 0.31, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}"
+    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 3, s.m.fixes
+
+
+def test_full_course_depth_fixes_cancel_a_drifting_estimate():
+    """The vision estimate drifts steadily (12 cm north, 10 cm west by 150 s, as cuVSLAM can): without the fixes the
+    window (0.17 m to spare each side) would be missed; with them the drone still threads it and lands on the pad."""
+    drift = lambda t: (min(t, 150.0) / 150.0 * 0.12, -min(t, 150.0) / 150.0 * 0.10)  # noqa: E731
+    def fault(t, p, v):
+        dn, de = drift(t)
+        return (p[0] - dn, p[1] - de, p[2]), v                  # the estimate lags the truth by the drift
+    s = FullSim(est_fault=fault).run(420)
+    log = "\n".join(s.m.log)
+    assert "route complete" in log, log
+    applied = [f for f in s.m.fixes if f[3] is not None]
+    assert len(applied) >= 3, s.m.fixes
+    assert s.min_clear > 0.30, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}\n{log}"
+    x, y = true_map(s)
+    assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"landed at ({x:.2f}, {y:.2f})\n{log}"
+
+
+def test_window_check_lands_instead_of_flying_into_a_closed_window():
+    s = FullSim(walls=COURSE_MAP + [((-0.315, -1.843), (-0.628, -2.702))]).run(420)   # the opening boarded up
+    log = "\n".join(s.m.log)
+    assert "window check: a surface" in log and "route complete" not in log, log
+    assert s.min_clear > 0.30
+
+
+def test_a_wild_fix_is_not_applied():
+    """A fix that disagrees with the estimate by more than fix_max_m (another surface, a bad frame) is logged and
+    skipped, never applied."""
+    m = W.WallSeek(full_params()); m.route = load_full_route()
+    m.heading, m.step_arg, m.fbuf = 0.0, "wall_a", [0.30] * 10        # 0.50 m short of the 0.80 expected at P1
+    m._apply_fix(W.Inputs(now=1.0, pos=(0.325, 0.0, 0.4), vel=(0, 0), yaw_err=0, t_odom=1, state=None, t_state=1,
+                          ahead_m=0.3, t_depth=1), 0.325, 0.0)
+    assert m.delta == (0.0, 0.0) and m.fixes[-1][3] is None

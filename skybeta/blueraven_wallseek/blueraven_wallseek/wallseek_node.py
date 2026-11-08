@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 
 import rclpy
 from geometry_msgs.msg import TwistStamped
@@ -26,6 +27,16 @@ class WallSeekNode(Node):
         for k, v in vars(p).items():                                    # every Params field is a ROS parameter
             setattr(p, k, type(v)(self.declare_parameter(k, v).value))
         self.mission = W.WallSeek(p)
+        route_file = str(self.declare_parameter("route_file", "").value)
+        if p.full_course:                    # a bad or missing route stops the node HERE, before anything can arm
+            if not route_file:
+                from ament_index_python.packages import get_package_share_directory
+                route_file = os.path.join(get_package_share_directory("blueraven_wallseek"), "route",
+                                          "full_course_window.yaml")
+            import yaml
+            with open(route_file, encoding="utf-8") as fh:
+                self.mission.route = W.load_route(yaml.safe_load(fh))
+            self.get_logger().info(f"full course: {route_file}, {len(self.mission.route['steps'])} steps")
         self.yaw_offset = float(self.declare_parameter("odom_to_ned_yaw_offset_rad", 0.0).value)
         self.mount = D.CameraMount(*(float(self.declare_parameter(k, d).value) for k, d in
                                      (("camera_forward_m", 0.1053), ("camera_left_m", 0.0376), ("camera_up_m", 0.0304))))
@@ -131,7 +142,7 @@ class WallSeekNode(Node):
                   "vio_var": self.vio_var, "vo_state": self.vo_state,
                   "ahead_points": a.points if a else None, "depth_valid": round(a.valid_frac, 2) if a else None,
                   "depth_age": round(now - self.t_depth, 3), "odom_age": round(now - self.t_odom, 3),
-                  "twist_pad": out.twist}
+                  "twist_pad": out.twist, "correction": list(self.mission.delta), "fixes": self.mission.fixes}
             self.pub_status.publish(String(data=json.dumps(st)))
             if self.pub_dash is not None:
                 self.pub_dash.publish(String(data=json.dumps(self.mission.dashboard_view())))

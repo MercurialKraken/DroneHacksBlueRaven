@@ -17,7 +17,38 @@ from dataclasses import dataclass, field
 from typing import Any
 
 NAV_OFFBOARD = 14
-AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg", "rise")
+AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg", "rise",
+            "wapproach", "fix", "clear")
+DEPTH_PHASES = ("approach", "settle", "translate", "wapproach", "fix", "clear")
+STEP_KINDS = ("fix", "face", "leg", "approach", "height", "clear")
+
+
+def load_route(d: dict) -> dict:
+    """Check a full-course route (route/*.yaml, parsed) and return it normalised: launch, walls, steps. Raises
+    ValueError on anything malformed, so a bad file stops the node before arming, never mid-flight."""
+    try:
+        la = d["launch"]
+        launch = (float(la["x"]), float(la["y"]), float(la.get("yaw_deg", 90.0)))
+        walls = {}
+        for k, w in (d.get("walls") or {}).items():
+            (px, py), (nx, ny) = (map(float, w["point"]), map(float, w["normal"]))
+            nn = math.hypot(nx, ny)
+            if nn < 1e-6:
+                raise ValueError(f"wall {k}: zero normal")
+            walls[k] = ((px, py), (nx / nn, ny / nn))
+        steps = []
+        for s in d["steps"]:
+            kind = next((k for k in STEP_KINDS if k in s), None)
+            if kind is None:
+                raise ValueError(f"unknown step {s}")
+            if kind in ("fix", "approach") and s[kind] not in walls:
+                raise ValueError(f"step {s}: no wall {s[kind]!r}")
+            steps.append(dict(s))
+        if not steps:
+            raise ValueError("no steps")
+        return {"launch": launch, "walls": walls, "steps": steps}
+    except (KeyError, TypeError) as e:
+        raise ValueError(f"route file: {e!r}") from e
 
 
 @dataclass
@@ -120,6 +151,16 @@ class Params:
                                     # the variance is naturally 0.01-0.05 (it grounded T4 run 3 on the pad). The T4's
                                     # spawn is 0.2 m further north, so the same spot there is 0.8 m.
     slide_immediately: bool = False # variant: no hover stop at the wall, start translating as soon as it is at the standoff
+    # FULL COURSE (Darion, branch darion/full-course): after P1, the steps of a route file (WallSeek.route): straight legs,
+    # slow in-place turns, height changes, wall approaches by depth, and depth FIXES: stopped facing a known wall, the
+    # measured range vs the range predicted from the position estimate = the estimate's drift along that wall's normal;
+    # every later point shifts by it (capped). Off: the route-mode flight above (land at P2).
+    full_course: bool = False
+    fix_s: float = 1.0              # a fix / window check reads depth this long, stopped (median of the frames)
+    fix_max_m: float = 0.25         # a correction bigger than this is a wrong reading (another surface): logged, not applied
+    fix_min_frames: int = 5
+    fix_spread_m: float = 0.272     # the corridor's 10th percentile at an angled wall: 0.8 x the corridor's half width
+    rotate_push_on_turns: bool = True   # full course: the learned push is BODY-fixed, so it turns with the nose
 
 
 @dataclass
@@ -209,6 +250,15 @@ class WallSeek:
     t_ground: float | None = None
     zs: list[tuple[float, float]] = field(default_factory=list)
     log: list[str] = field(default_factory=list)
+    # full course
+    route: dict | None = None       # load_route() output
+    delta: tuple = (0.0, 0.0)       # pad (north, east): true = estimate + delta (the sum of the depth fixes)
+    fixes: list = field(default_factory=list)    # (wall, measured range, predicted, correction applied or None)
+    fbuf: list = field(default_factory=list)     # depth frames read by a fix / window check
+    fseq: int = -1
+    step_arg: Any = None            # the current fix / approach / clear step
+    wa: tuple | None = None         # wall approach: (start (n, e), unit (n, e), standoff, max_m)
+    named: list = field(default_factory=list)    # full course: (name, map point) of every named leg end, for the dashboard
 
     # ------------------------------------------------------------------ helpers
     def _set(self, phase: str, now: float, why: str) -> None:
@@ -404,16 +454,16 @@ class WallSeek:
                 self._land(i, f"odometry silent for {odom_age:.2f} s")
             elif odom_age > p.odom_hold_s:
                 return Output(self.phase, f"holding: odometry {odom_age:.2f} s old", (0.0, 0.0, 0.0, 0.0))
-        if self.phase in ("approach", "settle", "translate"):
+        if self.phase in DEPTH_PHASES:
             d_age = i.now - i.t_depth
             if d_age > p.depth_land_s:
                 self._land(i, f"depth silent for {d_age:.2f} s")
             elif d_age > p.depth_hold_s:
                 return Output(self.phase, f"holding: depth {d_age:.2f} s old", (0.0, 0.0, 0.0, self._wz(i)))
-            elif self.ahead_f is not None and self.ahead_f < p.contact_m:
-                vn = -p.xy_hold_cap_mps
+            elif self.ahead_f is not None and self.ahead_f < p.contact_m and i.pos is not None:
+                h = math.radians(self.heading)                  # straight back, away from the nose (north at P1)
                 return Output(self.phase, f"backing off: surface {self.ahead_f:.2f} m ahead",
-                              (vn, 0.0, self._vz(i), self._wz(i)))
+                              (-p.xy_hold_cap_mps * math.cos(h), -p.xy_hold_cap_mps * math.sin(h), self._vz(i), self._wz(i)))
 
         n, e, u = i.pos if i.pos else (0.0, 0.0, 0.0)
         # velocity from the POSITION's own slope (0.3 s), not cuVSLAM's twist field: beside the wall the twist read
@@ -468,7 +518,9 @@ class WallSeek:
             self.t_in_tol = (self.t_in_tol if self.t_in_tol is not None else i.now) if ok else None
             capped = i.now - self.t_phase >= p.settle_max_s and abs(rng - p.standoff_m) < 2 * p.settle_tol_m
             if (self.t_in_tol is not None and i.now - self.t_in_tol >= p.settle_s) or capped:
-                if p.route_mode:
+                if p.full_course and self.route is not None:
+                    self._full_start(i, n, e)
+                elif p.route_mode:
                     self._route_start(i, n, e)
                 else:
                     self.clear_count, self.last_seq = 0, i.depth_seq
@@ -511,6 +563,10 @@ class WallSeek:
             if rem <= 1e-3 and self.t_turned is None:
                 self.t_turned = i.now
             if self.t_turned is not None and i.now - self.t_turned >= p.turn_dwell_s:
+                if p.full_course and p.rotate_push_on_turns:    # the push turns with the nose (body-fixed)
+                    a = math.radians(-sign * angle)             # clockwise (+ = right) in the pad frame
+                    c, s = math.cos(a), math.sin(a)
+                    self.i_n, self.i_e = c * self.i_n - s * self.i_e, s * self.i_n + c * self.i_e
                 self._next_step(i, n, e)
             else:
                 # the gyro's rate loop turns it; the last tick is trimmed so the turn is exactly `angle`
@@ -578,6 +634,62 @@ class WallSeek:
                             -cap, cap)
                 return Output(self.phase, self.why, (vn, ve, self._vz(i), self._wz(i)))
 
+        if self.phase in ("fix", "clear"):
+            hn, he = self.hold_pt
+            if i.depth_seq != self.fseq:
+                self.fseq = i.depth_seq
+                if self.ahead_f is not None:
+                    self.fbuf.append(self.ahead_f)
+            if i.now - self.t_phase >= p.fix_s:
+                if self.phase == "fix":
+                    self._apply_fix(i, n, e)
+                    self._next_step(i, n, e)
+                else:
+                    near = [r for r in self.fbuf if math.isfinite(r)]
+                    seen = sorted(near)[len(near) // 2] if len(near) >= max(1, len(self.fbuf) // 2) else math.inf
+                    if seen < self.step_arg:
+                        self._land(i, f"window check: a surface {seen:.2f} m ahead (< {self.step_arg:.2f}): not lined up "
+                                      "with the opening, landing here instead of hitting its frame")
+                    else:
+                        self.log.append(f"{i.now:.2f} window check: clear ({'nothing' if not math.isfinite(seen) else f'{seen:.2f} m'} ahead)")
+                        self._next_step(i, n, e)
+            if self.phase in ("fix", "clear"):
+                return Output(self.phase, self.why,
+                              (self._hold(hn, n, vn_m, "i_n"), self._hold(he, e, ve_m), self._vz(i), 0.0))
+
+        if self.phase == "wapproach":
+            (sn, se), (un, ue), standoff, max_m = self.wa
+            s_now = (n - sn) * un + (e - se) * ue                  # along the nose
+            cross = -(n - sn) * ue + (e - se) * un                 # to the right of the line
+            v_along = vn_m * un + ve_m * ue
+            v_cross = -vn_m * ue + ve_m * un
+            cap = p.xy_hold_cap_mps
+            if i.now - self.t_phase > p.approach_timeout_s:
+                self._land(i, f"wall approach did not settle within {p.approach_timeout_s:.0f} s")
+            elif not wall and s_now >= max_m - 0.02:
+                self._land(i, f"no wall within {max_m:.2f} m on the approach to {self.step_arg}")
+            else:
+                if wall:    # the standoff loop on depth (as at P1), the learned push as a constant feed-forward
+                    err = rng - standoff
+                    lag = p.lag_s + (p.depth_median_n // 2) / 30.0
+                    va = _clamp(p.k_wall * (err - lag * self.vn_depth), -cap, p.approach_mps)
+                    ok = abs(err) < p.settle_tol_m and abs(self.vn_depth) < p.settle_mps
+                    self.t_in_tol = (self.t_in_tol if self.t_in_tol is not None else i.now) if ok else None
+                    if abs(err) < 2 * p.settle_tol_m:
+                        self.t_at_height = self.t_at_height if self.t_at_height is not None else i.now   # near since
+                    if ((self.t_in_tol is not None and i.now - self.t_in_tol >= p.settle_s)
+                            or (self.t_at_height is not None and i.now - self.t_at_height >= p.settle_max_s
+                                and abs(err) < 2 * p.settle_tol_m)):
+                        self.log.append(f"{i.now:.2f} {self.step_arg}: stopped {rng:.2f} m from it")
+                        self._next_step(i, n, e)
+                else:
+                    va = _clamp(p.k_xy * (max_m - s_now - p.lag_s * v_along), -cap, p.approach_mps)
+                if self.phase == "wapproach":
+                    vc = _clamp(p.k_xy * (-cross - p.lag_s * v_cross), -cap, cap)
+                    vn = va * un - vc * ue + self.i_n
+                    ve = va * ue + vc * un + self.i_e
+                    return Output(self.phase, self.why, (vn, ve, self._vz(i), 0.0))
+
         if self.phase == "land":
             return self._descend(i, armed, offboard)
         return Output(self.phase, self.why)
@@ -587,7 +699,11 @@ class WallSeek:
         'look' = the point being steered to). Before P1 is fixed by depth: the PLANNED route (P1 at its nominal 0.48 m
         south-west of P2's 45 deg leg); after: the actual one."""
         p = self.p
-        if self.route_pts is not None:
+        if p.full_course and self.route is not None:         # every named point where the ESTIMATE must reach it
+            p1 = self.route_pts[0] if self.route_pts else (p.gap_n_m + 0.438 - p.standoff_m, 0.0)
+            pts = [p1] + [self._est(*pt) for _, pt in (self.named or
+                                                         [(s.get("name", ""), s["leg"]) for s in self.route["steps"] if "leg" in s])]
+        elif self.route_pts is not None:
             pts = self.route_pts
         else:                                                # nominal P1: Wall A's face is 0.438 m north of the gap centre
             n1 = p.gap_n_m + 0.438 - p.standoff_m
@@ -599,9 +715,10 @@ class WallSeek:
             look = [round(tn + self.s_ref * un, 3), round(te + self.s_ref * ue, 3)]
         elif self.phase == "turn" and self.turn is not None:
             look = [round(c, 3) for c in self.turn[2]]
-        elif self.phase == "pause" and self.hold_pt is not None:
+        elif self.phase in ("pause", "rise", "fix", "clear") and self.hold_pt is not None:
             look = [round(c, 3) for c in self.hold_pt]
         return {"phase": self.phase, "why": self.why, "program": "wallseek",
+                "correction": [round(c, 3) for c in self.delta], "fixes": self.fixes,
                 "targets": [[round(n, 3), round(e, 3)] for n, e in pts],
                 "path": [[0.0, 0.0]] + [[round(n, 3), round(e, 3)] for n, e in pts], "look": look}
 
@@ -631,14 +748,108 @@ class WallSeek:
                         f"P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
         self._next_step(i, n, e)
 
+    # ------------------------------------------------------------------ full course (route file)
+    def map_to_pad(self, x: float, y: float) -> tuple[float, float]:
+        """A map point -> the TRUE pad (north, east), from the route's launch pose (nose along yaw_deg)."""
+        lx, ly, yaw = self.route["launch"]
+        c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        dx, dy = x - lx, y - ly
+        return dx * c + dy * s, dx * s - dy * c
+
+    def _est(self, x: float, y: float) -> tuple[float, float]:
+        """A map point -> where the ESTIMATE must reach to be there: the true pad point minus the drift found so far."""
+        tn, te = self.map_to_pad(x, y)
+        return tn - self.delta[0], te - self.delta[1]
+
+    def _wall_pad(self, name: str) -> tuple[tuple[float, float], tuple[float, float]]:
+        (px, py), (nx, ny) = self.route["walls"][name]
+        f = self.map_to_pad(px, py)
+        o = self.map_to_pad(self.route["launch"][0], self.route["launch"][1])       # (0, 0): vectors rotate only
+        w = self.map_to_pad(self.route["launch"][0] + nx, self.route["launch"][1] + ny)
+        return f, (w[0] - o[0], w[1] - o[1])
+
+    def predict_range(self, name: str, n: float, e: float, heading_deg: float) -> tuple[float, float, float]:
+        """Depth corridor range expected facing `name` from the TRUE pad point (n, e): (range, D, cos) where D = the
+        centre's distance from the face along its normal and cos = how square on the nose is (1 = straight at it).
+        The corridor's 10th percentile at an angled wall reads short by fix_spread_m x the sideways slope."""
+        (fn, fe), (wn, we) = self._wall_pad(name)
+        h = math.radians(heading_deg)
+        un, ue, rn, re = math.cos(h), math.sin(h), -math.sin(h), math.cos(h)
+        cos = -(un * wn + ue * we)
+        dist = (n - fn) * wn + (e - fe) * we
+        rng = (dist - self.p.fix_spread_m * abs(rn * wn + re * we)) / cos if cos > 1e-3 else math.inf
+        return rng, dist, cos
+
+    def _apply_fix(self, i: Inputs, n: float, e: float) -> None:
+        name, p = self.step_arg, self.p
+        frames = [r for r in self.fbuf if math.isfinite(r)]
+        tn, te = n + self.delta[0], e + self.delta[1]
+        pred, dist, cos = self.predict_range(name, tn, te, self.heading)
+        if cos < 0.5:
+            self.fixes.append((name, None, round(pred, 3), None))
+            self.log.append(f"{i.now:.2f} fix {name}: not facing it (cos {cos:.2f}): skipped")
+            return
+        if len(frames) < p.fix_min_frames:
+            self.fixes.append((name, None, round(pred, 3), None))
+            self.log.append(f"{i.now:.2f} fix {name}: only {len(frames)} depth frames saw it: skipped")
+            return
+        r = sorted(frames)[len(frames) // 2]
+        (_, _), (wn, we) = self._wall_pad(name)
+        h = math.radians(self.heading)
+        side = abs(-math.sin(h) * wn + math.cos(h) * we)
+        corr = (r * cos + p.fix_spread_m * side) - dist          # + = farther from the wall than the estimate says
+        if abs(corr) > p.fix_max_m:
+            self.fixes.append((name, round(r, 3), round(pred, 3), None))
+            self.log.append(f"{i.now:.2f} fix {name}: depth {r:.2f} m vs {pred:.2f} predicted = {corr:+.2f} m: more "
+                            f"than {p.fix_max_m:.2f}, NOT applied (another surface?)")
+            return
+        self.delta = (self.delta[0] + corr * wn, self.delta[1] + corr * we)
+        self.fixes.append((name, round(r, 3), round(pred, 3), round(corr, 3)))
+        self.log.append(f"{i.now:.2f} fix {name}: depth {r:.2f} m vs {pred:.2f} predicted: the estimate is {corr:+.3f} m "
+                        f"off along the wall's normal; correction now N {self.delta[0]:+.3f} E {self.delta[1]:+.3f}")
+
+    def _full_start(self, i: Inputs, n: float, e: float) -> None:
+        """Stopped at P1: the route file's steps from here (Darion's full course)."""
+        self.heading = 0.0
+        self.plan = [dict(s) for s in self.route["steps"]]
+        self.route_pts = [(n, e)]
+        self.named = [(s.get("name", ""), s["leg"]) for s in self.route["steps"] if "leg" in s]
+        self.log.append(f"{i.now:.2f} full course: P1 ({n:.2f}, {e:.2f}), {len(self.plan)} steps")
+        self._next_step(i, n, e)
+
     def _next_step(self, i: Inputs, n: float, e: float) -> None:
         if not self.plan:
             self._land(i, "route complete")
             return
-        kind, arg = self.plan.pop(0)
-        if kind == "rise":                                   # Darion: at P1 climb straight up (in place) first
+        item = self.plan.pop(0)
+        if isinstance(item, dict):                           # a full-course step (map frame)
+            kind = next(k for k in STEP_KINDS if k in item)
+            arg = item[kind]
+            if kind in ("face", "leg"):
+                self.plan.insert(0, (kind, self._est(*arg)))
+                self._next_step(i, n, e)
+                return
+            if kind == "height":
+                self.plan.insert(0, ("rise", float(arg)))
+                self._next_step(i, n, e)
+                return
+            self.step_arg, self.hold_pt, self.fbuf, self.fseq = arg, (n, e), [], -1
+            if kind == "fix":
+                self._set("fix", i.now, f"stopped: reading the depth to {arg} for a position fix")
+            elif kind == "clear":
+                self._set("clear", i.now, f"window check: nothing may be within {float(arg):.2f} m ahead")
+                self.step_arg = float(arg)
+            else:                                            # approach: forward along the nose to the standoff
+                h = math.radians(self.heading)
+                self.wa = ((n, e), (math.cos(h), math.sin(h)), float(item.get("standoff", self.p.standoff_m)),
+                           float(item.get("max_m", 0.6)))
+                self.t_in_tol = self.t_at_height = None
+                self._set("wapproach", i.now, f"forward until {arg} is {self.wa[2]:.2f} m ahead (at most {self.wa[3]:.2f} m)")
+            return
+        kind, arg = item
+        if kind == "rise":                                   # climb / descend straight up or down, in place
             self.h_target, self.hold_pt, self.t_at_height = arg, (n, e), None
-            self._set("rise", i.now, f"climbing in place to {arg:.2f} m at P1")
+            self._set("rise", i.now, f"{'climbing' if arg > i.pos[2] else 'descending'} in place to {arg:.2f} m")
             return
         if kind == "face":                                   # turn in place to point the nose at `arg`, from here
             bearing = math.degrees(math.atan2(arg[1] - e, arg[0] - n))      # clockwise from north

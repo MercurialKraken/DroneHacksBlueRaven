@@ -12,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + PACKAGE]),
         ('share/' + PACKAGE, ['package.xml']),
         ('share/' + PACKAGE + '/launch', glob('launch/*.launch.py')),
+        ('share/' + PACKAGE + '/route', glob('route/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
