@@ -125,8 +125,10 @@ class MppiParams:
                                  # to 0.35 s in flight) is passed per call (step(..., pose_age_s))
     max_pose_age_s: float = 0.5  # s: ages beyond this are clamped (a stamp on a wrong clock must not make MPPI predict
                                  # seconds ahead); past 0.45 s of silence the flight program holds anyway
-    v_max: float = 0.60          # m/s, command speed cap (the organizers' interface clamps at 1.5)
+    v_max: float = 0.60          # m/s, speed cap on the PLANNED velocity over the ground (with a push estimate:
+                                 # the settled velocity w); without one it is also the command cap
     v_lat: float = 0.50          # m/s, sideways command cap in the path frame
+    u_max: float | None = None   # m/s, cap on the COMMAND sent (w - push), which leans against the push; None: v_max
     a_cmd: float = 1.5           # m/s^2, command change limit (half of PX4's MPC_ACC_HOR 3.0)
     v_stopped: float = 0.05      # m/s: where the reference is slower than this, samples may back up ...
     v_back: float = 0.20         # ... at up to this speed (else forward >= 0 along the path)
@@ -746,8 +748,9 @@ class Mppi:
                    "reference": _to_np(pr)}
         u_np = np.array([float(U_new[0, 0]), float(U_new[0, 1])]) - bias
         n_u = float(np.hypot(*u_np))
-        if bias.any() and n_u > p.v_max:                             # the push took the command over the cap
-            u_np = u_np * (p.v_max / n_u)
+        u_cap = p.v_max if p.u_max is None else max(p.u_max, p.v_max)
+        if bias.any() and n_u > u_cap:                               # the push took the command over the cap
+            u_np = u_np * (u_cap / n_u)
         u = (float(u_np[0]), float(u_np[1]))
         self.u_last = np.array(u)
         self._inflight = (self._inflight + [self.u_last.copy()])[-60:]   # replaced by note_sent() if overridden

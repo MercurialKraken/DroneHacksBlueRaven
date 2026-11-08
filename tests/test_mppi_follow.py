@@ -148,7 +148,7 @@ def test_nav_must_be_refnav_or_mppi():
 # ---------------------------------------------------------------------------------------------- flights
 def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None,
            plant: tuple[float, float] = (0.3, 0.0), jitter_m: float = 0.0, link_s: float = 0.05,
-           mppi_dies_after_s: float = math.inf):
+           mppi_dies_after_s: float = math.inf, odom_jump_after_s: float = math.inf):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
     so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone.
     MPPI is mppi_node's side of the link (pad None, cmd_msg as JSON, delivered link_s later); refnav's side is
@@ -169,8 +169,11 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     while t < limit_s and m.phase != "done":
         p, q, vf = sk.odom()
         p = tuple(np.add(p, np.r_[rng.normal(0.0, jitter_m, 2), 0.0])) if jitter_m else p     # VIO jitter per sample
-        pad, t_odom = S.on_odom(v, pad, m.phase, p, q, vf), t
-        mf.on_odom(t, p, q, vf)
+        p_est = p                                                           # what cuVSLAM reports (traj stays truth)
+        if link.start_id is not None and t - link.t_start >= odom_jump_after_s:
+            p_est = (p[0] + 1.6, p[1] - 1.6, p[2])                          # a 2.3 m jump that stays (Darion's T4)
+        pad, t_odom = S.on_odom(v, pad, m.phase, p_est, q, vf), t
+        mf.on_odom(t, p_est, q, vf)
         m.on_health(t, S.healthy(state, t_state, t))
         if round(t / DT) % 4 == 0:
             state, t_state = sk.state(), t
@@ -322,3 +325,58 @@ def test_refnav_never_runs_mppi_and_mppi_node_never_commands_the_drone():
     assert "qos_profile_sensor_data" not in node + (pkg / "mppi_shadow.py").read_text()
     launch = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
     assert "executable='mppi_node'" in launch and "' == 'mppi'" in launch and "' != 'mppi'" in launch
+
+
+# ---------------------------------------------------------------------------------------------- VIO jump guard
+def _started(v_cruise=0.15):
+    mf = M.MppiFollow(v_cruise, 0.9, 0.6)
+    mf.start(STAGE1["route"], S.Pad(0.0, 0.0, 0.0, 0.0))
+    return mf
+
+
+def _odom(mf, t, x, y=0.0):
+    mf.on_odom(t, (x, y, 0.7), (0.0, 0.0, 0.0, 1.0), (0.1, 0.0, 0.0))
+
+
+def test_flight_motion_and_real_odometry_gaps_never_trip_the_jump_guard():
+    mf, rng = _started(), np.random.default_rng(1)
+    t, x = 0.0, 0.0
+    for k in range(600):                                  # 20 s at 30 Hz, 0.6 m/s (MPPI's cap at 0.15 cruise is 0.45)
+        gap = 0.35 if k % 50 == 49 else 1 / 30            # skybeta-09's in-flight gaps reach 0.35 s
+        t, x = t + gap, x + 0.6 * gap
+        _odom(mf, t, x + rng.normal(0, 0.003))
+    assert mf.lost is None
+
+
+def test_a_vio_jump_latches_lost_until_the_next_follow_start():
+    mf = _started()
+    _odom(mf, 1.0, 0.0)
+    _odom(mf, 1.033, 0.5)                                 # 0.5 m in 33 ms
+    assert mf.lost and "jumped 0.50 m" in mf.lost
+    _odom(mf, 1.066, 0.5)                                 # still where it jumped to: stays LOST
+    assert mf.lost
+    mf.tick(2.0, None)
+    assert mf.cmd.state == "LOST" and (mf.cmd.vx, mf.cmd.vy) == (0.0, 0.0)
+    m = json.loads(json.dumps(M.cmd_msg(mf.cmd, 5.0, 2.0)))
+    link = M.CmdLink()
+    link.begin(1.9)
+    m["start"] = link.start_id
+    assert link.on_cmd(m) and link.why_land(2.0).startswith("MPPI: odometry jumped")
+    assert link.ext(2.0, S.Pad(0.0, 0.0, 0.0, 0.0))["vn"] == 0.0
+    mf.start(STAGE1["route"], S.Pad(0.0, 0.0, 0.0, 0.0))
+    assert mf.lost is None
+
+
+def test_mppis_flight_speed_cap_follows_the_cruise():
+    p = M.MppiFollow(0.10, 0.9, 0.6).mppi_p                     # ground 0.15, command 0.30 at 0.10 m/s cruise
+    assert (p.v_max, p.v_lat, p.u_max) == (pytest.approx(0.15), pytest.approx(0.15), pytest.approx(0.30))
+    p = M.MppiFollow(0.15, 0.9, 0.6).mppi_p
+    assert (p.v_max, p.u_max) == (pytest.approx(0.225), pytest.approx(0.45))
+
+
+def test_a_vio_jump_in_flight_lands_where_the_drone_really_is():
+    m, sk, traj, states, w, mf = flight(odom_jump_after_s=6.0)
+    assert "odometry jumped" in m.land_reason, (m.land_reason, states[-5:])
+    after = traj[mf.traj_t >= mf.link.t_start + 6.0]                          # truth from the jump on
+    assert np.linalg.norm(after - after[0], axis=1).max() < 0.2               # it did not chase the false position
+    assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
