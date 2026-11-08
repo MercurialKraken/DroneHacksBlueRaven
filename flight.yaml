@@ -12,5 +12,3 @@
     control_topic: /refnav/control
     status_topic: /refnav/status
     yaw_rate_dps: 45.0   # faster turns broke cuVSLAM tracking near walls
-    # route_name (main.py ROUTE): full is route.json planned live from the course map; cp1 and maze are
-    # routes/route_<name>_<launch_key>.json flown as given. launch_key: launch_sim (default) or launch (the real mark).

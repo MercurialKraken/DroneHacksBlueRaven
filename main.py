@@ -12,7 +12,6 @@ Read onboard/README.md for perception bringup and native ROS examples.
 """
 HEIGHT_M = 0.7      # metres above the take-off point
 HOVER_S = 2.0       # seconds to hold at that height before landing
-ROUTE = "full"      # full (route.json), cp1 (past checkpoint 1) or maze (through Gate A); the launch_key parameter picks the mark
 MAP_ALIGN = True    # run nav/map_align_node beside the flight: corrects drift by aligning depth to the course map
 
 from importlib.util import find_spec  # noqa: E402
@@ -39,7 +38,7 @@ if __name__ == "__main__":
     try:
         # Standard ROS parameter files. This project runs without runtime.program,
         # FLYX_PROFILE or a cloud CLI on a normally configured physical companion.
-        node.main(arguments(PROJECT, height_m=HEIGHT_M, hover_s=HOVER_S, route=ROUTE, ros_args=sys.argv[1:]))
+        node.main(arguments(PROJECT, height_m=HEIGHT_M, hover_s=HOVER_S, ros_args=sys.argv[1:]))
     finally:
         if helper is not None and helper.poll() is None:
             helper.send_signal(signal.SIGINT)

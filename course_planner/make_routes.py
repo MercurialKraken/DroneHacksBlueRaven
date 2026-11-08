@@ -10,9 +10,6 @@ Outputs (all for the Gate B route, all from course_map.json, nothing hand-typed)
   route_v3.json    route_fast + min_corridor_coverage 0.4. Predicted to hit the net.
   route_v4.json    v3 with leg ends pulled back from walls, plus wider stop checks. Assumes take-off at the 0.914 mark.
   route_v5.json    v4 from the sim's real spawn (-2.5146, 1.1144). Current candidate; route.json.
-  route_cp1_<launch>.json, route_maze_<launch>.json   scorer routes: take off, go past checkpoint 1 / through Gate A, land.
-                   cp1 is the maze route's first two points.
-                   <launch> is the course.yaml launch key they are flown from: launch_sim (the spawn) or launch (the real mark).
 
 refnav route format: [[forward_m, left_m], ...] from the take-off point in the drone's take-off heading.
 The drone starts facing north up the first corridor (confirmed by run 1), so forward = north, left = west.
@@ -36,8 +33,6 @@ V4_PARAMS = dict(BASE_PARAMS, stop_m=0.65, corridor_half_m=0.30, min_corridor_co
 FLYX_SPAWN_XY = (-2.5146, 1.1144)   # FlyX environment.json spawn, measured on the T4 replica; NOT the 0.914 mark
 OVERSHOOT_M = 0.13          # past the end of a leg, as a PX4 model fitted to run_0613 predicts
 SAFE_END_M = 0.32           # drone radius 0.29 + 0.03
-LAUNCHES = {"launch_sim": FLYX_SPAWN_XY, "launch": None}   # None: the map's launch_mark_xy, the published mark
-CP1_END, GATE_A_END = 2, 12  # v1 vertices (+1, origin first) where CP1 and Gate A are reached
 
 
 def _merge_corners(route, m, params, keep_idx):
@@ -107,7 +102,7 @@ def build(map_path=HERE / "course_map.json"):
     pl = plan(m, "gate_b", with_return=False)
     v1 = [tuple(map(float, q)) for q in to_refnav_route(pl, m["launch_mark_xy"], math.pi / 2)]
     # Keep: CP1 end (idx 2), the point just past Gate A (12), the tunnel line-up and straight run (13-17), the pad (last).
-    keep = {CP1_END, GATE_A_END, len(v1)} | set(range(13, 18))
+    keep = {2, 12, len(v1)} | set(range(13, 18))
     fast = _merge_corners(v1, m, pl.params, keep)
     v4 = _pull_back(fast, m, pl.params.grid_res_m)
     # v5: same course path, flown from where the sim actually spawns the drone. Routes are relative to the
@@ -119,7 +114,7 @@ def build(map_path=HERE / "course_map.json"):
     if len(v1_5) != len(v1):
         raise RuntimeError(f"plan from the spawn has {len(v1_5)} vertices, not {len(v1)}: keep indices would be wrong")
     v5 = _pull_back(_merge_corners(v1_5, m5, pl5.params, keep), m5, pl5.params.grid_res_m)
-    out = {
+    return {
         "route_v5.json": (v5, V4_PARAMS),
         "route_v4.json": (v4, V4_PARAMS),
         "route_v1.json": (v1, BASE_PARAMS),
@@ -127,16 +122,6 @@ def build(map_path=HERE / "course_map.json"):
         "route_v2.json": (fast, BASE_PARAMS),
         "route_v3.json": (fast, dict(BASE_PARAMS, min_corridor_coverage=0.4)),
     }
-    for key, xy in LAUNCHES.items():
-        mk = m if xy is None else dict(m, launch_mark_xy=list(xy))
-        pk = plan(mk, "gate_b", with_return=False)
-        vk = [tuple(map(float, q)) for q in to_refnav_route(pk, mk["launch_mark_xy"], math.pi / 2)]
-        res = pk.params.grid_res_m
-        maze = _pull_back(_merge_corners(vk[:GATE_A_END], mk, pk.params, {CP1_END, GATE_A_END}), mk, res)
-        # past CP1 as the full route is: up the corridor, then its first turn east (the net is too close to go further north)
-        out[f"route_cp1_{key}.json"] = (maze[:2], V4_PARAMS)
-        out[f"route_maze_{key}.json"] = (maze, V4_PARAMS)
-    return out
 
 
 def main(argv=None):

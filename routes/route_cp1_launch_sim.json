@@ -1,6 +1,0 @@
-{"route": [
-  [1.488, -0.016],
-  [1.463, -0.842]
- ],
- "params": {"height_m": 0.8, "speed_mps": 0.4, "arrive_m": 0.15, "corridor_half_m": 0.3, "stop_m": 0.65, "min_corridor_coverage": 0.4}
-}

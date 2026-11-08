@@ -10,23 +10,6 @@ if TYPE_CHECKING:
     from typing import Any
 
 
-ROUTE_NAMES = ("full", "cp1", "maze")
-
-
-def route_selection(project: str | os.PathLike[str], name: str, launch_key: str) -> tuple[Path, str]:
-    """(route file, route_source) for a named route: full is route.json planned live from the course map; cp1 and
-    maze are the generated files for this launch key (course_planner.make_routes), flown as given."""
-    project = Path(project).resolve()
-    if name not in ROUTE_NAMES:
-        raise ValueError(f"route_name must be one of {', '.join(ROUTE_NAMES)}, not {name!r}")
-    if name == "full":
-        return project / "route.json", "map"
-    path = project / "routes" / f"route_{name}_{launch_key}.json"
-    if not path.is_file():
-        raise ValueError(f"no {name} route for launch key {launch_key!r}: {path} is missing")
-    return path, "file"
-
-
 def params_files(project: str | os.PathLike[str]) -> list[str]:
     """flight.yaml, then the deployment's file (it sets the clock): every node of the flight reads the same two."""
     args = ["--params-file", str(Path(project).resolve() / "flight.yaml")]
@@ -54,11 +37,11 @@ def flight_params(project: str | os.PathLike[str]) -> dict[str, Any]:
     return out
 
 
-def arguments(project: str | os.PathLike[str], *, height_m: float, hover_s: float, route: str = "full",
+def arguments(project: str | os.PathLike[str], *, height_m: float, hover_s: float,
               ros_args: Sequence[str] = ()) -> list[str]:
     project = Path(project).resolve()
     args = ["refnav", "--ros-args", *params_files(project)]
     # ROS infers CLI parameter types from their text: Python's 4 must reach
     # our DOUBLE declarations as 4.0, just like a fractional height does.
-    return args + ["-p", f"route_name:={route}", "-p", f"height_m:={float(height_m)}",
+    return args + ["-p", f"route_file:={project / 'route.json'}", "-p", f"height_m:={float(height_m)}",
                    "-p", f"hover_s:={float(hover_s)}", *ros_args]
