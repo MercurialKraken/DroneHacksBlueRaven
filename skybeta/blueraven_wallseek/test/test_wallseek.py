@@ -525,7 +525,7 @@ def test_full_course_flies_every_checkpoint_and_lands_on_the_pad(plant):
     x, y = true_map(s)
     assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"CP5: landed at ({x:.2f}, {y:.2f})"
     assert s.min_clear > 0.31, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}"
-    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 1, s.m.fixes          # Wall A
+    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 2, s.m.fixes          # Wall A, Wall C
 
 
 def test_full_course_depth_fixes_cancel_a_drifting_estimate():
@@ -600,16 +600,16 @@ def test_vision_hold_lands_if_cuvslam_never_recovers():
     assert "did not recover within 10 s" in log and s.m.phase == "done", log
 
 
-def test_every_leg_is_flown_nose_first_and_stops_hold_the_set_point():
-    """Darion: never sideways. On every leg the nose doesn't turn and the drone moves along it (sideways speed
-    ~0 against ~0.15 forward); the window check is made AT P6 (held there after the leg), not short of it."""
+def test_the_window_part_is_flown_nose_first_and_stops_hold_the_set_point():
+    """Darion: forward flight for the window part. On the legs after the tunnel (to P6, through the window, to the pad)
+    the nose doesn't turn and the drone moves along it; the window check is made AT P6 (held there), not short of it."""
     s = FullSim().run(420)
     log = "\n".join(s.m.log)
     assert "route complete" in log, log
     side, fwd = [], []
     for k in range(1, len(s.trace)):
         (_, ph0, p0), (_, ph1, p1) = s.trace[k - 1], s.trace[k]
-        if ph0 == ph1 == "leg":
+        if ph0 == ph1 == "leg" and p1[0] + LAUNCH_MAP[1] < -0.6:                  # past the tunnel's exit
             assert abs(s.wz_trace[k]) < 1e-9                    # no nose turn during a leg
             vn, ve = (p1[0] - p0[0]) / s.dt, (p1[1] - p0[1]) / s.dt
             h = s.hdgs[k]
