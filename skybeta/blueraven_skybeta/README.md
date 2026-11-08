@@ -207,11 +207,13 @@ by itself.
 ## 6. Route mission: the hard-coded course
 
 **The run script:** `skybeta/blueraven_skybeta/drone/fly_route.sh` (copy it to the drone host). In its own SSH window:
-`OFFSET=<rad> ./fly_route.sh go` flies stage 1 (`ROUTE=route_v6_start2` for the full course;
-`ROUTE=route_v7_cp2_simple` for Darion's method to CP2: straight forward, 90 deg right, straight through the gap, land
-past it, from `tools/make_route_cp2_simple.py`; `PROGRAM=refnav` for hinson/real-drone's refnav). It checks the host,
-NTP, the camera, odometry and PX4. It stops the organizers' example, starts the recording, launches, waits for
-WAIT_OFFBOARD and checks one flight_interface plus one mission. Then it says READY for the pilot, follows the phases
+`OFFSET=0.0 ./fly_route.sh go` flies ROUTE 1 with refnav, the defaults: `route_v7_cp2_simple`, Darion's method to
+CP2 (straight forward, 90 deg right, straight through the gap, land past it; from `tools/make_route_cp2_simple.py`).
+`ROUTE=route_v7_window` is Hinson's full course. skybeta-09's measured offset is 0.0; `_sim` files are refused on the
+drone; `PROGRAM=shell` only where the package has the route mission. It checks the host, NTP, the camera, odometry,
+PX4 and that the program is built. It stops the organizers' example, starts the recording, launches, waits until the
+program is ready (refnav's take-off pose, or the shell's WAIT_OFFBOARD) and checks one flight_interface plus one
+mission. Then it says READY for the pilot, follows the phases
 to the disarm, and stops everything. `status`, `stop`, `check` and `build` do what they say. It has no fixed waits:
 each step polls for its event.
 
