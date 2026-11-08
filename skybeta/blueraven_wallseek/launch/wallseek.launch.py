@@ -32,7 +32,7 @@ MISSION_ARGS = [
     # route mode (default, v3): P1 by depth (0.80 m), face P2 (past the CP2 gap centre), straight to it, face P4, land
     ('p2_past_m', '0.45'), ('p4_e_m', '2.80'), ('turn_rate_dps', '15.0'), ('leg_mps', '0.12'),
     ('leg_climb_to_m', '0.0'),      # gradual climb during the gap leg: off
-    ('p1_climb_to_m', '0.50'),      # Darion: climb straight up to this at P1, before turning
+    ('p1_climb_to_m', '0.0'),       # climb at P1 off: the CP2 cone was removed, fly at 0.40 (0.50 cleared it)
     ('approach_mps', '0.15'), ('translate_mps', '0.10'),
     ('past_end_m', '0.35'), ('max_forward_m', '0.70'),   # no wall by 0.70 m: land (Wall A is 1.125 m ahead)
     ('max_right_m', '2.0'), ('lag_s', '0.55'),

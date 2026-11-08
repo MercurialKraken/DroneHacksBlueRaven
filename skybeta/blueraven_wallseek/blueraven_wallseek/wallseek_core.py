@@ -43,7 +43,8 @@ class Params:
     # at z 0.9-1.0, only 0.36 m at 0.4), and height is from the pad (centre ~0.07 m higher). Over the 0.30 m CP2 cone
     # (~60% along the leg) the drone is at ~0.67 m (T4 v3 run at 0.4 m: its centre dipped to 0.33 m there).
     leg_climb_to_m: float = 0.0     # gradual climb during the gap leg: OFF (Darion: climb at P1 instead)
-    p1_climb_to_m: float = 0.50     # Darion: at P1, climb straight up to this before turning (clears the CP2 cone)
+    p1_climb_to_m: float = 0.0      # climb in place at P1 before turning: OFF (Darion 2026-11-08: the organizers removed
+                                    # the CP2 cone, fly the whole route at 0.40); 0.50 cleared the cone when it was there
     land_at_p2: bool = True         # Darion: the route ends at P2 (past the CP2 gap) and lands there; False: on to P4
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn

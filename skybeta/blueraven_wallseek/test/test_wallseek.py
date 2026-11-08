@@ -191,7 +191,7 @@ def test_route_v3_face_the_gap_straight_through_then_p4(plant):
     s = Sim(p, **kw).run(160)
     assert s.m.phase == "done", s.m.log
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
-    assert seq[:11] == ["ready", "climb", "approach", "settle", "rise", "turn", "leg", "pause", "turn", "leg", "land"], seq
+    assert seq[:10] == ["ready", "climb", "approach", "settle", "turn", "leg", "pause", "turn", "leg", "land"], seq
     turns, stray = _turn_angles(s)
     assert len(turns) == 2 and abs(turns[0] + 76) <= 3 and abs(turns[1] + 14) <= 3, turns   # ~76 then ~14 deg right
     assert not stray                                                  # no yaw at all outside the in-place turns
@@ -204,7 +204,7 @@ def test_route_v3_face_the_gap_straight_through_then_p4(plant):
 
 
 def test_climbs_to_050_in_place_at_p1_not_at_take_off():
-    s = Sim(W.Params(route_mode=True, land_at_p2=False)).run(160)
+    s = Sim(W.Params(route_mode=True, land_at_p2=False, p1_climb_to_m=0.50)).run(160)
     first_leg = next(k for k, r in enumerate(s.trace) if r[1] == "rise")
     climb_top = max(r[2][2] for r in s.trace[:first_leg])             # take-off, approach, stop: ~0.40
     assert climb_top < 0.47, climb_top                                  # take-off and P1 stay at ~0.40
@@ -239,7 +239,7 @@ def test_dashboard_view_shows_the_planned_then_the_actual_route():
 def test_default_route_lands_at_p2_past_the_gap():
     s = Sim(W.Params(route_mode=True)).run(160)
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
-    assert seq[:8] == ["ready", "climb", "approach", "settle", "rise", "turn", "leg", "land"], seq
+    assert seq[:7] == ["ready", "climb", "approach", "settle", "turn", "leg", "land"], seq
     assert any("route complete" in x for x in s.m.log) and s.m.phase == "done", s.m.log
     p2 = s.m.route_pts[1]
     assert math.dist(s.trace[-1][2][:2], p2) < 0.15, (s.trace[-1], p2)
