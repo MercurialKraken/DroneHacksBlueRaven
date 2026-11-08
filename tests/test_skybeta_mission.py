@@ -580,3 +580,63 @@ def test_the_package_never_publishes_to_px4_directly():
             assert "/fmu/" not in text, f"{f} mentions /fmu/"
         else:
             assert "create_publisher" not in text, "the probe must stay read-only"
+
+
+# ---- arnav-claude, 2026-11-07: review fixes (frame-offset guard, take-off z cap, stale tolerance) ----
+
+class EnuStateSim(Sim):
+    """Adds the stack's odom_enu / local_enu to /skybeta/state; local = odom + offset (x/y)."""
+
+    def __init__(self, offset=(0.0, 0.0), **kw):
+        super().__init__(**kw)
+        self.offset = offset
+
+    def state(self):
+        s = super().state()
+        s["odom_enu"] = [self.x, self.y, self.z]
+        s["local_enu"] = [self.x + self.offset[0], self.y + self.offset[1], self.z - 0.7]   # z differs by design
+        return s
+
+
+def test_a_frame_offset_keeps_init_waiting_and_clears_when_it_agrees():
+    m, sim = hover(), EnuStateSim(offset=(0.5, 0.0))
+    t, cmds = run(m, sim, 0.0, 4.0)
+    assert m.phase == "INIT" and "disagree" in m.why
+    assert all(c.pose is None and c.twist is None for _, c in cmds)
+    sim.offset = (0.05, 0.03)                                      # restarted level: they agree again
+    run(m, sim, t, t + 4.0)
+    assert m.phase == "WAIT_OFFBOARD", m.why
+
+
+def test_a_frame_offset_appearing_before_takeoff_stops_the_stream():
+    m, sim = hover(), EnuStateSim()
+    t = to_ready(m, sim)
+    sim.offset = (0.0, 0.3)
+    t, cmds = run(m, sim, t, t + 1.0)
+    late = [c for tt, c in cmds if tt > t - 0.5]                    # after a 5 Hz state carried the offset
+    assert all(c.pose is None for c in late) and "disagree" in m.why
+    assert m.phase == "WAIT_OFFBOARD"                               # no Offboard is requested without setpoints
+
+
+def test_takeoff_pose_never_goes_above_the_target_height():
+    m, sim = hover(height_m=0.5), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+
+    def high_vision(tt, s):                                         # vision z reads 0.4 m above the target
+        if m.phase == "TAKEOFF":
+            s.z = max(s.z, 0.9)
+    t, cmds = run(m, sim, t, t + 3.0, hook=high_vision)
+    ups = [c.pose[2] for _, c in cmds if c.phase == "TAKEOFF" and c.pose is not None]
+    assert ups and max(ups) <= m.takeoff[2] + 1e-9
+
+
+def test_an_odometry_stall_shorter_than_odom_stale_s_does_not_abort_a_hover():
+    m, sim = hover(hover_s=20.0), Sim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t, _ = run(m, sim, t, t + 8.0)
+    assert m.phase == "HOVER", m.why
+    t, _ = run(m, sim, t, t + 0.6, odom=False)                       # a 0.6 s stall (seen: 0.39 s)
+    t, _ = run(m, sim, t, t + 2.0)
+    assert m.phase == "HOVER", m.why

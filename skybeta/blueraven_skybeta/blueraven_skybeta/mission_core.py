@@ -102,7 +102,10 @@ class MissionParams:
                                         # (PX4 may hold a steady offset: rangefinder vs VIO z). Never hang there
     min_climb_frac: float = 0.5         # ...but only if it climbed at least this share of the way; else land
     state_stale_s: float = 0.6          # /skybeta/state is 5 Hz
-    odom_stale_s: float = 0.5           # 30 Hz, but skybeta-09's bench saw gaps up to ~0.3 s (2026-11-07)
+    odom_stale_s: float = 1.0           # 30 Hz, but skybeta-09 bags showed arrival gaps up to 0.39 s under load
+                                        # (2026-11-07); 0.5 s would abort a hover on one stall
+    frame_offset_max_m: float = 0.10    # INIT/WAIT_OFFBOARD: /skybeta/state odom_enu vs local_enu must agree in
+                                        # x/y, or the streamed pose is a far target in PX4's frame (up to 12 m/s)
     odom_jump_m: float = 0.15           # a sample this far from the last one AND faster than odom_jump_mps
     odom_jump_mps: float = 3.0          # is a reset (the stack restarts on clock steps), not motion
     odom_jump_deg: float = 30.0         # same for heading, with odom_jump_dps
@@ -309,6 +312,16 @@ class SkybetaMission:
             return False, "odometry stale"
         return True, "ok"
 
+    def _frame_offset(self, st: dict[str, Any]) -> float | None:
+        """x/y distance between the stack's odometry and PX4's local position (both ENU, in
+        /skybeta/state). None when either is missing (older stacks, sims without them): unchecked.
+        Height is not compared: PX4 takes z from the rangefinder, so it differs by design."""
+        a, b = st.get("odom_enu"), st.get("local_enu")
+        try:
+            return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+        except (TypeError, ValueError, IndexError):
+            return None
+
     def _settled(self, t: float) -> bool:
         win = [o for (ts, o) in self.settle if t - ts <= self.p.settle_s]
         if not self.settle or t - self.settle[0][0] < self.p.settle_s or len(win) < 3:
@@ -368,6 +381,9 @@ class SkybetaMission:
                 self.why = f"waiting: {why}"
             elif st.get("landed") is not True:
                 self.why = "waiting: /skybeta/state doesn't report landed (map <- odom is fixed on the mark)"
+            elif (off := self._frame_offset(st)) is not None and off > p.frame_offset_max_m:
+                self.why = (f"waiting: odometry and PX4's local position disagree by {off:.2f} m in x/y "
+                            f"(> {p.frame_offset_max_m:.2f}): restart the stack with the drone level and still")
             elif not self._settled(t):
                 self.why = f"waiting for the drone to sit still for {p.settle_s:.0f} s on the launch mark"
             else:
@@ -383,6 +399,12 @@ class SkybetaMission:
         if self.phase == "WAIT_OFFBOARD":
             if not fresh:                      # never hand a handover to a node that can't see
                 self.why = f"not streaming: {why}"
+                out.why = self.why
+                return out
+            off = self._frame_offset(st)
+            if off is not None and off > p.frame_offset_max_m and st.get("offboard_active") is not True:
+                # the streamed hold would be a far target in PX4's frame: no setpoints, so no Offboard
+                self.why = f"not streaming: odometry and PX4's local position disagree by {off:.2f} m in x/y"
                 out.why = self.why
                 return out
             if st.get("offboard_active") is True:
@@ -421,7 +443,7 @@ class SkybetaMission:
             x0, y0, z_target, z_ref = self.takeoff
             z_ref = min(z_target, z_ref + p.climb_mps * dt)
             self.takeoff = (x0, y0, z_target, z_ref)
-            out.pose = (x0, y0, max(z_ref, z))
+            out.pose = (x0, y0, min(z_target, max(z_ref, z)))   # never chase a high vision z above the target
             at_height = z_ref >= z_target and abs(z - z_target) < p.takeoff_tol_m
             if z_ref >= z_target and self.t_ramp_done is None:
                 self.t_ramp_done = t
