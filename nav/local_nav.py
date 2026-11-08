@@ -175,16 +175,36 @@ class LocalNav:
         k = int(np.clip(np.searchsorted(ps, s, side="right"), 1, len(ps) - 1))
         return math.atan2(self.mppi.py[k] - self.mppi.py[k - 1], self.mppi.px[k] - self.mppi.px[k - 1])
 
-    def step(self, pos: Any, vel: Any, t: float, pose_stamp: float | None = None) -> NavCommand:
+    def observe(self, pos: Any, t: float, yaw: float, u_sent: Any, pose_stamp: float | None = None) -> np.ndarray:
+        """A cycle flown by the flight program itself (its hover before FOLLOW): the pose and the velocity command it
+        sent (odom frame) teach MPPI the drone's steady push before it takes over. -> the push (body frame)."""
+        age = 0.0 if pose_stamp is None else max(t - pose_stamp, 0.0)
+        return self.mppi.observe(np.asarray(pos, float)[:2], yaw, u_sent, pose_age_s=age, t=t)
+
+    def rest_u(self, yaw: float | None) -> tuple[float, float]:
+        """The command that holds the drone still: minus the steady push estimate (map frame) at this heading;
+        zero without a yaw or an estimate (a hold then drifts with whatever push there is)."""
+        m = self.mppi
+        if yaw is None or not m.p.dist_on:
+            return (0.0, 0.0)
+        c, s = math.cos(float(yaw)), math.sin(float(yaw))
+        d = m.push.d
+        return (float(-(c * d[0] - s * d[1])), float(-(s * d[0] + c * d[1])))
+
+    def step(self, pos: Any, vel: Any, t: float, pose_stamp: float | None = None,
+             yaw: float | None = None) -> NavCommand:
         """One 10 Hz cycle. pos/vel: odometry in the ODOM frame (an Odometry twist is in base_link: convert it with
         nav.mppi_ros.body_to_odom); t: now; pose_stamp: the odometry's capture stamp (same
-        clock as t). MPPI predicts through the pose's age, so stale poses (delivery gaps) don't steer it wrong."""
+        clock as t). MPPI predicts through the pose's age, so stale poses (delivery gaps) don't steer it wrong.
+        yaw: the odometry's heading (rad, odom frame) at pose_stamp: MPPI then learns and leans against the drone's
+        steady body-frame push (nav.mppi.PushEstimator); None: no push estimate."""
         depth_age = math.inf if self.t_depth is None else max(t - self.t_depth, 0.0)
         if self.depth_frames < self.p.min_depth_frames or depth_age > self.p.depth_dead_s:
             self.t_last = t
-            self.mppi.note_sent((0.0, 0.0), replace_last=False)
+            rest = self.rest_u(yaw)                                    # zero, or minus the steady push
+            self.mppi.note_sent(rest, replace_last=False, t=t)
             state = "WAIT" if self.depth_frames < self.p.min_depth_frames else "HOLD"
-            return NavCommand(0.0, 0.0, self.yaw_cmd, state, None, depth_age)
+            return NavCommand(rest[0], rest[1], self.yaw_cmd, state, None, depth_age)
         origin = self.grid.origin.copy()
         self.grid.follow(np.asarray(pos, float)[:2])                  # the window follows the drone even without depth
         if self._dirty or not np.array_equal(origin, self.grid.origin):
@@ -197,7 +217,7 @@ class LocalNav:
             self.mppi.set_speed_cap(self.p.v_no_depth_frac * self.p.v_cruise if stale else None)
             self._scale = scale
         age = 0.0 if pose_stamp is None else max(t - pose_stamp, 0.0)
-        r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2], pose_age_s=age)
+        r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2], pose_age_s=age, yaw=yaw, t=t)
         dt = self.mppi.p.dt if self.t_last is None else max(t - self.t_last, 0.0)
         self.t_last = t
         if self._prog[0] is None or r.s >= self._prog[1] + self.p.stuck_m:
@@ -216,7 +236,8 @@ class LocalNav:
             state = "STUCK"
         else:
             state = "SLOW" if stale else "GO"
-        u = (0.0, 0.0) if state in ("ARRIVED", "BLOCKED") else r.u
+        # stopping under a steady push means leaning against it: rest = -push (MPPI's own "brake" in its w space)
+        u = (float(-r.dist[0]), float(-r.dist[1])) if state in ("ARRIVED", "BLOCKED") else r.u
         if u != r.u:
             self.mppi.note_sent(u, replace_last=True)            # the prediction must replay what was really sent
         return NavCommand(u[0], u[1], self.yaw_cmd, state, r, depth_age)

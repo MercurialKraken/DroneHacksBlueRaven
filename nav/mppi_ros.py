@@ -52,7 +52,8 @@ def status_dict(cmd: Any) -> dict[str, Any]:
         out.update(s=round(r.s, 3), e_lat=round(r.e_lat, 3), ess=round(r.ess, 1), lam=r.lam if math.isfinite(r.lam) else None,
                    crash_frac=round(r.crash_frac, 3), side=r.side, blocked=r.blocked, min_d_plan=round(r.min_d_plan, 3),
                    best_cost=round(r.best_cost, 2), ms=round(r.ms, 1), shielded=r.shielded,
-                   pose_age=round(r.pose_age, 3), pose_age_clamped=r.pose_age_clamped)
+                   pose_age=round(r.pose_age, 3), pose_age_clamped=r.pose_age_clamped,
+                   dist=[round(float(r.dist[0]), 3), round(float(r.dist[1]), 3)])
     return out
 
 

@@ -1,6 +1,10 @@
-"""Arnav's MPPI (nav.local_nav) as refnav's FOLLOW stage (nav:=mppi): odometry and on-camera depth in, the
-Mission.ext command (velocity and heading in the pad NED frame, and MPPI's state) out. PURE: no ROS.
-refnav keeps take-off, hover, landing and the twists; this only replaces path following."""
+"""Arnav's MPPI (nav.local_nav) as refnav's FOLLOW stage (nav:=mppi). PURE: no ROS.
+refnav keeps take-off, hover, landing and the twists; MPPI only replaces path following.
+
+MPPI runs in ITS OWN PROCESS (mppi_node), never inside refnav's control thread:
+  refnav    -> /blueraven/mppi/start  {"id": follow-start time, "pad": [x, y, z, yaw]}  (its take-off pose, latched)
+  mppi_node -> /blueraven/mppi/cmd    cmd_msg(): odom ENU velocity + heading, MPPI's state, tagged with that id
+  refnav    CmdLink: a fresh command for ITS id -> Mission.ext (pad NED); a gap holds still; silence lands."""
 from __future__ import annotations
 
 import math
@@ -39,6 +43,86 @@ def despeckle(depth_m: np.ndarray, stride: int = DEPTH_STRIDE) -> np.ndarray:
     return out
 
 
+CMD_STALE_S = 0.35          # MPPI steps at 10 Hz: older than this (3 missed steps) and refnav holds still
+CMD_LAND_S = 1.0            # no fresh command for this long in follow: land
+CMD_FIRST_S = 3.0           # follow started this long ago without one command for it: land
+
+
+def yaw_enu(q_xyzw: Any) -> float:
+    x, y, z, w = q_xyzw
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def start_msg(start_id: float, pad: Any) -> dict[str, Any]:
+    """refnav -> mppi_node at follow start: the take-off pose the route is placed from (refnav's own pad)."""
+    return {"id": float(start_id), "pad": [float(c) for c in (*pad.p0, pad.yaw0)]}
+
+
+def cmd_msg(c: Any, start_id: float | None, now: float) -> dict[str, Any]:
+    """mppi_node -> refnav: one MPPI step (a NavCommand) in the odom ENU frame. start_id None: not flying
+    (the pre-flight loop), refnav never uses it."""
+    r = c.mppi
+    rnd = lambda x, n=3: None if x is None or not math.isfinite(x) else round(float(x), n)  # noqa: E731
+    dist = getattr(r, "dist", None) if r is not None else None
+    return {"start": start_id, "t": float(now), "vx": float(c.vx), "vy": float(c.vy), "yaw": float(c.yaw),
+            "state": c.state, "depth_age": rnd(c.depth_age),
+            "ms": None if r is None else rnd(r.ms, 1), "e_lat": None if r is None else rnd(r.e_lat),
+            "crash_frac": None if r is None else rnd(r.crash_frac), "min_d_plan": None if r is None else rnd(r.min_d_plan),
+            "dist": None if dist is None else [rnd(d) for d in dist]}
+
+
+def to_ext(m: dict[str, Any], pad: Any) -> dict[str, Any]:
+    """A command message -> Mission.ext: velocity and heading in refnav's pad NED frame."""
+    vn, ve = pad.vector(m["vx"], m["vy"])
+    ext = {k: v for k, v in m.items() if k not in ("vx", "vy", "start", "t")}
+    ext.update(vn=vn, ve=ve, yaw=math.remainder(pad.yaw0 - m["yaw"], math.tau))
+    return ext
+
+
+class CmdLink:
+    """refnav's end of the MPPI link. Only commands computed for THIS follow (its start id) and younger than
+    CMD_STALE_S are flown; otherwise it holds still. why_land() says when the silence has gone on too long."""
+
+    def __init__(self) -> None:
+        self.start_id: float | None = None
+        self.t_start = 0.0
+        self.last: dict[str, Any] | None = None     # the newest command for this start
+        self.n_cmds = 0
+        self.n_ignored = 0
+
+    def begin(self, now: float) -> float:
+        self.start_id, self.t_start, self.last, self.n_cmds = float(now), now, None, 0
+        return self.start_id
+
+    def on_cmd(self, m: dict[str, Any]) -> bool:
+        if self.start_id is None or m.get("start") != self.start_id:
+            self.n_ignored += 1
+            return False
+        if self.last is not None and m["t"] <= self.last["t"]:
+            return False                             # out of order: keep the newer one
+        self.last, self.n_cmds = m, self.n_cmds + 1
+        return True
+
+    def age(self, now: float) -> float:
+        return math.inf if self.last is None else now - self.last["t"]
+
+    def ext(self, now: float, pad: Any) -> dict[str, Any]:
+        if self.last is not None and self.age(now) <= CMD_STALE_S:
+            return to_ext(self.last, pad)
+        # hold still; keep MPPI's last depth age (aged) so refnav's own depth-silence rule still means depth
+        da = None if self.last is None or self.last.get("depth_age") is None else self.last["depth_age"] + self.age(now)
+        return {"vn": 0.0, "ve": 0.0, "yaw": None, "state": "NOCMD", "depth_age": da}
+
+    def why_land(self, now: float) -> str | None:
+        if self.start_id is None:
+            return None
+        if self.last is None:
+            return (f"MPPI sent no command in {CMD_FIRST_S:g} s of follow (mppi_node down?)"
+                    if now - self.t_start > CMD_FIRST_S else None)
+        a = self.age(now)
+        return f"MPPI command silent for {a:.2f} s (CMD_LAND_S {CMD_LAND_S:g})" if a > CMD_LAND_S else None
+
+
 class MppiFollow:
     def __init__(self, v_cruise: float, tau_s: float, dead_time_s: float = 0.0) -> None:
         self.nav_p = LocalNavParams(v_cruise=v_cruise)
@@ -48,6 +132,7 @@ class MppiFollow:
         self.pos: np.ndarray | None = None          # latest odom ENU position, its stamp, and velocity
         self.stamp = 0.0
         self.vel = np.zeros(2)
+        self.yaw: float | None = None               # measured ENU heading at the odometry stamp (MPPI's push estimate)
         self.ticks = 0
         self.ext: dict[str, Any] | None = None
         self.cmd = None                             # the latest NavCommand
@@ -58,6 +143,7 @@ class MppiFollow:
         self.poses.add_attitude(stamp, (w, x, y, z))
         self.pos, self.stamp = np.asarray(p, float), stamp
         self.vel = (D.quat_to_mat(w, x, y, z) @ np.asarray(v_flu, float))[:2]
+        self.yaw = yaw_enu(q_xyzw)
 
     def on_depth(self, stamp: float, depth_m: np.ndarray, K: Any, T_base_cam: np.ndarray,
                  stride: int = DEPTH_STRIDE) -> bool:
@@ -80,7 +166,9 @@ class MppiFollow:
         self.ticks += 1
         if self.nav is None or self.pos is None or (self.ticks - 1) % STEP_EVERY:
             return self.ext
-        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp)
+        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp, yaw=self.yaw)
+        if pad is None:                             # mppi_node: the command goes out as cmd_msg, refnav converts it
+            return None
         vn, ve = pad.vector(c.vx, c.vy)
         r = c.mppi
         self.ext = {"vn": vn, "ve": ve, "yaw": math.remainder(pad.yaw0 - c.yaw, math.tau), "state": c.state,

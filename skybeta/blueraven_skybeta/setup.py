@@ -21,5 +21,6 @@ setup(
     entry_points={'console_scripts': ['mission = blueraven_skybeta.mission_node:main',
                                       'refnav_mission = blueraven_skybeta.refnav_node:main',
                                       'mppi_shadow = blueraven_skybeta.mppi_shadow:main',
+                                      'mppi_node = blueraven_skybeta.mppi_node:main',
                                       'yaw_offset_probe = blueraven_skybeta.yaw_offset_probe:main']},
 )

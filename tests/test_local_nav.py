@@ -444,3 +444,29 @@ def test_odometry_jitter_at_a_hover_does_not_fade_walls():
         c = cam + np.r_[rng.normal(0, 0.006, 2), 0.0]
         g.integrate(np.zeros((0, 3)), c, 0.7, 0.1 + k / 30)
     assert cell_value(g, 1.5, 0.0) >= g.p.l_occ                            # still remembered after a minute of jitter
+
+
+def test_local_nav_passes_the_yaw_through_and_learns_the_push():
+    """LocalNav.step(yaw=...) feeds MPPI's push estimate: in the corridor with the real drone's body-frame push it
+    converges and the flight stays clear of the walls; without the yaw there is no estimate."""
+    push = np.array([-0.056, 0.100])
+    for use_yaw in (True, False):
+        w = corridor_world()
+        nav = LocalNav([(6.5, 0.0)], (0.0, 0.0), 0.0, nav=LocalNavParams(v_cruise=0.15))
+        d = Drone(np.array([0.0, 0.0]), 0.0)
+        dt = nav.mppi.p.dt
+        ys = []
+        for k in range(300):
+            cam = d.cam()
+            nav.add_depth(w.depth_points(cam, d.yaw), cam, d.z, k * dt)
+            cmd = nav.step(d.x, d.v, k * dt, pose_stamp=k * dt, yaw=d.yaw if use_yaw else None)
+            c, s = math.cos(d.yaw), math.sin(d.yaw)
+            pw = np.array([c * push[0] - s * push[1], s * push[0] + c * push[1]])
+            d.step((cmd.vx + pw[0], cmd.vy + pw[1]), cmd.yaw, dt)              # the push rides with the command
+            ys.append(d.x[1])
+        if use_yaw:
+            assert np.hypot(*(nav.mppi.push.d - push)) < 0.02
+            assert np.abs(ys[-100:]).max() < 0.05                             # centred despite the push
+            assert max(np.abs(ys)) < 0.6 - 0.2 - nav.mppi.p.r_drone + 0.1     # never near a wall (inner face 0.6)
+        else:
+            assert not nav.mppi.push.d.any()

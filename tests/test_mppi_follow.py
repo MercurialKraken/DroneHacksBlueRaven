@@ -93,10 +93,19 @@ def test_the_mppi_velocity_is_the_feed_forward_at_the_aircrafts_own_position():
     assert tw[:2] == pytest.approx(S.Pad(0, 0, 0, 0).to_odom(0.3, -0.1)) and tw[2] == pytest.approx(0.0)
 
 
-@pytest.mark.parametrize("state", ["WAIT", "ARRIVED", "BLOCKED", "STUCK"])
-def test_mppi_states_other_than_go_and_slow_command_no_velocity(state):
+@pytest.mark.parametrize("state", ["ARRIVED", "STUCK", "NOCMD"])
+def test_mppi_states_that_end_or_lack_a_command_send_no_velocity(state):
     m, v = _following(_ext(state))
     assert m.step(0.05, v).velocity == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("state", ["WAIT", "HOLD", "BLOCKED"])
+def test_mppi_holds_send_only_their_push_compensation_bounded(state):
+    m, v = _following(_ext(state, vn=-0.06, ve=0.09))                 # minus a ~0.11 m/s push: passed as is
+    assert m.step(0.05, v).velocity == pytest.approx((-0.06, 0.09))
+    m, v = _following(_ext(state, vn=0.3, ve=-0.1))                  # anything larger: cut to EXT_HOLD_MAX_MPS
+    out = m.step(0.05, v).velocity
+    assert math.hypot(*out) == pytest.approx(C.EXT_HOLD_MAX_MPS) and out[0] / out[1] == pytest.approx(-3.0)
 
 
 @pytest.mark.parametrize("state, t, why", [("ARRIVED", 0.05, "route complete"), ("STUCK", 0.05, "MPPI stuck"),
@@ -138,9 +147,12 @@ def test_nav_must_be_refnav_or_mppi():
 
 # ---------------------------------------------------------------------------------------------- flights
 def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None,
-           plant: tuple[float, float] = (0.3, 0.0), jitter_m: float = 0.0):
+           plant: tuple[float, float] = (0.3, 0.0), jitter_m: float = 0.0, link_s: float = 0.05,
+           mppi_dies_after_s: float = math.inf):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
-    so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone."""
+    so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone.
+    MPPI is mppi_node's side of the link (pad None, cmd_msg as JSON, delivered link_s later); refnav's side is
+    CmdLink, exactly as refnav_node wires it. mppi_dies_after_s: mppi_node stops sending that long into follow."""
     w0, start, yaw_map, _, _ = tape_course()
     w = world or w0
     off = math.radians(offset_deg)
@@ -151,6 +163,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []
+    link, wire, mppi_id, traj_t = M.CmdLink(), [], None, []
     rng = np.random.default_rng(7)
     t = DT
     while t < limit_s and m.phase != "done":
@@ -165,6 +178,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
         p_map = np.r_[np.array(start) + (R_map @ np.array(p))[:2], p[2]]
         if m.phase in C.AIRBORNE:
             traj.append(p_map[:2])
+            traj_t.append(t)
         if round(t / DT) % 4 != 1 and t < depth_until:                      # 15 Hz
             R_cam = R_map @ _rz(sk.yaw_enu) @ T_BASE_CAM[:3, :3]
             cam = p_map + R_map @ _rz(sk.yaw_enu) @ T_BASE_CAM[:3, 3]
@@ -173,11 +187,22 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
             _, stamp, img = pending.pop(0)
             mf.on_depth(stamp, img, K, T_BASE_CAM, stride=1)
         if m.phase == "follow":
-            if mf.nav is None:
-                mf.start(prm.route, pad)
-            m.ext = mf.tick(t, pad)
-            if m.ext:
-                states.append(m.ext["state"])
+            if link.start_id is None:                                        # refnav -> /blueraven/mppi/start
+                msg = json.loads(json.dumps(M.start_msg(link.begin(t), pad)))
+                mppi_id = msg["id"]
+                mf.start(prm.route, S.Pad(*msg["pad"]))                      # mppi_node places the route from it
+            if t - link.t_start < mppi_dies_after_s:                         # mppi_node's own 10 Hz step
+                c0 = mf.cmd
+                mf.tick(t, None)
+                if mf.cmd is not c0:
+                    wire.append((t + link_s, json.dumps(M.cmd_msg(mf.cmd, mppi_id, t))))
+            while wire and wire[0][0] <= t + 1e-9:                           # refnav's /blueraven/mppi/cmd callback
+                link.on_cmd(json.loads(wire.pop(0)[1]))
+            m.ext = link.ext(t, pad)
+            why = link.why_land(t)
+            if why:
+                m.request_land(why)
+            states.append(m.ext["state"])
         out = m.step(t, v)
         tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, off, lag)
         if land:
@@ -191,6 +216,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
             sk.nav = C.NAV_OFFBOARD
         sk.step(t)
         t += DT
+    mf.link, mf.traj_t = link, np.array(traj_t)                              # for the link tests
     return m, sk, np.array(traj), states, w, mf
 
 
@@ -218,3 +244,81 @@ def test_a_wall_across_the_gap_blocks_or_sticks_and_lands_without_contact(jitter
     assert m.land_reason.startswith(("MPPI stuck", "MPPI blocked")), (m.land_reason, states[-5:])
     assert shut.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
 
+
+
+# ---------------------------------------------------------------------------------------------- the MPPI process link
+class _Cmd:                                             # a NavCommand without MPPI's result
+    def __init__(self, vx=0.12, vy=-0.05, yaw=-0.4, state="GO", depth_age=0.06):
+        self.vx, self.vy, self.yaw, self.state, self.depth_age, self.mppi = vx, vy, yaw, state, depth_age, None
+
+
+@pytest.mark.parametrize("p0, yaw0", [((0.0, 0.0, 0.0), 0.0), ((1.2, -0.7, 0.1), 2.3), ((-3.0, 2.0, 0.0), -1.0)])
+def test_the_link_gives_refnav_the_same_pad_frame_command_as_the_in_process_follower(p0, yaw0):
+    pad, c = S.Pad(*p0, yaw0), _Cmd()
+    msg = json.loads(json.dumps(M.cmd_msg(c, 5.0, 5.0)))
+    e = M.to_ext(msg, pad)
+    vn, ve = pad.vector(c.vx, c.vy)                     # what MppiFollow.tick puts in Mission.ext
+    assert (e["vn"], e["ve"]) == pytest.approx((vn, ve)) and e["yaw"] == pytest.approx(math.remainder(yaw0 - c.yaw, math.tau))
+    assert e["state"] == "GO" and e["depth_age"] == 0.06
+    assert pad.to_odom(e["vn"], e["ve"]) == pytest.approx((c.vx, c.vy))      # and back to odom: unchanged
+
+
+def test_the_link_flies_only_fresh_commands_for_this_follow():
+    pad, link = S.Pad(0.0, 0.0, 0.0, 0.0), M.CmdLink()
+    assert not link.on_cmd(M.cmd_msg(_Cmd(), None, 1.0))                     # before follow: nothing is flown
+    sid = link.begin(10.0)
+    assert link.ext(10.0, pad)["state"] == "NOCMD" and link.ext(10.0, pad)["vn"] == 0.0
+    assert not link.on_cmd(M.cmd_msg(_Cmd(), None, 10.05))                   # the pre-flight loop
+    assert not link.on_cmd(M.cmd_msg(_Cmd(), sid - 30.0, 10.05))            # an earlier follow's
+    assert link.on_cmd(M.cmd_msg(_Cmd(), sid, 10.1))
+    assert not link.on_cmd(M.cmd_msg(_Cmd(vx=9.0), sid, 10.05))             # out of order: the newer one stays
+    assert link.ext(10.2, pad)["state"] == "GO" and link.ext(10.2, pad)["vn"] == pytest.approx(0.12)
+    held = link.ext(10.1 + M.CMD_STALE_S + 0.01, pad)                        # stale: hold still
+    assert held["state"] == "NOCMD" and (held["vn"], held["ve"]) == (0.0, 0.0) and held["yaw"] is None
+    assert held["depth_age"] == pytest.approx(0.06 + M.CMD_STALE_S + 0.01)   # depth's own age keeps counting
+    assert link.why_land(10.1 + M.CMD_LAND_S - 0.01) is None
+    assert link.why_land(10.1 + M.CMD_LAND_S + 0.01).startswith("MPPI command silent")
+
+
+def test_no_command_in_3_s_of_follow_lands_and_none_is_needed_before_follow():
+    link = M.CmdLink()
+    assert link.why_land(1e6) is None
+    link.begin(10.0)
+    assert link.why_land(10.0 + M.CMD_FIRST_S - 0.01) is None
+    assert link.why_land(10.0 + M.CMD_FIRST_S + 0.01).startswith("MPPI sent no command")
+
+
+def test_a_stale_command_reaches_the_aircraft_as_zero_velocity():
+    m, v = _following(M.CmdLink().ext(0.0, S.Pad(0.0, 0.0, 0.0, 0.0)))
+    assert m.step(0.05, v).velocity == (0.0, 0.0)
+
+
+def test_mppi_dying_in_flight_holds_still_then_lands_without_contact():
+    m, sk, traj, states, w, mf = flight(mppi_dies_after_s=8.0)
+    assert "MPPI command silent" in m.land_reason, (m.land_reason, states[-5:])
+    t_dead = mf.link.t_start + 8.0
+    after = traj[mf.traj_t >= t_dead]
+    land_i = int(np.argmax(mf.traj_t >= t_dead + M.CMD_LAND_S))
+    assert np.linalg.norm(traj[land_i] - after[0]) < 0.2                    # held still within the link's timeouts
+    assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
+
+
+def test_a_slow_link_still_flies_the_route():
+    m, sk, traj, states, w, mf = flight(link_s=0.25)                          # 2.5 MPPI steps late, under CMD_STALE_S
+    assert m.result == "complete", (m.result, m.why, states[-5:])
+    assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone
+
+
+def test_refnav_never_runs_mppi_and_mppi_node_never_commands_the_drone():
+    pkg = ROOT / "skybeta" / "blueraven_skybeta" / "blueraven_skybeta"
+    refnav = (pkg / "refnav_node.py").read_text()
+    assert "MppiFollow" not in refnav and "local_nav" not in refnav and "CmdLink" in refnav
+    node = (pkg / "mppi_node.py").read_text()
+    import ast
+    pubs = [c.args[1] for c in ast.walk(ast.parse(node))
+            if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "create_publisher"]
+    assert len(pubs) == 1 and isinstance(pubs[0], ast.JoinedStr) and pubs[0].values[0].value.id == "PREFIX"
+    assert "MppiPublisher(" in node and "TwistStamped" not in node and "ReliabilityPolicy.RELIABLE" in node
+    assert "qos_profile_sensor_data" not in node + (pkg / "mppi_shadow.py").read_text()
+    launch = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
+    assert "executable='mppi_node'" in launch and "' == 'mppi'" in launch and "' != 'mppi'" in launch

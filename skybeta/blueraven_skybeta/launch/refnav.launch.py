@@ -4,7 +4,7 @@ waypoints (courses/<course>/routes/<route>.json, forward/left from the take-off 
     ros2 launch blueraven_skybeta refnav.launch.py                                 # the drone: full course, courses/ACTIVE
     ros2 launch blueraven_skybeta refnav.launch.py course:=v3-published route:=route_v5
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_stage1   # through CP2 and land
-    ros2 launch blueraven_skybeta refnav.launch.py nav:=mppi                       # Arnav's MPPI follows (reads depth)
+    ros2 launch blueraven_skybeta refnav.launch.py nav:=mppi                       # Arnav's MPPI follows: mppi_node, its own process
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_sim use_sim_time:=true \
         depth_topic:=/camera/depth/image_raw depth_info_topic:=/camera/depth/camera_info \
         odom_to_ned_yaw_offset_rad:=-1.5708                                          # the T4 simulator
@@ -58,20 +58,34 @@ def generate_launch_description():
     # MPPI in shadow: its own process at low priority, publishing only /blueraven/mppi/*; never commands the drone
     shadow = Node(
         package='blueraven_skybeta', executable='mppi_shadow', name='mppi_shadow', output='screen', prefix='nice -n 10',
-        condition=IfCondition(LaunchConfiguration('mppi_shadow')),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mppi_shadow'), "' == 'true' and '",
+                                                LaunchConfiguration('nav'), "' != 'mppi'"])),
         parameters=[{**mppi, 'route_file': route_file,
                      'use_sim_time': LaunchConfiguration('use_sim_time'),
                      'odometry_topic': LaunchConfiguration('odometry_topic'),
                      'depth_topic': LaunchConfiguration('depth_topic'),
                      'depth_info_topic': LaunchConfiguration('depth_info_topic')}],
     )
+    # nav:=mppi: MPPI in ITS OWN PROCESS (never refnav's control thread); refnav forwards its /blueraven/mppi/cmd
+    mppi_node = Node(
+        package='blueraven_skybeta', executable='mppi_node', name='mppi_node', output='screen', prefix='nice -n 5',
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('nav'), "' == 'mppi'"])),
+        parameters=[{**mppi, 'route_file': route_file,
+                     'debug': PythonExpression(["'", LaunchConfiguration('mppi_debug'), "' == 'true'"]),
+                     'use_sim_time': LaunchConfiguration('use_sim_time'),
+                     'odometry_topic': LaunchConfiguration('odometry_topic'),
+                     'depth_topic': LaunchConfiguration('depth_topic'),
+                     'depth_info_topic': LaunchConfiguration('depth_info_topic')}],
+    )
     return LaunchDescription([
+        DeclareLaunchArgument('mppi_debug', default_value='false',
+                              description='true: mppi_node also publishes samples, reference and grid (2 Hz)'),
         DeclareLaunchArgument('mppi_shadow', default_value='false',
                               description='true: MPPI runs alongside refnav on the same inputs, publishing /blueraven/mppi/* only'),
         # blind: refnav's own depth checks off. nav:=mppi reads /oak/stereo/image_raw (on-camera depth) whatever this is
         DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
         DeclareLaunchArgument('nav', default_value='refnav', description="follower: 'refnav' or 'mppi'"),
-        DeclareLaunchArgument('mppi_v_cruise_mps', default_value='0.15', description="MPPI's cruise speed, m/s"),
+        DeclareLaunchArgument('mppi_v_cruise_mps', default_value='0.10', description="MPPI's cruise speed, m/s"),
         # MPPI's model of PX4's velocity response: the T4 fit (0.9 s lag + 0.6 s dead time, Arnav's FLIGHT_MPPI) until the drone's is fitted
         DeclareLaunchArgument('mppi_tau_s', default_value='0.9'),
         DeclareLaunchArgument('mppi_dead_time_s', default_value='0.6'),
@@ -88,4 +102,4 @@ def generate_launch_description():
         # blueraven.launch.py's own defaults, declared here too so this file can read them for refnav
         DeclareLaunchArgument('odometry_topic', default_value='/visual_slam/tracking/odometry'),
         DeclareLaunchArgument('odom_to_ned_yaw_offset_rad', default_value='0.0'),
-        interface, refnav, shadow])
+        interface, refnav, shadow, mppi_node])

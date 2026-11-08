@@ -4,6 +4,7 @@
 #   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go          # full checks, then GO
 #   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go --skip   # the minimum to reach GO
 #   NAV=mppi OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go   # MPPI follows (default NAV=refnav)
+#   NAV=mppi MPPI_SPEED=0.10 ...    # MPPI's cruise m/s (default 0.10); MPPI runs as its own process, mppi_node
 #   ./fly_route.sh status     # (second terminal) one line per second until Ctrl-C
 #   ./fly_route.sh stop       # stops the program + recording, prints the bag path
 #   ./fly_route.sh build      # rebuild blueraven_skybeta after copying new code (never restarts the stack)
@@ -18,6 +19,7 @@ set -uo pipefail
 C=skybeta-stack                                   # the organizers' stack container
 PROGRAM=refnav
 NAV=${NAV:-refnav}                                # follower: refnav (blind) or mppi (MPPI on live depth)
+MPPI_SPEED=${MPPI_SPEED:-0.10}                    # NAV=mppi: MPPI's cruise speed, m/s (<= MAX_SPEED)
 ROUTE=${ROUTE:-route_v7_cp2_simple}               # a route file name, without .json
 COURSE=${COURSE:-start-2026-11-07-tape}           # the course folder (courses/<COURSE>/routes/)
 HEIGHT=${HEIGHT:-0.7}
@@ -29,7 +31,7 @@ TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybe
 /skybeta/setpoint/twist /blueraven/mission/status /refnav/status /fmu/in/vehicle_visual_odometry \
 /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude \
 /fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static \
-/blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory \
+/blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory /blueraven/mppi/cmd /blueraven/mppi/start \
 /fmu/in/trajectory_setpoint /fmu/in/offboard_control_mode /fmu/out/vehicle_local_position_setpoint /fmu/out/vehicle_attitude_setpoint"   # absent topics are harmless (MPPI off)
 DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera depth (~15 MB/s)
 (( DEPTH_BAG )) && TOPICS="$TOPICS /oak/stereo/image_raw /oak/stereo/camera_info"
@@ -39,8 +41,9 @@ FI_PROC="lib/skybeta_flight_interface/flight_interface"
 MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
 LAUNCH_PROC="ros2 launch blueraven_skybeta"
+MPPI_PROC='lib/blueraven_skybeta/mppi_node( |$)'
 BAG_PROC='ros2 bag record -s mcap -o [A-Za-z0-9_]+_[0-9]{6} '   # OUR recorder only (its -o is <ROUTE>_HHMMSS)
-OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC"
+OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC|$MPPI_PROC"
 
 usage() {
   cat <<EOF
@@ -307,7 +310,7 @@ go() {
   fi
 
   step "none of our launch/mission/recorder running"
-  local n; n=$(procs "$LAUNCH_PROC|$BAG_PROC|$MISSION_PROC")
+  local n; n=$(procs "$LAUNCH_PROC|$BAG_PROC|$MISSION_PROC|$MPPI_PROC")
   [ "$n" = 0 ] || fail "$n of our processes already run: ./fly_route.sh stop first"
   pass
 
@@ -337,7 +340,7 @@ go() {
   pass "recording ~/team_ws/bags/$run"
 
   step "refnav launched"
-  local launch="ros2 launch blueraven_skybeta refnav.launch.py course:=$COURSE route:=$ROUTE height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET nav:=$NAV"
+  local launch="ros2 launch blueraven_skybeta refnav.launch.py course:=$COURSE route:=$ROUTE height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET nav:=$NAV mppi_v_cruise_mps:=$MPPI_SPEED"
   docker exec -d "$C" bash -ic "cd $WS && source install/setup.bash && exec $launch > $BAGS/$run.launch.log 2>&1" \
     || fail "docker exec failed starting: $launch"
   pass "log ~/team_ws/bags/$run.launch.log"
@@ -355,6 +358,20 @@ go() {
   done
   pass
   echo "      $(docker exec "$C" grep -m1 'take-off pose' "$BAGS/$run.launch.log" | tr -d '\r')"
+
+  if [ "$NAV" = mppi ]; then
+    step "mppi_node: its own process, live depth placed, MPPI stepping"
+    awk -v s="$MPPI_SPEED" -v m="$MAX_SPEED" 'BEGIN { exit !(s + 0 > 0 && s + 0 <= m + 1e-9) }' \
+      || fail "MPPI_SPEED=$MPPI_SPEED is not in (0, MAX_SPEED=$MAX_SPEED]"
+    deadline=$((SECONDS + 30))
+    until docker exec "$C" grep -q 'mppi_node ready' "$BAGS/$run.launch.log"; do
+      nprocs_is "$MPPI_PROC" 1 || fail "mppi_node is not running: see ~/team_ws/bags/$run.launch.log (./fly_route.sh build after new code?)"
+      (( SECONDS >= deadline )) && fail "no 'mppi_node ready' in 30 s (no depth? /oak/stereo/image_raw): see ~/team_ws/bags/$run.launch.log"
+      sleep 0.5
+    done
+    pass "cruise $MPPI_SPEED m/s"
+    echo "      $(docker exec "$C" grep -m1 'mppi_node ready' "$BAGS/$run.launch.log" | tr -d '\r')"
+  fi
 
   if (( full )); then
     step "process count interface/mission/example = 1/1/0"

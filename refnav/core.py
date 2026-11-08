@@ -56,6 +56,9 @@ HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 1.0   # a plan holds while the aircraft si
 DEPTH_MODES = ("blind", "assisted")
 NAVS = ("refnav", "mppi")                       # mppi: the node supplies the follow velocity and heading (Mission.ext)
 EXT_BLOCKED_LAND_S = 2.0                        # MPPI BLOCKED (every rollout crashes) this long: land
+# MPPI's holds (WAIT/HOLD/BLOCKED) send only its push compensation (minus the estimated steady push, LocalNav), so a
+# hold doesn't drift with the drone's push; bounded here whatever MPPI sends. ARRIVED/STUCK/other: zero, then land.
+EXT_HOLD_STATES, EXT_HOLD_MAX_MPS = ("WAIT", "HOLD", "BLOCKED"), 0.15
 PATH_SOURCES = ("map", "waypoints")
 LEG_MAX_M, REACH_MAX_M = 8.0, 10.0              # the course is ~6 m across: longer is a typo (Chelsea's load_route)
 
@@ -650,7 +653,14 @@ class Mission:
         before = self.sp[3]
         if e["yaw"] is not None:
             self._slew_yaw(e["yaw"], dt)
-        out.velocity = (e["vn"], e["ve"]) if moving else (0.0, 0.0)
+        if moving:
+            out.velocity = (e["vn"], e["ve"])
+        elif e["state"] in EXT_HOLD_STATES:
+            n = math.hypot(e["vn"], e["ve"])
+            k = min(1.0, EXT_HOLD_MAX_MPS / n) if n > 0 else 0.0
+            out.velocity = (e["vn"] * k, e["ve"] * k)
+        else:
+            out.velocity = (0.0, 0.0)
         out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
         self.t_blocked = (self.t_blocked or now) if e["state"] == "BLOCKED" else None
         silent = e["depth_age"] if e["depth_age"] is not None else math.inf

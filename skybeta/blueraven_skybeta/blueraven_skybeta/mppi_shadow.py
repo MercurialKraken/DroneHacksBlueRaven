@@ -10,7 +10,7 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
@@ -19,6 +19,9 @@ from blueraven_skybeta.frame_offset import yaw_enu_from_xyzw
 from blueraven_skybeta.mppi_follow import MppiFollow
 from nav.mppi_ros import MppiPublisher
 from refnav import depth as D
+
+# depth frames are ~512 KB: best-effort drops the fragmented ones (skybeta-09: 2 frames in 60 s)
+RELIABLE = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=2)
 
 
 class MppiShadow(Node):
@@ -38,9 +41,9 @@ class MppiShadow(Node):
         self.create_subscription(Odometry, prm("odometry_topic", "/visual_slam/tracking/odometry"), self._on_odom, 10)
         self.create_subscription(String, prm("status_topic", "/refnav/status"), self._on_status, 10)
         self.create_subscription(CameraInfo, prm("depth_info_topic", "/oak/stereo/camera_info"), self._on_info,
-                                 qos_profile_sensor_data)
+                                 RELIABLE)
         self.create_subscription(Image, prm("depth_topic", "/oak/stereo/image_raw"), self._on_depth,
-                                 qos_profile_sensor_data)
+                                 RELIABLE)
         self.create_timer(0.05, self._tick)
 
     def _now(self) -> float:

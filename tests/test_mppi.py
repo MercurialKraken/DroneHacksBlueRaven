@@ -373,3 +373,132 @@ def test_inside_the_crash_radius_it_escapes_instead_of_freezing():
         x = x + u * m.p.dt + (v - u) * b
         v = u + (v - u) * a
     assert x[1] < y0 - 0.02                                               # it moved away from the wall
+
+
+# ---------------------------------------------------------------------------------------------- steady push
+PUSH = (-0.056, 0.100)            # skybeta-09 route 1 (flight 160449): body frame (forward, left), m/s
+
+
+def fly_pushed(m: Mppi, push=PUSH, heading=0.0, seconds=20.0, noise=0.0, gap_every=0, use_yaw=True, wall=None,
+               seed=0):
+    """Closed loop against the T4 plant MPPI assumes (lag + dead time) plus a steady BODY-frame push.
+    noise: position noise (m); gap_every: every n-th cycle re-sends the previous pose (an odometry gap);
+    wall: (t, dx): at t a wall appears dx ahead of the drone (on top of the map)."""
+    p = m.p
+    rng = np.random.default_rng(seed)
+    a = math.exp(-p.dt / p.tau)
+    b = p.tau * (1.0 - a)
+    n_dead = int(round(p.dead_time_s / p.dt))
+    c, s = math.cos(heading), math.sin(heading)
+    pw = np.array([[c, -s], [s, c]]) @ np.asarray(push, float)
+    x, v, q, meas = np.zeros(2), np.zeros(2), [], None
+    rows, wall_x = [], None
+    for k in range(int(seconds / p.dt)):
+        t = k * p.dt
+        if wall is not None and wall_x is None and t >= wall[0]:
+            wall_x = float(x[0] + wall[1])
+            g = m._map_grid
+            X = m.g_origin[0] + m.g_cell * np.arange(g.shape[0])[:, None] + np.zeros(g.shape)
+            m.set_grid(Grid2D(np.minimum(g, wall_x - X), m.g_origin, m.g_cell))
+        if meas is None or not (gap_every and k % gap_every == 0):
+            meas = x + rng.normal(0.0, noise, 2)
+        r = m.step(meas, v, yaw=heading if use_yaw else None, t=t)
+        q.append(np.array(r.u))
+        ua = q[-1 - n_dead] if len(q) > n_dead else np.zeros(2)
+        tgt = ua + pw
+        x = x + tgt * p.dt + (v - tgt) * b
+        v = tgt + (v - tgt) * a
+        rows.append((t, x[0], x[1], -s * x[0] + c * x[1], *m.push.d, *r.dist))
+    return np.array(rows), wall_x
+
+
+def pushed_mppi(v=0.15, heading=0.0, grid=None, length=8.0):
+    sp = np.arange(0.0, length + 1e-9, 0.05)
+    c, s = math.cos(heading), math.sin(heading)
+    P = np.c_[sp * c, sp * s]
+    vref = np.minimum(v, np.minimum(sp / 0.5 + 0.05, (length - sp) / 0.5))
+    grid = grid or Grid2D(np.full((300, 300), 3.0), (-6.0, -6.0), 0.05)
+    return Mppi(grid, P, vref, MppiParams(tau=0.9, dead_time_s=0.6, samples=256))
+
+
+@pytest.mark.parametrize("heading", [0.0, 1.0])
+def test_a_steady_body_push_is_learnt_and_the_offset_it_causes_goes(heading):
+    """The real drone's back-left push: the estimate converges to it within a few seconds (in the body frame, at any
+    heading) and the steady cross-track offset it caused (18 cm at 0.15 m/s) all but goes."""
+    on, _ = fly_pushed(pushed_mppi(heading=heading), heading=heading)
+    off, _ = fly_pushed(pushed_mppi(heading=heading), heading=heading, use_yaw=False)
+    err = np.hypot(on[:, 4] - PUSH[0], on[:, 5] - PUSH[1])
+    assert err[on[:, 0] >= 6.0].max() < 0.03 and err[-1] < 0.01
+    c, s = math.cos(heading), math.sin(heading)
+    np.testing.assert_allclose(on[-1, 6:8], [c * PUSH[0] - s * PUSH[1], s * PUSH[0] + c * PUSH[1]], atol=0.01)
+    steady_on = np.abs(on[on[:, 0] >= 12.0, 3]).mean()
+    steady_off = np.abs(off[off[:, 0] >= 12.0, 3]).mean()
+    assert steady_off > 0.10 and steady_on < 0.03 and steady_on < 0.3 * steady_off
+    assert not off[:, 4:8].any()                                           # no yaw: no estimate, no bias
+
+
+def test_no_push_gives_a_near_zero_estimate_with_noisy_gappy_odometry():
+    rows, _ = fly_pushed(pushed_mppi(), push=(0.0, 0.0), noise=0.005, gap_every=4)
+    assert np.hypot(rows[:, 4], rows[:, 5]).max() < 0.02
+
+
+def test_without_yaw_the_commands_are_exactly_those_without_the_estimator():
+    P, vref = straight_path()
+    m1, m2 = Mppi(corridor_map(), P, vref), Mppi(corridor_map(), P, vref)
+    x, v = np.zeros(2), np.zeros(2)
+    a = math.exp(-m1.p.dt / m1.p.tau)
+    b = m1.p.tau * (1 - a)
+    for k in range(40):
+        r1 = m1.step(x, v)
+        r2 = m2.step(x, v, yaw=None, t=123.0 + 0.1 * k)
+        assert r1.u == r2.u and not r2.dist.any()
+        u = np.array(r1.u)
+        x = x + u * m1.p.dt + (v - u) * b
+        v = u + (v - u) * a
+    assert m2.push.n_fit == 0
+
+
+def test_the_push_estimate_skips_repeated_and_older_poses():
+    from nav.mppi import PushEstimator
+    e = PushEstimator(MppiParams())
+    assert e.add_pose(1.0, (0.0, 0.0), 0.0)
+    assert not e.add_pose(1.0, (0.1, 0.0), 0.0)                            # same stamp
+    assert not e.add_pose(0.9, (0.1, 0.0), 0.0)                            # older
+    assert not e.add_pose(1.1, (0.0, 0.0), 0.0)                            # the very same position: a re-sent pose
+    assert e.add_pose(1.1, (0.001, 0.0), 0.0)
+    for k in range(100):
+        e.add_cmd(0.1 * k, (0.1, 0.0))
+    assert e.cmds[0][0] <= 9.9 - (e.p.dist_window_s + e.p.dead_time_s + 1.0) and len(e.cmds) < 60
+
+
+def test_braking_under_a_push_stops_clear_of_a_wall_and_holds_off_the_side_wall():
+    """0.9 m corridor, the push towards its left wall; a wall appears 0.8 m ahead. Braking means coming to REST
+    (commanding against the push), so the drone stops clear of the new wall and does not drift into the side wall."""
+    xs, ys = -1.0 + 0.05 * np.arange(240), -1.0 + 0.05 * np.arange(41)
+    side = 0.45 - np.abs(ys)[None, :] + np.zeros((len(xs), 1))
+    m = pushed_mppi(grid=Grid2D(side, (-1.0, -1.0), 0.05), length=10.0)
+    rows, wall_x = fly_pushed(m, seconds=25.0, wall=(8.0, 0.8))
+    clr = np.minimum(0.45 - np.abs(rows[:, 2]), np.where(rows[:, 0] >= 8.0, wall_x - rows[:, 1], 9.0))
+    assert clr.min() >= m.p.r_drone
+    assert np.ptp(rows[-50:, 1]) < 0.02 and np.ptp(rows[-50:, 2]) < 0.02     # held still for the last 5 s
+
+
+def test_the_push_is_learnt_during_a_hover_flown_by_someone_else():
+    """observe(): refnav holds the hover (a position loop, 0.5/s) against the push; its poses and the commands it
+    sent teach MPPI the push before it takes over, so MPPI starts with it."""
+    m = pushed_mppi()
+    p = m.p
+    a = math.exp(-p.dt / p.tau)
+    b = p.tau * (1.0 - a)
+    pw, x, v, q = np.asarray(PUSH, float), np.zeros(2), np.zeros(2), []
+    for k in range(80):                                                    # 8 s of hover, heading 0
+        u = 0.5 * -x
+        u = u * min(1.0, 0.25 / max(float(np.hypot(*u)), 1e-9))
+        m.observe(x, 0.0, u, t=0.1 * k)
+        q.append(u)
+        ua = q[-7] if len(q) >= 7 else np.zeros(2)
+        x = x + (ua + pw) * p.dt + (v - ua - pw) * b
+        v = ua + pw + (v - ua - pw) * a
+    assert np.hypot(*(m.push.d - pw)) < 0.02
+    r = m.step(x, v, yaw=0.0, t=8.0)                                        # MPPI's first cycle already leans on it
+    np.testing.assert_allclose(r.dist, pw, atol=0.02)

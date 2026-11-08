@@ -4,7 +4,10 @@
 
   course_dir: a course folder (course.yaml + course_sdf.npz), e.g. courses/start-2026-11-07-tape
   route.json: a routes/*.json file ([forward, left] from the take-off pose; *_sim.json -> launch_sim)
-  --errors:   perfect | old_noise | realistic | harsh   (see Errors)
+  --errors:   perfect | old_noise | realistic | t4plant | realpush | harsh   (see Errors)
+  --nopush:   don't give MPPI the heading (no steady-push estimate; as before 2026-11-07 evening)
+  --hoverpush=S  the push acts in HOVER too (S s long), held by a refnav-like position loop (0.5/s, <= 0.25 m/s)
+  --hoverlearn=S as --hoverpush, and the hover's poses and commands feed MPPI's push estimate (LocalNav.observe)
 
 Phases, each separate as on the drone (MPPI never takes off, hovers or lands):
   TAKEOFF  climb at the launch pose to the route's height_m at 0.35 m/s (xy held)
@@ -75,6 +78,9 @@ class Errors:
     act_delay_s: float = 0.0
     acc_max: float = 1e9
     vel_noise: float = 0.0
+    yaw_noise_deg: float = 0.0          # heading noise on each odometry sample (deg), on top of the yaw drift
+    push_body: tuple[float, float] = (0.0, 0.0)   # steady velocity push in the BODY frame (forward, left), m/s: the real
+                                                  # skybeta-09 flight 160449 (Chelsea): (-0.056, +0.100), never nulled by PX4
 
 
 PRESETS = {
@@ -83,15 +89,21 @@ PRESETS = {
     "realistic": Errors(odom_delay_s=0.08, gap_per_s=1 / 4, gap_s=(0.25, 0.35), drift_frac=0.01, yaw_drift_dpm=1.0,
                         yaw_slip_m_per_rad=0.03, jump_per_s=1 / 30, jump_m=0.04, depth_k=0.015, depth_dropout=0.65,
                         depth_outliers=0.02, depth_delay_s=0.06, tau_true=0.65, act_delay_s=0.05, acc_max=3.0,
-                        vel_noise=0.02),
+                        vel_noise=0.02, yaw_noise_deg=0.3),
     # realistic, with the PX4 response Hinson fitted on the T4 through the real flight_interface: tau 0.9 s + 0.6 s dead time
     "t4plant": Errors(odom_delay_s=0.08, gap_per_s=1 / 4, gap_s=(0.25, 0.35), drift_frac=0.01, yaw_drift_dpm=1.0,
                       yaw_slip_m_per_rad=0.03, jump_per_s=1 / 30, jump_m=0.04, depth_k=0.015, depth_dropout=0.65,
                       depth_outliers=0.02, depth_delay_s=0.06, tau_true=0.9, act_delay_s=0.6, acc_max=3.0,
-                      vel_noise=0.02),
+                      vel_noise=0.02, yaw_noise_deg=0.3),
+    # t4plant + the real drone's steady body-frame back-left push from route 1 flight 160449
+    "realpush": Errors(odom_delay_s=0.08, gap_per_s=1 / 4, gap_s=(0.25, 0.35), drift_frac=0.01, yaw_drift_dpm=1.0,
+                       yaw_slip_m_per_rad=0.03, jump_per_s=1 / 30, jump_m=0.04, depth_k=0.015, depth_dropout=0.65,
+                       depth_outliers=0.02, depth_delay_s=0.06, tau_true=0.9, act_delay_s=0.6, acc_max=3.0,
+                       vel_noise=0.02, push_body=(-0.056, 0.100), yaw_noise_deg=0.3),
     "harsh": Errors(odom_delay_s=0.12, gap_per_s=1 / 10, drift_frac=0.03, yaw_drift_dpm=3.0, yaw_slip_m_per_rad=0.10,
                     jump_per_s=1 / 15, jump_m=0.06, depth_k=0.025, depth_dropout=0.75, depth_outliers=0.05,
-                    depth_delay_s=0.10, texture_holes=0.25, tau_true=0.80, act_delay_s=0.10, acc_max=3.0, vel_noise=0.04),
+                    depth_delay_s=0.10, texture_holes=0.25, tau_true=0.80, act_delay_s=0.10, acc_max=3.0, vel_noise=0.04,
+                    yaw_noise_deg=0.6),
 }
 
 
@@ -159,7 +171,8 @@ def _rot(th: float) -> np.ndarray:
 
 
 def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], seed: int = 3,
-        keep_frames: bool = False, speed: float | None = None, matched: bool = False) -> dict:
+        keep_frames: bool = False, speed: float | None = None, matched: bool = False, use_yaw: bool = True,
+        hover_s: float = 2.0, hover_push: bool = False, hover_learn: bool = False) -> dict:
     course_dir = Path(course_dir)
     cm = CourseMap.load(course_dir / "course_sdf.npz")
     world = CourseWorld(cm)
@@ -184,7 +197,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     slip = rng.normal(size=2)
     slip /= max(float(np.hypot(*slip)), 1e-9)
     turned = 0.0
-    hist: list[tuple[float, np.ndarray, np.ndarray]] = []        # (t, believed xy, believed v)
+    hist: list[tuple[float, np.ndarray, np.ndarray, float]] = []  # (t, believed xy, believed v, believed yaw)
     depth_q: list[tuple[float, np.ndarray, np.ndarray, float]] = []
     act_q: list[tuple[float, np.ndarray]] = []
     u_applied = np.zeros(2)
@@ -219,9 +232,11 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
         if t >= t_gap_end and rng.random() < err.gap_per_s * dt:
             t_gap_end = t + rng.uniform(*err.gap_s)
         if t >= t_gap_end:
-            hist.append((t, to_b(x[None])[0], _rot(eyaw) @ v))
+            yaw_meas = yaw + eyaw + math.radians(err.yaw_noise_deg) * rng.normal()     # the believed heading
+            hist.append((t, to_b(x[None])[0], _rot(eyaw) @ v, yaw_meas))
         avail = [h for h in hist if h[0] <= t - err.odom_delay_s + 1e-9]
-        pos_b, vel_b, stamp_b = (avail[-1][1], avail[-1][2], avail[-1][0]) if avail else (launch.copy(), np.zeros(2), t)
+        pos_b, vel_b, stamp_b, yaw_b = ((avail[-1][1], avail[-1][2], avail[-1][0], avail[-1][3]) if avail
+                                        else (launch.copy(), np.zeros(2), t, yaw0))
         max_err = max(max_err, float(np.hypot(*(to_b(x[None])[0] - x))))
         cmd = None
         if phase == "TAKEOFF":
@@ -229,10 +244,17 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
             if z >= height - 1e-6:
                 phase, t_phase = "HOVER", t
         elif phase == "HOVER":
-            if t - t_phase >= 2.0:
+            if hover_push:                                           # refnav's hover: hold the take-off xy
+                u_h = 0.5 * (to_b(launch[None])[0] - pos_b)
+                n_h = float(np.hypot(*u_h))
+                u_h = u_h * min(1.0, 0.25 / max(n_h, 1e-9))
+                act_q.append((t + err.act_delay_s, _rot(-eyaw) @ u_h))
+                if hover_learn:
+                    nav.observe(pos_b, t, yaw_b, u_h, pose_stamp=stamp_b if matched else None)
+            if t - t_phase >= hover_s:
                 phase, t_phase = "FOLLOW", t
         elif phase == "FOLLOW":
-            cmd = nav.step(pos_b, vel_b, t, pose_stamp=stamp_b if matched else None)
+            cmd = nav.step(pos_b, vel_b, t, pose_stamp=stamp_b if matched else None, yaw=yaw_b if use_yaw else None)
             act_q.append((t + err.act_delay_s, _rot(-eyaw) @ np.array([cmd.vx, cmd.vy])))   # flown in the true frame
             dy = (cmd.yaw - eyaw - yaw + math.pi) % (2 * math.pi) - math.pi
             dyaw = float(np.clip(dy, -math.radians(90) * dt, math.radians(90) * dt))
@@ -258,8 +280,10 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
         if phase == "LAND":
             u_applied = np.zeros(2)
             z = max(0.07, z - 0.35 * dt)
-        if phase in ("FOLLOW", "LAND"):
-            v_new = u_applied + (v - u_applied) * a_true
+        if phase in ("FOLLOW", "LAND") or (phase == "HOVER" and hover_push):
+            push = _rot(yaw) @ np.asarray(err.push_body, float)          # body (forward, left) -> world
+            target = u_applied + (push if phase in ("FOLLOW", "HOVER") else 0.0)
+            v_new = target + (v - target) * a_true
             dv = v_new - v
             n = float(np.hypot(*dv))
             if n > err.acc_max * dt:
@@ -281,13 +305,16 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     T = np.array([[r[1], r[2], r[3]] for r in track])
     rows = [k for k, r in enumerate(track) if r[4] == "FOLLOW"]
     clr = world.clearance(T[rows, :2], height) if rows else np.array([np.inf])
+    clr = np.where(np.isfinite(clr), clr, -1.0)                       # off the map = through the net: a touch, not NaN
     k_min = int(np.argmin(clr)) if rows else 0
     path_len = float(np.hypot(*np.diff(T[rows, :2], axis=0).T).sum()) if len(rows) > 1 else 0.0
     follow_s = (track[rows[-1]][0] - track[rows[0]][0]) if rows else 0.0
     log.update(time_s=t, follow_s=follow_s, avg_speed=path_len / max(follow_s, 1e-9), min_clearance=float(np.min(clr)),
                min_clearance_at=T[rows[k_min], :2].round(2).tolist() if rows else None,
                touched=bool(np.min(clr) < p.r_drone), max_est_error=max_err, final_est_error=float(np.hypot(*e)),
-               land_xy=T[-1, :2].round(3).tolist(), land_err_to_last_wp=float(np.hypot(*(T[-1, :2] - wps[-1]))))
+               land_xy=T[-1, :2].round(3).tolist(), land_err_to_last_wp=float(np.hypot(*(T[-1, :2] - wps[-1]))),
+               push_est_body=nav.mppi.push.d.round(3).tolist(), follow_start_xy=T[rows[0], :2].round(3).tolist()
+               if rows else None)
     if keep_frames:
         log.update(frames=frames, track=T, world=world, nav=nav, wps=wps, launch=launch)
     return log
@@ -359,13 +386,18 @@ if __name__ == "__main__":
     preset = next((a.split("=")[1] for a in sys.argv if a.startswith("--errors=")), "old_noise")
     speed = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--speed=")), None)
     matched = "--matched" in sys.argv
+    use_yaw = "--nopush" not in sys.argv
+    hl = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--hoverlearn=")), None)
+    hp = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--hoverpush=")), None)
     out = args[2] if len(args) > 2 else None
-    log = fly(args[0], args[1], err=PRESETS[preset], seed=seed, keep_frames=out is not None, speed=speed, matched=matched)
+    log = fly(args[0], args[1], err=PRESETS[preset], seed=seed, keep_frames=out is not None, speed=speed, matched=matched,
+              use_yaw=use_yaw, hover_s=hl or hp or 2.0, hover_push=(hl or hp) is not None, hover_learn=hl is not None)
     if out:
         render(log, out)
     keep = ("ended", "follow_s", "avg_speed", "min_clearance", "min_clearance_at", "touched", "max_est_error",
-            "final_est_error", "land_err_to_last_wp")
+            "final_est_error", "land_err_to_last_wp", "push_est_body", "follow_start_xy")
     print(json.dumps({"route": Path(args[1]).stem, "errors": preset, "seed": seed, "speed": speed or 0.45,
-                      "model": "matched" if matched else "default",
+                      "model": "matched" if matched else "default", "push_est": use_yaw,
+                      "hover": "learn" if hl else ("push" if hp else "still"),
                       **{k: (round(v, 3) if isinstance(v, float) else v) for k, v in log.items() if k in keep}}),
           flush=True)

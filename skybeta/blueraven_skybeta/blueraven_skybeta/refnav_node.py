@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """refnav's node with its PX4 I/O replaced by the flight interface (refnav_skybeta): odometry and
-/skybeta/state in, /skybeta/setpoint/twist out. Run: ros2 launch blueraven_skybeta refnav.launch.py"""
+/skybeta/state in, /skybeta/setpoint/twist out. Run: ros2 launch blueraven_skybeta refnav.launch.py
+nav:=mppi: MPPI runs in its own process (mppi_node); this node forwards /blueraven/mppi/cmd (mppi_follow.CmdLink)."""
 from __future__ import annotations
 
 import json
 import math
 
-import numpy as np
 from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
-from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
 from blueraven_skybeta import refnav_skybeta as S  # first: it puts the team repo (refnav/) on sys.path
 from refnav import core as C
-from refnav import depth as D
 from refnav.node import LOOSE, RefNav
 from refnav.node import main as refnav_main
 
@@ -40,27 +37,22 @@ class SkybetaRefNav(RefNav):
         self.create_subscription(String, "/skybeta/state", self._on_state, 10)
         self.mppi = None
         if self.mission.p.nav == "mppi":
-            from blueraven_skybeta.mppi_follow import MppiFollow
-            from nav.mppi_ros import MppiPublisher
-            prm = {k: float(self.declare_parameter(k, v, LOOSE).value) for k, v in
-                   (("mppi_v_cruise_mps", 0.15), ("mppi_tau_s", 0.9), ("mppi_dead_time_s", 0.6))}
-            self.mppi = MppiFollow(prm["mppi_v_cruise_mps"], prm["mppi_tau_s"], prm["mppi_dead_time_s"])
-            self.mppi_state, self.mppi_pub = None, MppiPublisher(self, z=self.mission.p.height_m)
-            if self.mission.p.depth_mode != "assisted":      # assisted: RefNav subscribes to the same topics
-                from tf2_ros import Buffer, TransformListener
-                self.tf_buffer = Buffer()
-                self.tf_listener = TransformListener(self.tf_buffer, self)
-                self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
-                self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
+            # MPPI runs in its own process (mppi_node): this node only forwards its command (mppi_follow.CmdLink)
+            from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+            from blueraven_skybeta.mppi_follow import CmdLink
+            from nav.mppi_ros import PREFIX
+            latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            self.mppi = CmdLink()
+            self.mppi_state, self.t_start_pub = None, -1e9
+            self.pub_mppi_start = self.create_publisher(String, f"{PREFIX}/start", latched)
+            self.create_subscription(String, f"{PREFIX}/cmd", self._on_mppi_cmd, 10)
 
     def _on_odom(self, m: Odometry) -> None:
         p, q, v = m.pose.pose.position, m.pose.pose.orientation, m.twist.twist.linear
         self.pad = S.on_odom(self.v, self.pad, self.mission.phase, (p.x, p.y, p.z), (q.x, q.y, q.z, q.w),
                              (v.x, v.y, v.z))
         now = self.t_odom = self._now()
-        if self.mppi is not None:
-            st = m.header.stamp
-            self.mppi.on_odom(st.sec + st.nanosec * 1e-9, (p.x, p.y, p.z), (q.x, q.y, q.z, q.w), (v.x, v.y, v.z))
         self.mission.on_health(now, S.healthy(self.state, self.t_state, now))
         if self.mission.phase == "arm" and self.pad is not self.logged_pad and S.moved(self.pad, self.logged_pad):
             self._log_start()
@@ -82,36 +74,28 @@ class SkybetaRefNav(RefNav):
         self.t_state = self._now()
         S.on_state(self.v, self.state, self.mission.phase)
 
-    def _on_depth(self, m: Image) -> None:
-        if self.mppi is not None and self.mppi.nav is not None and self.K is not None:
-            cal = self._calibration(m.header.frame_id)
-            if cal is not None:
-                try:
-                    d = D.decode_depth(m.encoding, m.height, m.width, m.step, bytes(m.data))
-                except ValueError as e:
-                    return self._reject("undecodable", str(e), record=False)
-                T = np.eye(4)
-                T[:3, :3], T[:3, 3] = cal[1], cal[2]
-                fx, fy, cx, cy = self.K
-                stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
-                if not self.mppi.on_depth(stamp, d, np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]]), T):
-                    self._reject("mppi_no_pose", "MPPI: no odometry pose at the depth frame's stamp", record=False)
-        if self.mission.p.depth_mode == "assisted":
-            super()._on_depth(m)
-        return None
+    def _on_mppi_cmd(self, m: String) -> None:
+        try:
+            self.mppi.on_cmd(json.loads(m.data))
+        except (ValueError, KeyError, TypeError):
+            return
 
     def _tick(self) -> None:
-        # MPPI steps on fresh odometry only; a silence holds through refnav_skybeta.command (HOLD_S), then lands
+        # follow with nav:=mppi: MPPI's newest command for THIS follow, if fresh; a gap holds still, silence lands
         now = self._now()
-        if self.mppi is not None and self.mission.phase == "follow" and now - self.t_odom <= S.HOLD_S:
-            if self.mppi.nav is None:
-                self.mppi.start(self.mission.p.route, self.pad)
-                self.mppi_pub.publish_trajectory(self.mppi.nav)
-            cmd = self.mppi.cmd
-            self.mission.ext = self.mppi.tick(now, self.pad)
-            if self.mppi.cmd is not cmd:
-                self.mppi_pub.publish(self.mppi.cmd, self.mppi.nav)
-            state = (self.mission.ext or {}).get("state")
+        if self.mppi is not None and self.mission.phase == "follow" and self.pad is not None:
+            from blueraven_skybeta.mppi_follow import start_msg
+            if self.mppi.start_id is None:
+                self.mppi.begin(now)
+                self.get_logger().info(f"MPPI follow start {self.mppi.start_id:.3f}")
+            if now - self.t_start_pub >= 1.0:          # latched, and repeated in case mppi_node restarted
+                self.t_start_pub = now
+                self.pub_mppi_start.publish(String(data=json.dumps(start_msg(self.mppi.start_id, self.pad))))
+            self.mission.ext = self.mppi.ext(now, self.pad)
+            why = self.mppi.why_land(now)
+            if why:
+                self.mission.request_land(why)
+            state = self.mission.ext.get("state")
             if state != self.mppi_state:
                 self.get_logger().info(f"MPPI {self.mppi_state} -> {state}: {self.mission.ext}")
                 self.mppi_state = state

@@ -65,6 +65,16 @@ the lag model) without coming within r_drone + shield_margin of anything; if not
 invariant 'we can always stop' holds unless something appears inside the braking distance.
 If every candidate crashes (the brake included) the output is a zero-velocity command and `blocked` is set; the
 supervisor decides what next.
+
+STEADY PUSH (PushEstimator; on when step() is given the measured yaw). The real drone drifts with a steady velocity
+offset fixed in its BODY frame (skybeta-09 route 1, flight 160449: forward -0.056, left +0.100 m/s at 0.15 m/s), which
+PX4 never nulls. The model becomes: the velocity follows (the command sent dead_time_s earlier) + R(yaw) d_body. d_body
+is fitted every cycle by least squares on the measured POSITIONS of the last dist_window_s (jointly with the position
+and the velocity error at the window's start; regressors from replaying the lag model on the commands really sent and
+the measured yaw), low-passed (dist_tau_s) and clamped to dist_max. With b = R(yaw) d_body, MPPI plans in terms of the
+velocity the drone will settle at, w = u + b: sampling, costs, the brake and the shield are unchanged in w (so "brake"
+means "come to rest", i.e. command -b), and the command sent is u = w - b. The pose prediction adds b too.
+Without a yaw, b = 0 and everything is exactly as without the estimator.
 """
 from __future__ import annotations
 
@@ -144,6 +154,13 @@ class MppiParams:
     switch_ratio: float = 3.0    # the other side needs this many times the weight to take over
     side_memory_s: float = 1.0
     seed: int | None = 0
+    dist_on: bool = True         # the steady-push estimate (only ever active when step() is given the yaw)
+    dist_window_s: float = 3.0   # s of measured positions per least-squares fit
+    dist_min_s: float = 2.0      # s of positions (after the first command's dead time) before the first fit
+    dist_min_n: int = 12         # positions needed in a fit
+    dist_tau_s: float = 2.0      # s, low-pass of the fitted push
+    dist_max: float = 0.25       # m/s, clamp on the push estimate's magnitude
+    dist_rms_max: float = 0.05   # m: a fit with a larger position residual (a jump, a glitch) is not used
 
 
 @dataclass
@@ -163,6 +180,7 @@ class MppiResult:
     shielded: bool = False                 # the safety shield overrode the plan with a brake
     pose_age: float = 0.0                  # the pose age passed in (s, raw, before the clamp)
     pose_age_clamped: bool = False         # pose_age was outside [0, max_pose_age_s]: check the caller's stamp clock
+    dist: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(2))  # steady push in use (map frame, m/s)
     # debug only (Mppi.debug_samples > 0): a subset of the rollouts and their weights, and the reference
     samples: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 0, 2)))
     sample_w: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
@@ -172,6 +190,137 @@ class MppiResult:
 
 def _to_np(a: Any) -> np.ndarray:
     return a.get() if hasattr(a, "get") else np.asarray(a)   # cupy arrays have .get(); numpy arrays don't
+
+
+def _rot2(th: float) -> np.ndarray:
+    c, s = math.cos(th), math.sin(th)
+    return np.array([[c, -s], [s, c]])
+
+
+class PushEstimator:
+    """The steady velocity push d (BODY frame: forward, left; m/s) from measured positions and the commands sent.
+
+    Model (MPPI's own): dv/dt = (u(t - dead_time) + R(yaw(t)) d - v) / tau. Over the last dist_window_s of positions
+    (starting no earlier than the first command's dead time, so the hover before MPPI took over never counts),
+        x(t_i) = x_a + tau (1 - e^(-(t_i - t_a)/tau)) dv_a + X_u(t_i) + G(t_i) d
+    where X_u replays the commands really sent from rest and G the unit pushes along the measured yaw: linear in
+    (x_a, dv_a, d), solved by least squares, outliers (> 4x the median residual, at least 2 cm) dropped once.
+    A fit is used only if its rms residual is <= dist_rms_max and it is well conditioned; d then low-passes towards
+    it (dist_tau_s) and is clamped to dist_max. Positions only: odometry velocity is noisier than its positions."""
+
+    def __init__(self, p: MppiParams) -> None:
+        self.p = p
+        self.reset()
+
+    def reset(self) -> None:
+        self.d = np.zeros(2)
+        self.meas: list[tuple[float, float, float, float]] = []    # (stamp, x, y, yaw)
+        self.cmds: list[tuple[float, float, float]] = []           # (time sent, ux, uy), oldest first
+        self.t_first: float | None = None                          # the first command since reset
+        self.t_upd: float | None = None
+        self.fit: np.ndarray | None = None                         # the last accepted raw fit
+        self.rms = math.nan
+        self.n_fit = 0
+
+    def add_cmd(self, t: float, u: Any, replace_last: bool = False) -> None:
+        u0, u1 = float(u[0]), float(u[1])
+        if replace_last and self.cmds:
+            self.cmds[-1] = (self.cmds[-1][0], u0, u1)
+            return
+        t = float(t)
+        if self.t_first is None:
+            self.t_first = t
+        self.cmds.append((t, u0, u1))
+        keep_from = t - (self.p.dist_window_s + self.p.dead_time_s + 1.0)
+        while len(self.cmds) > 1 and self.cmds[1][0] <= keep_from:   # keep the one in effect at keep_from
+            self.cmds.pop(0)
+
+    def add_pose(self, stamp: float, xy: Any, yaw: float) -> bool:
+        """-> False for a repeat (the same stamp or the very same position: an odometry gap) or an older stamp."""
+        x, y = float(xy[0]), float(xy[1])
+        if self.meas and (stamp <= self.meas[-1][0] + 1e-6 or (x == self.meas[-1][1] and y == self.meas[-1][2])):
+            return False
+        self.meas.append((float(stamp), x, y, float(yaw)))
+        while self.meas[0][0] < stamp - self.p.dist_window_s - 0.5:
+            self.meas.pop(0)
+        return True
+
+    def _u_at(self, times: np.ndarray) -> np.ndarray:
+        """The command in effect at each time (the last one sent at or before it); zero before the first."""
+        if not self.cmds:
+            return np.zeros((len(times), 2))
+        C = np.asarray(self.cmds)
+        k = np.searchsorted(C[:, 0], times, side="right") - 1
+        return np.where(k[:, None] >= 0, C[np.maximum(k, 0), 1:], 0.0)
+
+    def _fit(self, M: np.ndarray) -> tuple[np.ndarray, float] | None:
+        p = self.p
+        t_a, t_b = float(M[0, 0]), float(M[-1, 0])
+        h = 0.5 * p.dt
+        n = max(1, int(math.ceil((t_b - t_a) / h - 1e-9)))
+        tk = t_a + h * np.arange(n)
+        U = self._u_at(tk - p.dead_time_s)                                   # (n, 2) in effect over each sub-step
+        psi = np.interp(tk, M[:, 0], np.unwrap(M[:, 3]))
+        c, s = np.cos(psi), np.sin(psi)
+        T = np.stack([U, np.c_[c, s], np.c_[-s, c]], axis=1)               # (n, 3, 2): commands, unit fwd, unit left
+        a = math.exp(-h / p.tau)
+        b = p.tau * (1.0 - a)
+        X = np.zeros((n + 1, 3, 2))
+        x, v = np.zeros((3, 2)), np.zeros((3, 2))
+        for k in range(n):
+            x = x + T[k] * h + (v - T[k]) * b
+            v = T[k] + (v - T[k]) * a
+            X[k + 1] = x
+        f = np.clip((M[:, 0] - t_a) / h, 0.0, float(n))
+        i0 = np.minimum(np.floor(f).astype(int), n - 1)
+        w = (f - i0)[:, None, None]
+        Xm = X[i0] * (1.0 - w) + X[i0 + 1] * w                               # (m, 3, 2) at the measurement stamps
+        phi = p.tau * (1.0 - np.exp(-(M[:, 0] - t_a) / p.tau))
+        y = M[:, 1:3] - Xm[:, 0]
+        A = np.zeros((len(M), 2, 6))
+        A[:, 0, 0] = A[:, 1, 1] = 1.0
+        A[:, 0, 2] = A[:, 1, 3] = phi
+        A[:, :, 4], A[:, :, 5] = Xm[:, 1], Xm[:, 2]
+        use = np.ones(len(M), bool)
+        for attempt in range(2):
+            th, _, rank, sv = np.linalg.lstsq(A[use].reshape(-1, 6), y[use].reshape(-1), rcond=None)
+            if rank < 6 or sv[-1] < 1e-6 * sv[0]:
+                return None
+            r = np.hypot(*(y - A @ th).T)
+            if attempt == 0:
+                bad = r > max(4.0 * float(np.median(r)), 0.02)
+                if not bad.any() or int((~bad).sum()) < p.dist_min_n:
+                    break
+                use = ~bad
+        rms = float(np.sqrt(np.mean(r[use] ** 2)))
+        return th[4:6], rms
+
+    def update(self) -> np.ndarray:
+        """Refit on the current histories and low-pass; -> d (body frame, m/s). Unchanged until enough data."""
+        p = self.p
+        if self.t_first is None or len(self.meas) < p.dist_min_n:
+            return self.d
+        t_b = self.meas[-1][0]
+        if self.t_upd is not None and t_b <= self.t_upd:              # no new position since the last fit
+            return self.d
+        t_a = max(t_b - p.dist_window_s, self.t_first + p.dead_time_s)
+        M = np.asarray([m for m in self.meas if m[0] >= t_a - 1e-9])
+        if len(M) < p.dist_min_n or M[-1, 0] - M[0, 0] < p.dist_min_s:
+            return self.d
+        out = self._fit(M)
+        if out is None:
+            return self.d
+        fit, rms = out
+        self.rms = rms
+        if rms > p.dist_rms_max or float(np.hypot(*fit)) > 2.0 * p.dist_max:
+            return self.d
+        dt = p.dt if self.t_upd is None else t_b - self.t_upd
+        self.t_upd = t_b
+        self.fit, self.n_fit = fit, self.n_fit + 1
+        d = self.d + (1.0 - math.exp(-dt / p.dist_tau_s)) * (fit - self.d)
+        n = float(np.hypot(*d))
+        self.d = d * (p.dist_max / n) if n > p.dist_max else d
+        return self.d
 
 
 class Mppi:
@@ -185,6 +334,9 @@ class Mppi:
         self._side, self._side_age = 0, 0
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
         self._inflight: list[np.ndarray] = []                        # the last commands sent, newest last (<= 6 s)
+        self.push = PushEstimator(self.p)                            # the steady body-frame push (step(yaw=...))
+        self._bias = np.zeros(2)                                     # its map-frame velocity this cycle
+        self._t_cycle: float | None = None                           # cycle clock when the caller passes no time
         self._d_now: float | None = None                             # clearance at the (predicted) start this cycle
         self._vr_now = self.xp.full((self.p.horizon, 2), 1.0)       # the reference velocities this cycle
         self.debug_samples = 0                                       # >0: return that many rollouts (debug/vis only)
@@ -286,22 +438,46 @@ class Mppi:
              + G[i0, j0 + 1] * (1 - fu) * fv + G[i0 + 1, j0 + 1] * fu * fv)
         return xp.where(inside, d, -1.0)
 
-    def note_sent(self, u: Any, replace_last: bool) -> None:
-        """Record the command actually SENT this cycle (the pose prediction replays these): replace this cycle's
-        planned command (the caller overrode it, e.g. zero on ARRIVED/BLOCKED) or append one (a cycle without a plan,
-        e.g. WAIT)."""
+    def _clock(self, t: float | None) -> float:
+        """This cycle's time: the caller's, else one dt after the last cycle."""
+        self._t_cycle = float(t) if t is not None else (0.0 if self._t_cycle is None else self._t_cycle + self.p.dt)
+        return self._t_cycle
+
+    def note_sent(self, u: Any, replace_last: bool, t: float | None = None) -> None:
+        """Record the command actually SENT this cycle (the pose prediction and the push estimate replay these):
+        replace this cycle's planned command (the caller overrode it, e.g. zero on ARRIVED/BLOCKED) or append one (a
+        cycle without a plan, e.g. WAIT, sent at time t)."""
         u = np.asarray(_to_np(u), float)[:2].copy()
         if replace_last and self._inflight:
             self._inflight[-1] = u
+            self.push.add_cmd(0.0, u, replace_last=True)
         else:
             self._inflight = (self._inflight + [u])[-60:]
+            self.push.add_cmd(self._clock(t), u)
         self.u_last = u
+
+    def observe(self, pos: Any, yaw: float, u_sent: Any, pose_age_s: float = 0.0, t: float | None = None) -> np.ndarray:
+        """A cycle flown by ANOTHER controller (e.g. refnav holding the hover before MPPI takes over): its measured
+        pose and the velocity command it really sent (map frame) feed the push estimate and the in-flight history,
+        so the push is known and the pose prediction right at the handover. -> the push (body frame)."""
+        p = self.p
+        t_now = self._clock(t)
+        age = min(max(float(pose_age_s), 0.0), p.max_pose_age_s)
+        if p.dist_on and age == float(pose_age_s):
+            self.push.add_pose(t_now - age, np.asarray(_to_np(pos), float)[:2], float(yaw))
+        u = np.asarray(_to_np(u_sent), float)[:2].copy()
+        self._inflight = (self._inflight + [u])[-60:]
+        self.push.add_cmd(t_now, u)
+        self.u_last = u
+        return self.push.update() if p.dist_on else self.push.d
 
     def reset(self, s_hint: float | None = None) -> None:
         """Forget the plan, the last command and the detour side (e.g. after a pilot takeover)."""
         self.U[:] = 0.0
         self.u_last = None
         self._inflight = []
+        self.push.reset()
+        self._bias = np.zeros(2)
         self.s_now = s_hint
         self._side, self._side_age = 0, 0
 
@@ -490,15 +666,25 @@ class Mppi:
         return self._side
 
     # ------------------------------------------------------------------ step
-    def step(self, pos: Any, vel: Any, u_ext: Any | None = None, pose_age_s: float = 0.0) -> MppiResult:
+    def step(self, pos: Any, vel: Any, u_ext: Any | None = None, pose_age_s: float = 0.0, yaw: float | None = None,
+             t: float | None = None) -> MppiResult:
         """One control cycle from the drone's map-frame position (x, y) and velocity (vx, vy), measured pose_age_s
-        ago (now - the odometry's capture stamp)."""
+        ago (now - the odometry's capture stamp). yaw: the measured heading (rad, map frame) at that stamp: turns on
+        the steady-push estimate (None: off, no push). t: now (s; the push estimate's clock), else a dt per cycle."""
         t0 = time.perf_counter()
         xp, p = self.xp, self.p
         H, K = p.horizon, p.samples
+        t_now = self._clock(t)
         x0 = np.asarray(_to_np(pos), float)[:2]
         v0 = np.asarray(_to_np(vel), float)[:2]
         age = min(max(float(pose_age_s), 0.0), p.max_pose_age_s)  # a future stamp -> 0; a stale/odd one -> capped
+        clamped = age != float(pose_age_s)
+        bias = np.zeros(2)
+        if yaw is not None and p.dist_on:
+            if not clamped:                                          # a stamp on a wrong clock never feeds the fit
+                self.push.add_pose(t_now - age, x0, float(yaw))
+            bias = _rot2(float(yaw)) @ self.push.update()
+        self._bias = bias
         n_dead = int(round((age + p.dead_time_s) / p.dt))
         n_dead = min(n_dead, 60)
         if n_dead > 0:                                               # Smith-predictor style: where the drone will be
@@ -507,19 +693,21 @@ class Mppi:
             ad = math.exp(-p.dt / p.tau)
             bd = p.tau * (1.0 - ad)
             for uq in q:
-                x0 = x0 + uq * p.dt + (v0 - uq) * bd
-                v0 = uq + (v0 - uq) * ad
+                wq = uq + bias                                       # the velocity it settles at, push included
+                x0 = x0 + wq * p.dt + (v0 - wq) * bd
+                v0 = wq + (v0 - wq) * ad
         s_proj, e_now = self._project_point(x0, self.s_now)
         self.s_now = s_proj if self.s_now is None else max(self.s_now, s_proj)   # progress never goes backwards
         if self.u_last is None:
-            self.u_last = v0.copy()
+            self.u_last = v0 - bias                                  # as if the drone were holding its velocity
         pr, vr, tg, nm = (xp.asarray(a) for a in self.reference(self.s_now))
         self._vr_now = vr
-        u_last = xp.asarray(self.u_last)
+        # from here on MPPI plans w = u + bias (the velocity the drone settles at); the command sent is w - bias
+        u_last = xp.asarray(self.u_last + bias)
 
-        targets = [self.U, xp.zeros((H, 2)), vr]                     # previous plan, brake, reference
+        targets = [self.U, xp.zeros((H, 2)), vr]                     # previous plan, brake (= come to rest), reference
         if u_ext is not None:
-            targets.append(xp.broadcast_to(xp.asarray(np.asarray(u_ext, float)[:2]), (H, 2)))
+            targets.append(xp.broadcast_to(xp.asarray(np.asarray(u_ext, float)[:2] + bias), (H, 2)))
         targets = xp.stack(targets)
         n_noisy = max(1, K - int(targets.shape[0]))
         V = self.sample(u_last, targets, tg, nm, n_noisy)
@@ -556,12 +744,18 @@ class Mppi:
             pick = np.r_[top, np.random.default_rng(0).choice(rest, n - len(top), replace=False)]
             dbg = {"samples": _to_np(X)[pick], "sample_w": wv[pick], "sample_crashed": _to_np(crashed)[pick],
                    "reference": _to_np(pr)}
-        u = (float(U_new[0, 0]), float(U_new[0, 1]))
+        u_np = np.array([float(U_new[0, 0]), float(U_new[0, 1])]) - bias
+        n_u = float(np.hypot(*u_np))
+        if bias.any() and n_u > p.v_max:                             # the push took the command over the cap
+            u_np = u_np * (p.v_max / n_u)
+        u = (float(u_np[0]), float(u_np[1]))
         self.u_last = np.array(u)
         self._inflight = (self._inflight + [self.u_last.copy()])[-60:]   # replaced by note_sent() if overridden
+        self.push.add_cmd(t_now, self.u_last)
         self.U = xp.concatenate([U_new[1:], U_new[-1:]], axis=0)    # warm start: shift by one step
         return MppiResult(u=u, s=self.s_now, e_lat=e_now, lam=lam, ess=float(ess),
                           best_cost=float(xp.min(S)), crash_frac=float(xp.mean(crashed.astype(float))),
                           side=side, blocked=blocked, shielded=shielded,
-                          pose_age=float(pose_age_s), pose_age_clamped=bool(age != float(pose_age_s)), min_d_plan=float(xp.min(self.clearance(Xp[0]))),
+                          pose_age=float(pose_age_s), pose_age_clamped=bool(clamped), dist=bias.copy(),
+                          min_d_plan=float(xp.min(self.clearance(Xp[0]))),
                           ms=(time.perf_counter() - t0) * 1e3, plan=_to_np(Xp[0]), **dbg)
