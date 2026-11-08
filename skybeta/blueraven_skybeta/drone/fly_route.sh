@@ -5,6 +5,7 @@
 #   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go --skip   # the minimum to reach GO
 #   NAV=mppi OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go   # MPPI follows (default NAV=refnav)
 #   NAV=mppi MPPI_SPEED=0.10 ...    # MPPI's cruise m/s (default 0.10); MPPI runs as its own process, mppi_node
+#   PROGRAM=wallseek OFFSET=0.0 HEIGHT=0.4 ./fly_route.sh go   # Darion's wall-seek (blueraven_wallseek): no route file
 #   ./fly_route.sh status     # (second terminal) one line per second until Ctrl-C
 #   ./fly_route.sh stop       # stops the program + recording, prints the bag path
 #   ./fly_route.sh build      # rebuild blueraven_skybeta after copying new code (never restarts the stack)
@@ -17,12 +18,12 @@
 set -uo pipefail
 
 C=skybeta-stack                                   # the organizers' stack container
-PROGRAM=refnav
+PROGRAM=${PROGRAM:-refnav}                        # refnav (a route file) or wallseek (Darion's depth wall-seek)
 NAV=${NAV:-refnav}                                # follower: refnav (blind) or mppi (MPPI on live depth)
 MPPI_SPEED=${MPPI_SPEED:-0.10}                    # NAV=mppi: MPPI's cruise speed, m/s (<= MAX_SPEED)
 ROUTE=${ROUTE:-route_v7_cp2_simple}               # a route file name, without .json
 COURSE=${COURSE:-start-2026-11-07-tape}           # the course folder (courses/<COURSE>/routes/)
-HEIGHT=${HEIGHT:-0.7}
+if [ "$PROGRAM" = wallseek ]; then HEIGHT=${HEIGHT:-0.40}; else HEIGHT=${HEIGHT:-0.7}; fi
 MAX_SPEED=${MAX_SPEED:-0.15}                      # the route file's speed_mps may not exceed this (team rule)
 BAGS=/root/team_ws/bags                           # = ~/team_ws/bags on the drone host
 WS=/root/team_ws
@@ -34,13 +35,14 @@ TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybe
 /blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory /blueraven/mppi/cmd /blueraven/mppi/start \
 /fmu/in/trajectory_setpoint /fmu/in/offboard_control_mode /fmu/out/vehicle_local_position_setpoint /fmu/out/vehicle_attitude_setpoint"   # absent topics are harmless (MPPI off)
 DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera depth (~15 MB/s)
+[ "$PROGRAM" = wallseek ] && TOPICS="$TOPICS /blueraven/wallseek/status"
 (( DEPTH_BAG )) && TOPICS="$TOPICS /oak/stereo/image_raw /oak/stereo/camera_info"
 MIN_FREE_GB=${MIN_FREE_GB:-5}                     # free space the bag disk must have (depth fills ~1 GB a minute)
 ODOM_MIN_GO=${ODOM_MIN_GO:-28}                    # odometry Hz needed with the recorder running (hover baseline 29.6)
 FI_PROC="lib/skybeta_flight_interface/flight_interface"
-MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
+MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)|lib/blueraven_wallseek/wallseek( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
-LAUNCH_PROC="ros2 launch blueraven_skybeta"
+LAUNCH_PROC="ros2 launch blueraven_(skybeta|wallseek)"
 MPPI_PROC='lib/blueraven_skybeta/mppi_node( |$)'
 BAG_PROC='ros2 bag record -s mcap -o [A-Za-z0-9_-]+_[0-9]{6} '   # OUR recorder only (its -o is <ROUTE>_HHMMSS)
 OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC|$MPPI_PROC"
@@ -51,6 +53,7 @@ usage (on skybeta-09, in ~/team_ws):
   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go          # full checks, then GO
   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go --skip   # the minimum to reach GO
   NAV=mppi OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go   # MPPI follows (default NAV=refnav)
+  PROGRAM=wallseek OFFSET=0.0 HEIGHT=0.4 ./fly_route.sh go         # Darion's wall-seek (no route file)
   ./fly_route.sh status    # one line per second (second terminal)
   ./fly_route.sh stop      # stop the program + recording
   ./fly_route.sh build     # rebuild blueraven_skybeta
@@ -91,7 +94,7 @@ try:
 except ImportError:
     EstimatorStatusFlags = VehicleOdometry = None
 PATS = {"interface": r"lib/skybeta_flight_interface/flight_interface",
-        "mission": r"lib/blueraven_skybeta/(mission|refnav_mission)( |$)",
+        "mission": r"lib/blueraven_skybeta/(mission|refnav_mission)( |$)|lib/blueraven_wallseek/wallseek( |$)",
         "example": r"ros2 launch competitor_example|/lib/competitor_example/",
         "recorder": r"ros2 bag record"}
 SHELL = re.compile(r"^(([^ ]*/)?(ba)?sh|tmux|pgrep) ")
@@ -233,7 +236,8 @@ stop() {                                          # SIGINT, then wait until they
 }
 
 build() {                                         # after copying new code to the drone; the stack is not restarted
-  in_c "cd $WS && team_build.sh --packages-select blueraven_skybeta" | tail -3
+  local pkgs=blueraven_skybeta; [ "$PROGRAM" = wallseek ] && pkgs="$pkgs blueraven_wallseek"
+  in_c "cd $WS && team_build.sh --packages-select $pkgs" | tail -3
 }
 
 status() {                                        # one line per second: phase, odometry, EV fusion, PX4, processes
@@ -258,10 +262,18 @@ follow() {                                        # one status line per second u
 go() {
   local full=1 mode="go (full checks)"
   [ "${1:-}" = --skip ] && { full=0; mode="go --skip (minimum to reach GO)"; }
-  if (( full )); then N=16; else N=9; fi
-  route_lookup
+  local ws=0; [ "$PROGRAM" = wallseek ] && ws=1
+  [ "$PROGRAM" = refnav ] || (( ws )) || die "PROGRAM=$PROGRAM: use refnav or wallseek"
+  if (( full )); then N=$((16 - ws)); else N=9; fi
   echo "==================== fly_route.sh $mode ===================="
-  echo "PROGRAM $PROGRAM | NAV $NAV | ROUTE $ROUTE (sha1 ${SHA:-?}, course $COURSE) | OFFSET ${OFFSET:-UNSET} | HEIGHT $HEIGHT | DEPTH_BAG $DEPTH_BAG"
+  if (( ws )); then
+    echo "PROGRAM wallseek | OFFSET ${OFFSET:-UNSET} | HEIGHT $HEIGHT | DEPTH_BAG $DEPTH_BAG (ROUTE/COURSE/NAV unused)"
+    echo "      no route file: forward on OAK depth until Wall A is 0.80 m ahead, stop, turn in place to face the"
+    echo "      CP2 gap, straight through it to P2 (0.45 m past the gap centre), land there (blueraven_wallseek defaults)"
+  else
+    route_lookup
+    echo "PROGRAM $PROGRAM | NAV $NAV | ROUTE $ROUTE (sha1 ${SHA:-?}, course $COURSE) | OFFSET ${OFFSET:-UNSET} | HEIGHT $HEIGHT | DEPTH_BAG $DEPTH_BAG"
+  fi
   echo
 
   step "OFFSET set and numeric"
@@ -291,7 +303,14 @@ go() {
     local free; free=$(docker exec "$C" bash -c "mkdir -p $BAGS && df -Pk $BAGS | awk 'NR==2 {print int(\$4 / 1048576)}'")
     (( ${free:-0} >= MIN_FREE_GB )) || fail "only ${free:-?} GB free in ~/team_ws/bags: delete old bags, or DEPTH_BAG=0"
     pass "$free GB"
+  fi
 
+  if (( full && ws )); then
+    step "blueraven_wallseek built"
+    docker exec "$C" test -x "$WS/install/blueraven_wallseek/lib/blueraven_wallseek/wallseek" \
+      || fail "no ~/team_ws/install/blueraven_wallseek: PROGRAM=wallseek ./fly_route.sh build"
+    pass
+  elif (( full )); then
     step "route is not a *_sim file"
     [[ $ROUTE == *_sim ]] && fail "ROUTE=$ROUTE starts at the simulator's spawn, not the real mark: use ROUTE=${ROUTE%_sim}"
     pass
@@ -329,7 +348,7 @@ go() {
     pass
   fi
 
-  local run; run=${ROUTE}_$(date +%H%M%S)
+  local run; run=$( (( ws )) && echo wallseek || echo "$ROUTE")_$(date +%H%M%S)
   trap 'stop' EXIT                                # any failure from here on stops the recording and the program
   trap 'echo; say "Ctrl-C: stopping"; exit 130' INT
 
@@ -339,8 +358,9 @@ go() {
     || fail "docker exec failed writing LAST_RUN or starting ros2 bag record: see ~/team_ws/bags/$run.record.log"
   pass "recording ~/team_ws/bags/$run"
 
-  step "refnav launched"
+  step "$PROGRAM launched"
   local launch="ros2 launch blueraven_skybeta refnav.launch.py course:=$COURSE route:=$ROUTE height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET nav:=$NAV mppi_v_cruise_mps:=$MPPI_SPEED"
+  (( ws )) && launch="ros2 launch blueraven_wallseek wallseek.launch.py height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET"
   docker exec -d "$C" bash -ic "cd $WS && source install/setup.bash && exec $launch > $BAGS/$run.launch.log 2>&1" \
     || fail "docker exec failed starting: $launch"
   pass "log ~/team_ws/bags/$run.launch.log"
@@ -349,17 +369,19 @@ go() {
   poll 30 "flight_interface count never reached exactly 1 (0: launch failed, 2: another one runs): see ~/team_ws/bags/$run.launch.log" nprocs_is "$FI_PROC" 1
   pass
 
-  step "refnav logged 'take-off pose' (odometry + refnav connected)"
+  local ready='take-off pose' what="refnav logged 'take-off pose' (odometry + refnav connected)"
+  (( ws )) && ready='wait -> ready' what="wallseek logged 'wait -> ready' (odometry + /skybeta/state, disarmed)"
+  step "$what"
   local deadline=$((SECONDS + 60))
-  until docker exec "$C" grep -q 'take-off pose' "$BAGS/$run.launch.log"; do
+  until docker exec "$C" grep -q "$ready" "$BAGS/$run.launch.log"; do
     nprocs_is "$LAUNCH_PROC" 0 && fail "the launch exited: see ~/team_ws/bags/$run.launch.log"
-    (( SECONDS >= deadline )) && fail "no 'take-off pose' in 60 s (no odometry? cuVSLAM down?): ./fly_route.sh status, see ~/team_ws/bags/$run.launch.log"
+    (( SECONDS >= deadline )) && fail "no '$ready' in 60 s (no odometry? cuVSLAM down?): ./fly_route.sh status, see ~/team_ws/bags/$run.launch.log"
     sleep 0.5
   done
   pass
-  echo "      $(docker exec "$C" grep -m1 'take-off pose' "$BAGS/$run.launch.log" | tr -d '\r')"
+  echo "      $(docker exec "$C" grep -m1 "$ready" "$BAGS/$run.launch.log" | tr -d '\r')"
 
-  if [ "$NAV" = mppi ]; then
+  if [ "$NAV" = mppi ] && (( ! ws )); then
     step "mppi_node: its own process, live depth placed, MPPI stepping"
     awk -v s="$MPPI_SPEED" -v m="$MAX_SPEED" 'BEGIN { exit !(s + 0 > 0 && s + 0 <= m + 1e-9) }' \
       || fail "MPPI_SPEED=$MPPI_SPEED is not in (0, MAX_SPEED=$MAX_SPEED]"
