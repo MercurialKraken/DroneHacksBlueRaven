@@ -91,6 +91,29 @@ Hypotheses for the left offset (open):
   vehicle_attitude_setpoint) so the next flight shows how hard PX4 tilts against the push.
 
 ===========================================================================================================
+4b. LATE NIGHT (2026-11-08, ~00:00-01:30): CORRECTING THE TAKE-OFF DRIFT - WHAT WE TRIED AND LEARNED
+===========================================================================================================
+- Tape + depth confirmed the take-off drift is REAL motion (the room's wall stayed still in the depth images while the
+  drone slid 0.34 m during the climb), not a VIO jump. It grows with height: 0.04 m at 0.15 m, 0.14 at 0.37, 0.20 at
+  0.44, 0.38 at 0.58 m (160449) -> Chelsea lowered route 1 to 0.4 m (about half the drift) and slowed it to 0.1 m/s.
+- Chelsea's design: remember the take-off point, hold over it after the climb, then fly the route (route1-chelsea).
+- Attempt 1, a position INTEGRAL (+ a gate "start only within 5 cm"): perfect in our model, but ORBITED on the T4
+  (~0.18 m circles, ~11 s a lap; never opened the gate in 40 s).
+- Attempt 2, a PUSH ESTIMATOR from the velocity shortfall: also orbited on the T4 (30 s hold: 3.2 laps, 0.13-0.21 m).
+- Why (offline fit of the T4 bags): the T4's velocity response lags its command by ~2.1 s (not the 1.5 s assumed), so
+  any extra loop on refnav's position hold tips it into an orbit. The real drone's best-fit delay is ~1.0 s (refnav
+  assumes 0.55 s) - the T4 cannot predict hold behaviour on the real drone. LESSON: our models were tuned to the
+  wrong delays; a sim pass/fail is not a real pass/fail.
+- Darion's wall-follow hold avoided the orbit with an integral that only learns when the drone is nearly still (off
+  for 2.2 s after lift-off; within 0.10 m or stuck > 1.5 s) + a forward kick at take-off: came back to 0.05-0.06 m.
+- Team decisions: keep the lanes SEPARATE (MPPI = Arnav's push estimate; the take-off hold = Chelsea's) so each system
+  is tested independently (Hinson, Chelsea). CODE FREEZE before the real course (Hinson). Flight 1 = the PLAIN
+  route1-chelsea (10 s hold, refnav's P loop, no estimator), the only hold that returned on the T4 (0.23 -> 0.07 m).
+- MPPI at 0.4 m: the 0.30 m cone counts as an obstacle and the CP gap then leaves 2-9 cm -> MPPI refused to squeeze
+  (BLOCKED, landed) - by design. Fix: move the cones out of the gap (Chelsea) or fly MPPI at 0.7 m.
+- Tools for the submission: tools/flight_analysis/ (extract, report, push-or-rotation fit, plots).
+
+===========================================================================================================
 5. NUMBERS WORTH A SLIDE
 ===========================================================================================================
 - Real VIO: 29.7 Hz, gaps <= 73 ms, EV age p50 35 ms, fusion 100% (Darion).
