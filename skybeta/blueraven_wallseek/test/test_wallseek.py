@@ -316,7 +316,7 @@ def test_single_wild_depth_frames_are_ignored():
 
 def test_cuvslam_variance_spike_lands_straight_down_before_any_jump():
     s = Sim()
-    s.var_fn = lambda: 0.07 if s.m.phase == "settle" else 0.002   # T4 run 2: 1e-3 -> 7e-2, 0.8 s before the jump
+    s.var_fn = lambda: 0.22 if s.m.phase == "settle" else 0.002   # T4 run 2 before its 2 m jump: 0.07, then 0.22-0.30
     s.run()
     assert any("variance" in x for x in s.m.log), s.m.log
     land = [r for r in s.trace if r[1] == "land"]
@@ -428,3 +428,12 @@ def test_lean_is_body_frame_from_lift_off_only():
     out = m.step(W.Inputs(now=0, pos=(0, 0, 0), vel=(0, 0), yaw_err=0, t_odom=0, state=st, t_state=0, ahead_m=None,
                           t_depth=-9))
     assert out.phase == "ready" and out.twist == (0.0, 0.0, 0.0, 0.0)  # on the ground: nothing added
+
+
+def test_marginal_variance_does_not_land_a_good_flight():
+    # T4 runs (0.03 limit) were landed by 0.033 at P2 and 0.044 on a leg: with 0.10 they fly on
+    s = Sim(W.Params(route_mode=True))
+    s.var_fn = lambda: 0.044 if s.m.phase in ("turn", "leg") else 0.004
+    s.run(160)
+    assert not any("variance" in x for x in s.m.log), s.m.log
+    assert any("route complete" in x for x in s.m.log), s.m.log
