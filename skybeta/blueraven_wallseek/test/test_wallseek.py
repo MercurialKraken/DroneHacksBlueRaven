@@ -26,7 +26,9 @@ def seg_dist(p, a, b):
 
 class Sim:
     def __init__(self, p=None, tau=0.55, dead=0.25, push=(0.0, 0.0), wall=(WALL_N, WALL_E0, WALL_E1), far=3.5,
-                 depth_ok=lambda t: True, nav_override=None, arm_t=2.0, seed=1):
+                 depth_ok=lambda t: True, nav_override=None, arm_t=2.0, seed=1, est_fault=None):
+        self.est_fault = est_fault          # t, true pos, true vel -> (reported pos, reported vel) or None
+        self.wz = []
         self.m = W.WallSeek(p or W.Params())
         self.tau, self.dead, self.push, self.wall, self.far = tau, dead, push, wall, far
         self.depth_ok, self.nav_override, self.arm_t = depth_ok, nav_override, arm_t
@@ -61,13 +63,19 @@ class Sim:
         if round(t / 0.0333) != round((t - self.dt) / 0.0333) and self.depth_ok(t):    # ~30 Hz depth
             self.ahead, self.t_depth, self.depth_seq = self.corridor(), t, self.depth_seq + 1
         state = {"armed": self.armed, "offboard_active": self.offboard, "nav_state": nav, "px4_link": True}
-        i = W.Inputs(now=t, pos=tuple(self.pos), vel=(self.vel[0], self.vel[1]), yaw_err=0.0, t_odom=t, state=state,
+        rp, rv = tuple(self.pos), (self.vel[0], self.vel[1])
+        if self.est_fault:
+            f = self.est_fault(t, rp, rv)
+            if f:
+                rp, rv = f
+        i = W.Inputs(now=t, pos=rp, vel=rv, yaw_err=0.2, t_odom=t, state=state,      # a drifted heading estimate
                      t_state=t, ahead_m=self.ahead, t_depth=self.t_depth, depth_seq=self.depth_seq)
         out = self.m.step(i)
         cmd = (0.0, 0.0, 0.0)
         if out.twist is not None and self.offboard:
             self.twists += 1
             cmd = out.twist[:3]
+            self.wz.append(out.twist[3])
         self.queue.append((t, cmd))
         while len(self.queue) > 1 and self.queue[1][0] <= t - self.dead:
             self.queue.pop(0)
@@ -115,7 +123,7 @@ def test_full_mission_stops_translates_lands_past_the_end(plant):
     beside = [r for r in s.trace if r[1] == "translate" and r[2][1] + HALF < WALL_E1]
     devs = [abs((WALL_N - r[2][0]) - p.standoff_m) for r in beside]
     assert beside and max(devs) < 0.06, max(devs)
-    assert s.min_wall > 0.29 + 0.10, s.min_wall                      # never within 10 cm of contact
+    assert s.min_wall > 0.29 + 0.09, s.min_wall                      # never within 9 cm of contact
     # landed past the end: the drone's left side is clear of Wall A's end by about past_end
     _, last = phase_span(s, "land")
     assert last[2][1] - 0.29 > WALL_E1 + 0.2, last
@@ -126,11 +134,40 @@ def test_body_push_like_skybeta09_is_absorbed_by_the_depth_standoff():
     s = Sim(push=(-0.07, -0.07)).run()                                 # back + left (west) ~0.1 m/s
     assert s.m.phase == "done", s.m.log
     beside = [r for r in s.trace if r[1] == "translate" and r[2][1] + HALF < WALL_E1 and r[0] > 0]
-    assert max(abs((WALL_N - r[2][0]) - 0.5) for r in beside) < 0.10
+    assert max(abs((WALL_N - r[2][0]) - W.Params().standoff_m) for r in beside) < 0.10
     assert s.min_wall > 0.29 + 0.05
     assert any("past the wall's end" in x for x in s.m.log), s.m.log   # finished by the wall's end, not a timeout
     assert s.min_b > 0.29 + 0.05, s.min_b                              # Wall B's tip (unseen: behind-right) stays clear
     assert s.trace[-1][2][1] - 0.29 > WALL_E1 + 0.2, s.trace[-1]      # landed with its left side clear of the end
+
+
+def test_never_commands_a_turn_even_with_a_drifted_heading_estimate():
+    s = Sim().run()                     # every sample reports an 11 deg heading error (yaw_err 0.2 rad)
+    assert s.m.phase == "done" and s.wz and all(w == 0.0 for w in s.wz)
+
+
+def test_bad_vision_velocity_beside_the_wall_does_not_drive_it_in():
+    # T4 run 20261108T0749: cuVSLAM reported the drone sliding south-west at ~0.3 m/s while it went north-east
+    bad = lambda t, p, v: (p, (-0.3, -0.3)) if s.m.phase in ("settle", "translate") else None   # noqa: E731
+    s = Sim(est_fault=bad)
+    s.run()
+    assert s.min_wall > 0.29 + 0.08, s.min_wall
+
+
+def test_a_position_jump_lands_straight_down_without_chasing_it():
+    jumped = {}
+
+    def fault(t, p, v):
+        if s.m.phase == "translate" and "t" not in jumped:
+            jumped["t"] = t
+        return ((p[0] - 3.0, p[1] + 2.0, p[2]), v) if "t" in jumped else None
+    s = Sim(est_fault=fault)
+    s.run()
+    assert any("jumped" in x for x in s.m.log), s.m.log
+    land = [r for r in s.trace if r[1] == "land"]
+    drift = math.dist(land[0][2][:2], land[-1][2][:2])
+    assert drift < 0.15, drift                                         # came down where it was, not toward the jump
+    assert s.min_wall > 0.29 + 0.05
 
 
 def test_no_wall_lands_before_the_forward_limit():

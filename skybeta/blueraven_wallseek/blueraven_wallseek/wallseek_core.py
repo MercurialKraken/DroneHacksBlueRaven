@@ -23,7 +23,8 @@ AIRBORNE = ("climb", "approach", "settle", "translate", "past")
 @dataclass
 class Params:
     height_m: float = 0.40          # flight height above the pad (Darion)
-    standoff_m: float = 0.50        # drone CENTRE to the wall's face while stopped/translating (Darion)
+    standoff_m: float = 0.44        # drone CENTRE to the wall's face while stopped/translating (Darion + Hinson:
+                                    # ~15 cm past the radius to both Wall A and Wall B's tip)
     approach_mps: float = 0.15      # forward speed toward the wall
     translate_mps: float = 0.10     # rightward speed along the wall
     past_end_m: float = 0.35        # carry on this far right after the wall has ended
@@ -52,6 +53,10 @@ class Params:
     lag_s: float = 0.55             # twist -> velocity lag: 0.55 on the drone, 1.5 on the T4 (refnav's VEL_LAG_S)
     yaw_rate_dps: float = 30.0
     kp_yaw: float = 1.5
+    vio_heading_hold: bool = False  # False: yaw rate 0, PX4 holds heading on the IMU gyro (see _wz)
+    range_rate_window_s: float = 0.4
+    jump_m: float = 0.25            # one odometry step this large = the estimate jumped: land straight down
+    jump_mps: float = 1.5           # or an implied speed this high (we fly <= 0.2 m/s)
     depth_hold_s: float = 0.5       # depth older than this: hold still ...
     depth_land_s: float = 2.0       # ... older than this: land
     odom_hold_s: float = 0.45       # refnav's HOLD_S (skybeta-09 odometry arrives bunched, gaps to 0.35 s)
@@ -114,6 +119,12 @@ class WallSeek:
     n_hold: float | None = None
     t_last: float | None = None
     e_ref: float | None = None      # translate's advancing east reference
+    rr: list[tuple[float, float]] = field(default_factory=list)   # (t_depth, range) for the range rate
+    rr_seq: int = -1
+    vn_depth: float = 0.0           # closing speed toward the wall from depth, m/s
+    prev_pos: tuple[float, float, float] | None = None
+    t_prev_odom: float = -1e9
+    blind: bool = False             # landing without the position estimate (it jumped)
     dt: float = 0.0
     i_n: float = 0.0                # integral share, north (standoff loop and north holds)
     i_e: float = 0.0                # integral share, east (east holds)
@@ -137,8 +148,46 @@ class WallSeek:
         self._set("land", i.now, why)
 
     def _wz(self, i: Inputs) -> float:
+        """Yaw rate: ZERO by default, so PX4's rate loop holds the heading on the IMU gyro. The vision heading drifted
+        ~11 deg in 2 s facing Wall A at 0.44 m in the T4 (sim run 20261108T0749) and a heading hold on it turned the
+        real drone 24 deg into the wall. vio_heading_hold=True brings that hold back (not recommended near walls)."""
+        if not self.p.vio_heading_hold:
+            return 0.0
         cap = math.radians(self.p.yaw_rate_dps)
         return _clamp(self.p.kp_yaw * (i.yaw_err or 0.0), -cap, cap)
+
+    def _track_range(self, i: Inputs) -> None:
+        """Closing speed toward the wall from the depth range itself (not the vision velocity, which went wrong
+        beside the wall): the range's slope over ~range_rate_window_s of frames, + = moving toward it."""
+        if i.depth_seq == self.rr_seq:
+            return
+        self.rr_seq = i.depth_seq
+        if i.ahead_m is None or not math.isfinite(i.ahead_m) or i.ahead_m >= self.p.clear_m:
+            self.rr, self.vn_depth = [], 0.0
+            return
+        self.rr = [(t, r) for t, r in self.rr if i.t_depth - t <= self.p.range_rate_window_s] + [(i.t_depth, i.ahead_m)]
+        span = self.rr[-1][0] - self.rr[0][0]
+        if span < 0.6 * self.p.range_rate_window_s or len(self.rr) < 4:
+            self.vn_depth = 0.0
+            return
+        n = len(self.rr)                                          # least-squares slope of range over time
+        mt = sum(t for t, _ in self.rr) / n
+        mr = sum(r for _, r in self.rr) / n
+        den = sum((t - mt) ** 2 for t, _ in self.rr)
+        self.vn_depth = -sum((t - mt) * (r - mr) for t, r in self.rr) / den if den > 0 else 0.0
+
+    def _jumped(self, i: Inputs) -> str | None:
+        """The vision position stepped (cuVSLAM diverging beside the wall jumped metres per sample): why, or None."""
+        if i.pos is None or i.t_odom == self.t_prev_odom:
+            return None
+        prev, self.prev_pos, t_prev, self.t_prev_odom = self.prev_pos, i.pos, self.t_prev_odom, i.t_odom
+        if prev is None:
+            return None
+        step = math.dist(prev, i.pos)
+        dt = i.t_odom - t_prev
+        if step > self.p.jump_m or (dt > 0 and step / dt > self.p.jump_mps and step > 0.05):
+            return f"position estimate jumped {step:.2f} m in {dt:.2f} s"
+        return None
 
     def _vz(self, i: Inputs) -> float:
         return _clamp(self.p.k_z * (self.p.height_m - i.pos[2]), -self.p.climb_mps, self.p.climb_mps)
@@ -168,7 +217,8 @@ class WallSeek:
                       + self._integrate("i_e", err), 0.0, 2 * p.translate_mps)
 
     def _wall_vn(self, rng: float, vn_meas: float, lo: float, hi: float) -> float:
-        """Standoff loop on the depth range, with the velocity lag predicted out, plus the learned push."""
+        """Standoff loop on the depth range, with the velocity lag predicted out (vn_meas = the closing speed from
+        DEPTH, self.vn_depth), plus the learned push."""
         err = rng - self.p.standoff_m
         return _clamp(self.p.k_wall * (err - self.p.lag_s * vn_meas) + self._integrate("i_n", err), lo, hi)
 
@@ -179,6 +229,8 @@ class WallSeek:
             self.t_phase = i.now
         self.dt = 0.0 if self.t_last is None else _clamp(i.now - self.t_last, 0.0, 0.25)
         self.t_last = i.now
+        jump = self._jumped(i)
+        self._track_range(i)
         st = i.state or {}
         armed, offboard, nav = st.get("armed"), st.get("offboard_active"), st.get("nav_state")
         if self.phase in ("done", "yielded"):
@@ -219,7 +271,10 @@ class WallSeek:
 
         # ---- airborne supervision
         if self.phase in AIRBORNE:
-            if not fresh_state:
+            if jump:
+                self.blind = True
+                self._land(i, jump + ": landing straight down, not chasing the estimate")
+            elif not fresh_state:
                 self._land(i, f"/skybeta/state silent for {i.now - i.t_state:.2f} s")
             elif i.pos is None or odom_age > p.odom_land_s:
                 self._land(i, f"odometry silent for {odom_age:.2f} s")
@@ -258,7 +313,7 @@ class WallSeek:
                 self._land(i, f"approach did not settle within {p.approach_timeout_s:.0f} s")
             else:
                 if wall:
-                    vn = self._wall_vn(rng, vn_m, -p.xy_hold_cap_mps, p.approach_mps)
+                    vn = self._wall_vn(rng, self.vn_depth, -p.xy_hold_cap_mps, p.approach_mps)
                     if abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps:
                         self.t_in_tol = None
                         self._set("settle", i.now, f"wall {rng:.2f} m ahead: hover stop {p.settle_s:.0f} s")
@@ -277,7 +332,7 @@ class WallSeek:
                 self.clear_count, self.last_seq = 0, i.depth_seq
                 self._set("translate", i.now, f"stopped {rng:.2f} m from the wall: translating right")
             else:
-                vn = self._wall_vn(rng, vn_m, -p.xy_hold_cap_mps, p.xy_hold_cap_mps)
+                vn = self._wall_vn(rng, self.vn_depth, -p.xy_hold_cap_mps, p.xy_hold_cap_mps)
                 return Output(self.phase, self.why, (vn, self._hold(0.0, e, ve_m), self._vz(i), self._wz(i)))
 
         if self.phase == "translate":
@@ -292,7 +347,7 @@ class WallSeek:
                 self.e_clear, self.n_hold = e, n
                 self._set("past", i.now, f"wall ended at east {e:.2f} m: {p.past_end_m:.2f} m more, then land")
             else:
-                vn = (self._wall_vn(rng, vn_m, -p.xy_hold_cap_mps, p.xy_hold_cap_mps) if wall
+                vn = (self._wall_vn(rng, self.vn_depth, -p.xy_hold_cap_mps, p.xy_hold_cap_mps) if wall
                       else self._hold(n, n, vn_m, "i_n"))
                 return Output(self.phase, self.why, (vn, self._east_ve(e, ve_m), self._vz(i), self._wz(i)))
 
@@ -315,6 +370,9 @@ class WallSeek:
         if not (armed and offboard):
             self._set("done", i.now, "landed: PX4 disarmed or Offboard ended" if armed is False else "Offboard ended")
             return Output(self.phase, self.why)
+        if self.blind:          # the estimate jumped: straight down on time alone, pressing once surely down
+            press = i.now - self.t_land > p.height_m / p.descend_mps + p.ground_wait_s
+            return Output(self.phase, self.why, (0.0, 0.0, -(p.press_mps if press else p.descend_mps), 0.0))
         if i.pos is None or i.now - i.t_odom > p.odom_hold_s:
             return Output(self.phase, self.why, (0.0, 0.0, -p.descend_mps, 0.0))   # blind: straight down
         n, e, u = i.pos
