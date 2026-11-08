@@ -61,11 +61,20 @@ Each step is worth doing only once the previous one passed.
 | 0 | **No flight:** drone on the ground, props off, 2 min recording while people walk around outside the net | Does VIO jump from movement behind the netting? | No jump events |
 | 1 | Hover on VIO, 30 s at about 0.7 m | Does it hold still on camera-only tracking? | No jumps; horizontal drift p95 < 0.15 m |
 | 2 | 2 m out and back along a tape measure | How much does VIO over- or under-read distance? | Back within 0.10 m of start; out-leg within 5 % of tape |
-| 3 | Hover, then slow twist descent (about 0.2 m/s) to the floor | Does PX4 detect touchdown and disarm itself (`COM_DISARM_LAND` = 2 s)? CP5 depends on it | Disarms by itself within about 3 s of touchdown |
+| 3 | Hover, then twist descent to the floor at **at least 0.3 m/s** (the hover mission uses 0.35, then a firmer press) | Does PX4 detect touchdown and disarm itself (`COM_DISARM_LAND` = 2 s)? CP5 depends on it | Disarms by itself within about 3 s of touchdown |
 | 4 | One straight leg at 0.3 m/s | Does twist mode fly the commanded speed? | Speed error median < 0.05 m/s; no jumps |
 | 5 | One corner at 0.3 m/s | How much does the drone overshoot or cut a corner? | Tracking error p95 well inside the narrowest clearance (about 0.28 m spare) |
 | 6 | Full course at 0.3 m/s | Can it finish? | All checkpoints; no jumps |
 | 7+ | Raise **one** speed parameter one step | Is the faster setting still safe? | Same as 6, tracking error not worse |
+
+Landing note (Darion's end-to-end sim hover, 2026-11-07): PX4's land detector only declares
+"landed" when the commanded descent is at least 1.1 x `LNDMC_Z_VEL_MAX` (0.275 m/s with the
+v1.16 defaults). At 0.2 m/s the drone sat armed on the floor for 63 s. Check `LNDMC_Z_VEL_MAX`,
+`MPC_LAND_CRWL` and `MPC_LAND_SPEED` on the drone before step 3.
+
+**Before leaving the drone:** after a stack restart the competitor window runs the organizers'
+example (arm + Position = a 5 m square at 1.5 m). Power down, or set `COMPETITOR_PKG` to the
+team package first.
 
 ## Abort and stop rules (proposed)
 
