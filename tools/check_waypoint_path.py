@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """OFFLINE (laptop): the clearance of the path the drone flies for a route file (waypoint mode), on a course map.
 
-    python tools/check_route.py routes/route_v6_start2.json                      # the real mark, maps/course_sdf.npz
-    python tools/check_route.py routes/route_v6_start2_sim.json --launch launch_sim --map other.npz
-    python tools/check_route.py routes/x.json --pose -2.515,0.914,90             # map x, y and yaw (deg) of take-off
+    python tools/check_waypoint_path.py routes/route_v6_start2.json                      # the real mark, maps/course_sdf.npz
+    python tools/check_waypoint_path.py routes/route_v6_start2_sim.json --launch launch_sim --map other.npz
+    python tools/check_waypoint_path.py routes/x.json --pose -2.515,0.914,90             # map x, y and yaw (deg) of take-off
 
 The path is built exactly as refnav.launch.py's mission builds it (the route's corners as arcs within corner_cut_m),
 placed at the launch pose and flight height, and measured against the map's planning field. The flight reads none
-of this: it is how a route is checked against the map before it flies.
+of this: it is how a route is checked against the map before it flies. (tools/check_route.py on chelsea/course-map
+measures the straight legs and her shell's flight; this one measures refnav's arcs.)
 """
 from __future__ import annotations
 

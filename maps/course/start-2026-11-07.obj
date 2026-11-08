@@ -1,17 +1,19 @@
 # Start of the course as rebuilt by the organizers on 2026-11-07 (they withheld exact dimensions).
 # From Darion's CORRECTED drawing (2026-11-07 ~19:35; feet grid, map m = ft * 0.3048 - 3.048), approximate.
-# Boxes in the published OBJ's frame (x east, y north, z up, metres). Used with dronehacks-course-v3.obj,
-# whose maze dividers M1, M2, M3 were removed (course.yaml excludes them). Built by hand (chelsea-claude).
+# Darion's wall end points are taken as the faces at the CP2 gap, so the gap's free width is his 0.752 m:
+# each wall's 4 in thickness lies on the side AWAY from the gap. Boxes in the published OBJ's frame
+# (x east, y north, z up, metres). Used with dronehacks-course-v3.obj, whose maze dividers M1, M2, M3 were
+# removed (course.yaml excludes them). Built by hand (chelsea-claude), not the organizers' CAD.
 
 g Start wall A
-v -2.7430 2.5892 0.0000
-v -1.2770 2.5892 0.0000
-v -1.2770 2.6908 0.0000
-v -2.7430 2.6908 0.0000
-v -2.7430 2.5892 1.7270
-v -1.2770 2.5892 1.7270
-v -1.2770 2.6908 1.7270
-v -2.7430 2.6908 1.7270
+v -2.7430 2.6400 0.0000
+v -1.2770 2.6400 0.0000
+v -1.2770 2.7416 0.0000
+v -2.7430 2.7416 0.0000
+v -2.7430 2.6400 1.7270
+v -1.2770 2.6400 1.7270
+v -1.2770 2.7416 1.7270
+v -2.7430 2.7416 1.7270
 f 1 2 3 4
 f 8 7 6 5
 f 1 5 6 2
@@ -19,14 +21,14 @@ f 2 6 7 3
 f 3 7 8 4
 f 4 8 5 1
 g Start wall B diagonal
-v -1.7038 0.7353 0.0000
-v -0.9798 1.9053 0.0000
-v -1.0662 1.9587 0.0000
-v -1.7902 0.7887 0.0000
-v -1.7038 0.7353 1.7270
-v -0.9798 1.9053 1.7270
-v -1.0662 1.9587 1.7270
-v -1.7902 0.7887 1.7270
+v -1.7470 0.7620 0.0000
+v -1.0230 1.9320 0.0000
+v -0.9366 1.8785 0.0000
+v -1.6606 0.7085 0.0000
+v -1.7470 0.7620 1.7270
+v -1.0230 1.9320 1.7270
+v -0.9366 1.8785 1.7270
+v -1.6606 0.7085 1.7270
 f 9 10 11 12
 f 16 15 14 13
 f 9 13 14 10
