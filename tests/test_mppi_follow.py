@@ -402,6 +402,70 @@ def test_mppi_nodes_depth_callback_only_keeps_the_newest_frame_and_runs_single_t
     assert "'OMP_NUM_THREADS': '1'" in launch and launch.count("additional_env=ONE_THREAD") == 2
 
 
+def _depth_timing(policy: str, depth_lat: float, odom_lat: float, stamp_off: float = 20e-6, secs: float = 6.0) -> float:
+    """mppi_node's depth path with real MppiFollow + pose buffer: odometry (stamped at capture, received odom_lat later)
+    and on-camera depth (stamped stamp_off after the same capture, received depth_lat later), both 30 Hz; the node's
+    20 Hz tick processes depth on non-step ticks at <= 10 Hz. policy 'newest' = before the fix (only the newest
+    frame, dropped if it can't be placed), 'queue' = DepthQueue. -> frames placed per second in follow."""
+    mf = M.MppiFollow(0.10, 0.9, 0.6)
+    img = np.full((H, W), 2.0)                                              # a surface 2 m ahead: any finite depth
+    ev = sorted([(k / 30 + odom_lat, 0, k / 30) for k in range(int(secs * 30))]
+                + [(k / 30 + depth_lat, 1, k / 30 + stamp_off) for k in range(int(secs * 30))])
+    q, newest, placed, t_proc, ticks, i = M.DepthQueue(), None, 0, -1e9, 0, 0
+    for n in range(1, int(secs / 0.05) + 1):                                # mppi_node._tick every 50 ms
+        t = n * 0.05
+        while i < len(ev) and ev[i][0] <= t:
+            _, kind, st = ev[i]
+            i += 1
+            if kind == 0:
+                mf.on_odom(st, (0.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0))
+                if mf.nav is None:
+                    mf.start([[1.0, 0.0], [3.0, 0.0]], S.Pad(0.0, 0.0, 0.0, 0.0))
+            else:
+                q.push(st, st)
+                newest = st
+        ticks += 1
+        if ticks % M.STEP_EVERY == 1 % M.STEP_EVERY and t - t_proc >= 0.09:
+            if policy == "newest":
+                st, newest = newest, None
+            else:
+                got = q.pop(mf.stamp if mf.pos is not None else None)
+                st = None if got is None else got[0]
+            if st is not None:
+                t_proc = t
+                placed += bool(mf.on_depth(st, img, K, T_BASE_CAM, stride=1))
+    return placed / secs
+
+
+def test_depth_arriving_ahead_of_odometry_is_placed_not_dropped():
+    """skybeta-10 route_mppi_full_160248 (run 1): depth ~20 us after its capture's odometry stamp, arriving before that
+    odometry (odometry ~35 ms late). The newest-frame-only reader placed 1-2 frames per 5 s ('no pose' 386 -> 613),
+    flapped SLOW/HOLD (the crawl) and landed on 'depth silent'. DepthQueue places it at ~10 Hz, and still does when
+    depth arrives after odometry (run 2's timing)."""
+    run1 = dict(depth_lat=0.010, odom_lat=0.035)
+    assert _depth_timing("newest", **run1) < 0.5                            # the bug, reproduced: almost nothing placed
+    assert _depth_timing("queue", **run1) >= 8.0                            # fixed: ~10 Hz
+    run2 = dict(depth_lat=0.060, odom_lat=0.035)                            # depth later than odometry: worked before
+    assert _depth_timing("newest", **run2) >= 8.0
+    assert _depth_timing("queue", **run2) >= 8.0                            # and still does
+    for lat in (0.0, 0.020, 0.034, 0.050, 0.100):                           # any depth latency vs 35 ms odometry
+        assert _depth_timing("queue", depth_lat=lat, odom_lat=0.035) >= 8.0, lat
+
+
+def test_depth_queue_keeps_too_new_frames_and_drops_older_ones():
+    q = M.DepthQueue(keep=4)
+    assert q.pop(None) is None and q.pop(1.0) is None
+    for st in (1.00, 1.03, 1.07, 1.10):
+        q.push(st, f"f{st}")
+    assert q.pop(1.05) == (1.03, "f1.03")                                   # newest covered; 1.00 dropped with it
+    assert [s for s, _ in q.q] == [1.07, 1.10]                              # the too-new ones wait
+    assert q.pop(1.05) is None and len(q.q) == 2
+    q.push(1.13, "f1.13")
+    q.push(1.17, "f1.17")
+    q.push(1.20, "f1.20")                                                   # keep=4: 1.07 falls off
+    assert q.pop(9.0) == (1.20, "f1.20") and len(q.q) == 0
+
+
 # ---------------------------------------------------------------------------------------------- frozen / heading / stale
 def _odom_q(mf, t, x, yaw_deg=0.0, y=0.0):
     h = math.radians(yaw_deg) / 2

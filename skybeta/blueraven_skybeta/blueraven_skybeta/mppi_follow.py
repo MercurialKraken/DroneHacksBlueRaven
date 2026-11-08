@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -139,6 +140,38 @@ class CmdLink:
                     if now - self.t_start > CMD_FIRST_S else None)
         a = self.age(now)
         return f"MPPI command silent for {a:.2f} s (CMD_LAND_S {CMD_LAND_S:g})" if a > CMD_LAND_S else None
+
+
+DEPTH_KEEP = 8              # depth frames mppi_node keeps (~0.27 s at 30 Hz), newest last
+
+
+class DepthQueue:
+    """mppi_node's depth frames. The callback only pushes (O(1)); the tick pops the NEWEST frame that odometry already
+    covers (stamp <= the newest odometry stamp). The pose buffer interpolates and never extrapolates, so a frame newer
+    than the newest pose can't be placed yet: it stays queued for the next tick instead of being dropped. Frames older
+    than the one returned are discarded.
+    Why: skybeta-10 route_mppi_full_160248: on-camera depth arrived AHEAD of odometry (each frame ~20 us after its
+    capture's odometry stamp, odometry ~35 ms late). Keeping only the newest frame meant it was always a few ms newer
+    than the newest pose: 'no pose' 386 -> 613, 1-2 frames placed per 5 s, SLOW/HOLD flapping (the crawl), then
+    'depth silent for more than 3 s' -> land."""
+
+    def __init__(self, keep: int = DEPTH_KEEP) -> None:
+        self.q: deque = deque(maxlen=keep)
+
+    def push(self, stamp: float, item: Any) -> None:
+        self.q.append((float(stamp), item))
+
+    def pop(self, odom_stamp: float | None) -> tuple[float, Any] | None:
+        """-> (stamp, item) of the newest frame with stamp <= odom_stamp, else None (all frames wait)."""
+        if odom_stamp is None:
+            return None
+        for i in range(len(self.q) - 1, -1, -1):
+            if self.q[i][0] <= odom_stamp:
+                got = self.q[i]
+                for _ in range(i + 1):
+                    self.q.popleft()
+                return got
+        return None
 
 
 class MppiFollow:
