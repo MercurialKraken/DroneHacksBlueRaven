@@ -23,7 +23,7 @@ AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "
 @dataclass
 class Params:
     height_m: float = 0.40          # flight height above the pad (Darion)
-    standoff_m: float = 0.60        # drone CENTRE to Wall A's face while stopped/translating (Darion: 0.44 kept
+    standoff_m: float = 0.80        # drone CENTRE to Wall A's face at P1 (Darion, route v3; was 0.60, before 0.44 kept
                                     # cuVSLAM too close to a plain wall in every T4 run). Straight on at 0.60 would pass
                                     # Wall B's tip at 0.28 m (< radius 0.29), hence the gap leg below.
     # the gap leg (Darion): translate east until turn_e_m (vision estimate), then fly straight through the CP2 gap's
@@ -35,10 +35,9 @@ class Params:
     # through the CP2 gap to P3 -> 45 right -> east to P4 (about halfway to the tunnel) -> land. Checked on the course
     # SDF at 0.4 m: >= 0.39 m from every wall (tightest: the barrier behind the launch); the 0.30 m CP2 cone passes
     # ~0.10 m BELOW the drone (height is from the pad, so the drone's bottom is at 0.40 m). T4: p3_n_m 1.357.
-    route_mode: bool = True
-    p3_n_m: float = 1.557           # P3: 0.45 m past the CP2 gap centre on the 45 deg leg (whole drone across)
-    p3_e_m: float = 1.735
-    p4_e_m: float = 2.80            # P4: due east of P3, map (0.28, 2.47)
+    route_mode: bool = True         # v3 (Darion): P1 at standoff 0.80 -> face P2 -> straight through the gap -> P4
+    p2_past_m: float = 0.45         # P2: this far past the CP2 gap centre, on the line from P1 (whole drone across)
+    p4_e_m: float = 2.80            # P4: due east of P2, about halfway to the tunnel
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn
     pause_s: float = 1.5            # stop at each waypoint before turning
@@ -50,7 +49,8 @@ class Params:
     approach_mps: float = 0.15      # forward speed toward the wall
     translate_mps: float = 0.10     # rightward speed along the wall
     past_end_m: float = 0.35        # carry on this far right after the wall has ended
-    clear_m: float = 0.90           # 'wall ahead' = corridor range under this (centre); over it for clear_frames = ended
+    clear_m: float = 1.30           # 'wall ahead' = corridor range under this (centre); over it for clear_frames = ended
+                                    # (1.30: the standoff loop takes over 0.5 m before a 0.80 m stop)
     clear_frames: int = 5           # consecutive depth frames
     settle_s: float = 2.0           # the complete hover stop before translating
     settle_tol_m: float = 0.05      # within this of the standoff ...
@@ -178,7 +178,8 @@ class WallSeek:
     leg: tuple | None = None        # current straight leg: (start (n, e), end (n, e), unit (n, e), length)
     s_ref: float = 0.0
     plan: list = field(default_factory=list)   # route mode: remaining steps
-    route_pts: list | None = None   # route mode: the actual P1..P4 once P1 is fixed
+    route_pts: list | None = None   # route mode: the actual P1, P2, P4 once P1 is fixed
+    heading: float = 0.0            # route mode: commanded pad heading, deg clockwise from north
     ph: list = field(default_factory=list)       # (t, north, east) for the position-slope velocity
     t_vel: float = -1e9
     vel_est: tuple = (0.0, 0.0)
@@ -561,9 +562,10 @@ class WallSeek:
         p = self.p
         if self.route_pts is not None:
             pts = self.route_pts
-        else:
-            n1 = p.p3_n_m - 0.48
-            pts = [(n1, 0.0), (n1, p.p3_e_m - (p.p3_n_m - n1)), (p.p3_n_m, p.p3_e_m), (p.p3_n_m, p.p4_e_m)]
+        else:                                                # nominal P1: Wall A's face is 0.438 m north of the gap centre
+            n1 = p.gap_n_m + 0.438 - p.standoff_m
+            p2, p4 = self._route_points(n1, 0.0)
+            pts = [(n1, 0.0), p2, p4]
         look = None
         if self.phase in ("leg", "gap") and self.leg is not None:
             (tn, te), _, (un, ue), _ = self.leg
@@ -577,18 +579,26 @@ class WallSeek:
                 "path": [[0.0, 0.0]] + [[round(n, 3), round(e, 3)] for n, e in pts], "look": look}
 
     # ------------------------------------------------------------------ route mode (Darion): straight legs, 90/45 turns
-    def _route_start(self, i: Inputs, n: float, e: float) -> None:
-        """Stopped at P1 (the depth standoff). P2 is due east of P1, placed so the 45 deg leg lands exactly on P3;
-        P3 is past the CP2 gap; P4 due east of P3 (about halfway to the tunnel). Turns happen while stopped."""
+    def _route_points(self, n1: float, e1: float) -> tuple[tuple[float, float], tuple[float, float]]:
+        """P2 = past the CP2 gap's centre on the straight line from P1 through that centre; P4 = due east of P2."""
         p = self.p
-        p3 = (p.p3_n_m, p.p3_e_m)
-        p2 = (n, p3[1] - (p3[0] - n))                        # 45 deg leg from P2 to P3
-        p4 = (p3[0], p.p4_e_m)
-        self.route_pts = [(n, e), p2, p3, p4]
-        self.plan = [("turn", -90.0), ("leg", p2), ("pause", None), ("turn", +45.0), ("leg", p3), ("pause", None),
-                     ("turn", -45.0), ("leg", p4)]
+        gn, ge = p.gap_n_m, p.gap_e_m
+        d = math.hypot(gn - n1, ge - e1)
+        un, ue = (gn - n1) / d, (ge - e1) / d
+        p2 = (gn + p.p2_past_m * un, ge + p.p2_past_m * ue)
+        return p2, (p2[0], p.p4_e_m)
+
+    def _route_start(self, i: Inputs, n: float, e: float) -> None:
+        """Stopped at P1 (the depth standoff, Darion: 0.80 m from Wall A). One slow in-place turn from north to face P2
+        (through the CP2 gap's centre: ~76 deg right), straight to P2, turn to face P4 (~14 deg right), straight to
+        P4, land. Course SDF at 0.4 m: the P1-P2 leg clears Wall A's end and Wall B's tip by 0.47 m; the 0.30 m cone
+        passes under the drone. (Aiming at the old P3 instead clipped Wall A's end with 1.3 cm spare.)"""
+        p2, p4 = self._route_points(n, e)
+        self.route_pts = [(n, e), p2, p4]
+        self.heading = 0.0                                   # pad heading, deg clockwise from north (nose on the pad)
+        self.plan = [("face", p2), ("leg", p2), ("pause", None), ("face", p4), ("leg", p4)]
         self.log.append(f"{i.now:.2f} route: P1 ({n:.2f}, {e:.2f}) -> P2 ({p2[0]:.2f}, {p2[1]:.2f}) -> "
-                        f"P3 ({p3[0]:.2f}, {p3[1]:.2f}) -> P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
+                        f"P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
         self._next_step(i, n, e)
 
     def _next_step(self, i: Inputs, n: float, e: float) -> None:
@@ -596,11 +606,19 @@ class WallSeek:
             self._land(i, "route complete")
             return
         kind, arg = self.plan.pop(0)
+        if kind == "face":                                   # turn in place to point the nose at `arg`, from here
+            bearing = math.degrees(math.atan2(arg[1] - e, arg[0] - n))      # clockwise from north
+            delta = (bearing - self.heading + 180.0) % 360.0 - 180.0       # + = clockwise = right
+            self.heading = bearing
+            if abs(delta) < 0.5:
+                self._next_step(i, n, e)
+                return
+            kind, arg = "turn", -delta                       # turn's convention: + = left (counter-clockwise)
         if kind == "turn":
             sign = 1.0 if arg > 0 else -1.0                  # + = left (counter-clockwise), - = right
             self.turn = (sign, abs(arg), (n, e))
             self.turned, self.last_wz, self.t_turned = 0.0, 0.0, None
-            self._set("turn", i.now, f"turning {abs(arg):.0f} deg {'left' if arg > 0 else 'right'} in place at "
+            self._set("turn", i.now, f"turning {abs(arg):.1f} deg {'left' if arg > 0 else 'right'} in place at "
                                      f"{self.p.turn_rate_dps:.0f} deg/s")
         elif kind == "pause":
             self.hold_pt = (n, e)

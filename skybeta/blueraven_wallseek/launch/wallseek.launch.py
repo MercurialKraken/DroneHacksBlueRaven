@@ -24,10 +24,10 @@ INTERFACE_ARGS = [
 ]
 # the mission's tunables (wallseek_core.Params): Darion's numbers are the defaults
 MISSION_ARGS = [
-    ('height_m', '0.40'), ('standoff_m', '0.60'),
+    ('height_m', '0.40'), ('standoff_m', '0.80'),
     ('turn_e_m', '1.10'), ('gap_n_m', '1.239'), ('gap_e_m', '1.417'), ('gap_past_m', '0.50'),
-    # route mode (default): P1 by depth, then 90 right -> P2 -> 45 left -> P3 -> 45 right -> P4 -> land
-    ('p3_n_m', '1.557'), ('p3_e_m', '1.735'), ('p4_e_m', '2.80'), ('turn_rate_dps', '15.0'), ('leg_mps', '0.12'), ('approach_mps', '0.15'), ('translate_mps', '0.10'),
+    # route mode (default, v3): P1 by depth (0.80 m), face P2 (past the CP2 gap centre), straight to it, face P4, land
+    ('p2_past_m', '0.45'), ('p4_e_m', '2.80'), ('turn_rate_dps', '15.0'), ('leg_mps', '0.12'), ('approach_mps', '0.15'), ('translate_mps', '0.10'),
     ('past_end_m', '0.35'), ('max_forward_m', '1.30'), ('max_right_m', '2.0'), ('lag_s', '0.55'),
     ('camera_forward_m', '0.1053'), ('camera_left_m', '0.0376'), ('camera_up_m', '0.0304'),
     ('takeoff_kick_mps', '0.06'), ('var_check_after_m', '1.0'),
