@@ -166,7 +166,10 @@ def main() -> int:
                 f"lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below, at "
                 f"{CHELSEA_SPEED_MPS} m/s and {CHELSEA_HEIGHT_M} m (launch with HEIGHT={CHELSEA_HEIGHT_M}: the launch "
                 "argument overrides this file's height_m). The waypoints are the same as route_v7_cp2_simple's. ")
-        chelsea = {**fly, "hover_s": HOVER_S, "speed_mps": CHELSEA_SPEED_MPS, "height_m": CHELSEA_HEIGHT_M}
+        # the hold as a GATE + the position integral: refnav with chelsea/refnav-hold-gate 1a8aca1 uses them; older
+        # refnav ignores them (it logs "route file params not used") and holds hover_s, as before
+        chelsea = {**fly, "hover_s": HOVER_S, "speed_mps": CHELSEA_SPEED_MPS, "height_m": CHELSEA_HEIGHT_M,
+                   "hover_tol_m": 0.05, "hover_dwell_s": 1.0, "hover_max_s": 40.0, "hover_timeout": "land", "ki_xy": 0.08}
         for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, chelsea, back)):
             text = ('{\n "from": ' + json.dumps(note + src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
                     'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
