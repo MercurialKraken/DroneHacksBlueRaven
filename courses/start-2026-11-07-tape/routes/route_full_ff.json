@@ -1,0 +1,102 @@
+{
+ "from": "route_full_ff: route_v7_window's map waypoints (CP2 -> tunnel -> CP3 -> window CP4 -> CP5) re-expressed from Darion's NEW start, map (-2.515, 1.466) nose north: forward - 0.552, left unchanged. v7's first point (now behind the start) is replaced by a lead-in 34 deg right of the nose (the first leg must be under yaw_slow_deg); the 74 deg tunnel-entrance corner is split in two (0.2 m each side) so its arc is r 0.39. Height 0.6: the window sill (z 0.305) limits; clearance on the no-cone map (corner_cut 0.05, fillet 0.6): 0.4 m 0.170, 0.5 m 0.270, 0.55 m 0.320, 0.6 m 0.369 (window), 0.7 m 0.385. At 0.6: CP2 0.473, tunnel 0.577+, window 0.369. Tightest arc r 0.21 at the turn into the window (69 deg, 0.29 m leg).",
+ "frame": "metres from the take-off pose: [forward, left]; Darion's new real start (map -2.515, 1.466, yaw 90)",
+ "labels": [
+  "lead-in (45 deg right of the nose)",
+  "Chelsea v6 #2: CP2 approach",
+  "Chelsea v6 #3: CP2 gap centre",
+  "Chelsea v6 #4: CP2 exit",
+  "Chelsea v6 #5",
+  "FlyX 956f533 #9: tunnel entrance (handoff) (a, split corner)",
+  "FlyX 956f533 #9: tunnel entrance (handoff) (b, split corner)",
+  "FlyX 956f533 #10",
+  "FlyX 956f533 #11",
+  "FlyX 956f533 #12",
+  "FlyX 956f533 #13: CP3 (tunnel exit)",
+  "FlyX 956f533 #14",
+  "FlyX 956f533 #15",
+  "FlyX 956f533 #16",
+  "FlyX 956f533 #17: CP4 window",
+  "FlyX 956f533 #18: CP5"
+ ],
+ "route": [
+  [
+   0.3,
+   -0.2
+  ],
+  [
+   0.47,
+   -1.023
+  ],
+  [
+   0.687,
+   -1.417
+  ],
+  [
+   0.904,
+   -1.811
+  ],
+  [
+   0.284,
+   -4.365
+  ],
+  [
+   0.214,
+   -4.624
+  ],
+  [
+   -0.039,
+   -4.821
+  ],
+  [
+   -0.297,
+   -4.826
+  ],
+  [
+   -1.009,
+   -4.826
+  ],
+  [
+   -1.721,
+   -4.826
+  ],
+  [
+   -2.064,
+   -4.817
+  ],
+  [
+   -3.114,
+   -3.817
+  ],
+  [
+   -3.264,
+   -2.817
+  ],
+  [
+   -3.839,
+   -2.317
+  ],
+  [
+   -3.739,
+   -2.042
+  ],
+  [
+   -2.258,
+   -0.473
+  ]
+ ],
+ "params": {
+  "height_m": 0.6,
+  "speed_mps": 0.15,
+  "arrive_m": 0.15,
+  "corridor_half_m": 0.35,
+  "stop_m": 0.65,
+  "min_corridor_coverage": 0.4,
+  "yaw_rate_dps": 30.0,
+  "fillet_m": 0.6,
+  "hover_s": 0.0,
+  "push_ff_fwd_mps": 0.12,
+  "push_ff_right_mps": 0.1,
+  "push_ff_follow": false
+ }
+}

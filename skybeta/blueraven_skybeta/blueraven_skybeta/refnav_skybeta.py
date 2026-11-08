@@ -288,7 +288,7 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
             yaw_offset_rad: float, lag_s: float = VEL_LAG_S, speed_mps: float = 0.0,
             integ: XYIntegral | None = None, ki: float = 0.0, push: PushEstimator | None = None,
             push_tau_s: float = 0.0, push_max_mps: float = 0.15, push_ff: tuple[float, float] = (0.0, 0.0),
-            mppi: bool = False) -> tuple[tuple[float, float, float, float] | None, str | None]:
+            mppi: bool = False, push_ff_follow: bool = True) -> tuple[tuple[float, float, float, float] | None, str | None]:
     """-> (the twist to publish this tick or None, why to land now). In the air a silence over HOLD_S holds still,
     over the STALE limits it lands; on the ground nothing is sent, so the interface never enters Offboard on it."""
     if integ is not None and out.phase not in ("hover", "follow"):
@@ -312,7 +312,7 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
         return (0.0, 0.0, 0.0, 0.0), stale
     if hold or pad is None:
         return None, None
-    if mppi and out.phase == "follow":         # MPPI learns and leans against the push itself in follow
+    if (mppi or not push_ff_follow) and out.phase == "follow":   # MPPI learns and leans against the push itself in follow
         push_ff = (0.0, 0.0)
     tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps, integ, ki, now, push, push_tau_s,
                push_max_mps, push_ff)

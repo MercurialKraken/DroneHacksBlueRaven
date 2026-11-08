@@ -106,7 +106,8 @@ class SkybetaRefNav(RefNav):
                              self._now(), self.mission.p.yaw_rate_dps, self.yaw_offset, self.vel_lag_s,
                              self.mission.p.speed_mps, self.integ, self.mission.p.ki_xy, self.push,
                              self.mission.p.push_tau_s, self.mission.p.push_max_mps,
-                             (self.mission.p.push_ff_fwd_mps, self.mission.p.push_ff_right_mps), self.mppi is not None)
+                             (self.mission.p.push_ff_fwd_mps, self.mission.p.push_ff_right_mps), self.mppi is not None,
+                             self.mission.p.push_ff_follow)
         if land:
             self.mission.request_land(land)
         if tw is None:

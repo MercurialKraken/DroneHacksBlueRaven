@@ -679,12 +679,12 @@ def test_the_push_ff_cancels_160449s_push_from_lift_off(offset, yaw0):
     assert xtrack0 > 0.2, xtrack0                                        # P only: 160449's steady offset
 
 
-def _ff_command(phase: str, mppi: bool, track: S.Track | None = None, t: float = 0.0):
+def _ff_command(phase: str, mppi: bool, track: S.Track | None = None, t: float = 0.0, ff_follow: bool = True):
     v = C.Vehicle(pos=(0.0, 0.0, -0.4), heading=0.0)
     out = C.Output(phase, setpoint=(0.0, 0.0, -0.4, 0.0), velocity=(0.0, 0.0), stream=True)
     state = {"px4_link": True, "armed": True, "offboard_active": True}
     return S.command(out, v, S.Pad(0, 0, 0, 0), S.Descent(), track or S.Track(), state, t, t, t, 30.0, 0.0,
-                     push_ff=(0.2, 0.2), mppi=mppi)
+                     push_ff=(0.2, 0.2), mppi=mppi, push_ff_follow=ff_follow)
 
 
 def test_leaning_on_the_push_ff_is_not_counted_as_a_jam_by_the_stuck_guard():
@@ -697,4 +697,11 @@ def test_leaning_on_the_push_ff_is_not_counted_as_a_jam_by_the_stuck_guard():
 @pytest.mark.parametrize("phase, on", [("climb", True), ("hover", True), ("follow", False)])
 def test_under_mppi_the_push_ff_leans_in_the_climb_and_hold_but_not_in_follow(phase, on):
     tw, _ = _ff_command(phase, True)
+    assert math.hypot(tw[0], tw[1]) == pytest.approx(math.hypot(0.2, 0.2) if on else 0.0)
+
+
+@pytest.mark.parametrize("phase, on", [("climb", True), ("hover", True), ("follow", False)])
+def test_with_push_ff_follow_off_the_push_ff_leans_in_the_climb_and_hold_but_not_in_follow(phase, on):
+    assert C.Params().push_ff_follow is True
+    tw, _ = _ff_command(phase, False, ff_follow=False)
     assert math.hypot(tw[0], tw[1]) == pytest.approx(math.hypot(0.2, 0.2) if on else 0.0)

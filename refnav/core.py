@@ -89,6 +89,7 @@ class Params:
     push_max_mps: float = 0.15                  # cancel it, up to this, in the hold and in follow (skybeta adapter)
     push_ff_fwd_mps: float = 0.0                # a constant body-frame (forward, right) velocity added in the air (climb,
     push_ff_right_mps: float = 0.0              # hold, follow) to cancel a known steady push (skybeta adapter)
+    push_ff_follow: bool = True                 # False: push_ff in the climb and hold only; follow's P loop holds the path
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
