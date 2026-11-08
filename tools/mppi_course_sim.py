@@ -105,6 +105,8 @@ PRESETS = {
                     depth_delay_s=0.10, texture_holes=0.25, tau_true=0.80, act_delay_s=0.10, acc_max=3.0, vel_noise=0.04,
                     yaw_noise_deg=0.6),
 }
+# realpush with the response Hinson fitted on the REAL drone (160449, weakly identified): tau 0.55 s + 0.30 s dead
+PRESETS["realfit"] = Errors(**{**PRESETS["realpush"].__dict__, "tau_true": 0.55, "act_delay_s": 0.30})
 
 
 class CourseWorld:
@@ -172,6 +174,7 @@ def _rot(th: float) -> np.ndarray:
 
 def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], seed: int = 3,
         keep_frames: bool = False, speed: float | None = None, matched: bool = False, use_yaw: bool = True,
+        model: tuple[float, float] | None = None, caps: tuple[float, float] | None = None,
         hover_s: float = 2.0, hover_push: bool = False, hover_learn: bool = False) -> dict:
     course_dir = Path(course_dir)
     cm = CourseMap.load(course_dir / "course_sdf.npz")
@@ -184,6 +187,10 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     from nav.local_nav import LocalNavParams
     from nav.mppi import MppiParams
     mp = MppiParams(tau=err.tau_true, dead_time_s=err.act_delay_s) if matched else None
+    if model is not None:                                        # MPPI's own model + the flight caps (mppi_follow)
+        sp = speed or 0.45
+        vmax, umax = caps if caps is not None else (max(0.15, 1.5 * sp), max(0.30, 3.0 * sp))
+        mp = MppiParams(tau=model[0], dead_time_s=model[1], v_max=vmax, v_lat=min(0.5, vmax), u_max=umax)
     nav = LocalNav(wps, launch, yaw0, nav=LocalNavParams(v_cruise=speed) if speed else None, mppi=mp)
     nav.mppi.debug_samples = 120 if keep_frames else 0
     p = nav.mppi.p
@@ -386,18 +393,20 @@ if __name__ == "__main__":
     preset = next((a.split("=")[1] for a in sys.argv if a.startswith("--errors=")), "old_noise")
     speed = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--speed=")), None)
     matched = "--matched" in sys.argv
+    model = next((tuple(float(v) for v in a.split("=")[1].split(",")) for a in sys.argv if a.startswith("--model=")), None)
+    caps = next((tuple(float(v) for v in a.split("=")[1].split(",")) for a in sys.argv if a.startswith("--caps=")), None)
     use_yaw = "--nopush" not in sys.argv
     hl = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--hoverlearn=")), None)
     hp = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--hoverpush=")), None)
     out = args[2] if len(args) > 2 else None
     log = fly(args[0], args[1], err=PRESETS[preset], seed=seed, keep_frames=out is not None, speed=speed, matched=matched,
-              use_yaw=use_yaw, hover_s=hl or hp or 2.0, hover_push=(hl or hp) is not None, hover_learn=hl is not None)
+              use_yaw=use_yaw, model=model, caps=caps, hover_s=hl or hp or 2.0, hover_push=(hl or hp) is not None, hover_learn=hl is not None)
     if out:
         render(log, out)
     keep = ("ended", "follow_s", "avg_speed", "min_clearance", "min_clearance_at", "touched", "max_est_error",
             "final_est_error", "land_err_to_last_wp", "push_est_body", "follow_start_xy")
     print(json.dumps({"route": Path(args[1]).stem, "errors": preset, "seed": seed, "speed": speed or 0.45,
-                      "model": "matched" if matched else "default", "push_est": use_yaw,
+                      "model": (f"{model[0]}/{model[1]}+caps{caps or ''}" if model else "matched" if matched else "default"), "push_est": use_yaw,
                       "hover": "learn" if hl else ("push" if hp else "still"),
                       **{k: (round(v, 3) if isinstance(v, float) else v) for k, v in log.items() if k in keep}}),
           flush=True)
