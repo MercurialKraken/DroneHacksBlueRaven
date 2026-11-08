@@ -4,6 +4,7 @@ waypoints (courses/<course>/routes/<route>.json, forward/left from the take-off 
     ros2 launch blueraven_skybeta refnav.launch.py                                 # the drone: full course, courses/ACTIVE
     ros2 launch blueraven_skybeta refnav.launch.py course:=v3-published route:=route_v5
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_stage1   # through CP2 and land
+    ros2 launch blueraven_skybeta refnav.launch.py nav:=mppi                       # Arnav's MPPI follows (reads depth)
     ros2 launch blueraven_skybeta refnav.launch.py route:=route_v6_start2_sim use_sim_time:=true \
         depth_topic:=/camera/depth/image_raw depth_info_topic:=/camera/depth/camera_info \
         odom_to_ned_yaw_offset_rad:=-1.5708                                          # the T4 simulator
@@ -38,6 +39,8 @@ def generate_launch_description():
             'height_m': LaunchConfiguration('height_m'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'depth_mode': LaunchConfiguration('depth_mode'),
+            'nav': LaunchConfiguration('nav'),
+            'mppi_v_cruise_mps': PythonExpression(['float(', LaunchConfiguration('mppi_v_cruise_mps'), ')']),
             'depth_topic': LaunchConfiguration('depth_topic'),
             'depth_info_topic': LaunchConfiguration('depth_info_topic'),
             # the pilot arms and switches whenever he is ready after "wait -> arm"; the descent ends only when PX4
@@ -47,8 +50,10 @@ def generate_launch_description():
             'odom_to_ned_yaw_offset_rad': offset}],
     )
     return LaunchDescription([
-        # blind on the drone: the README forbids reading /oak/* images in flight (it delays the VIO PX4 flies on)
+        # blind: refnav's own depth checks off. nav:=mppi reads /oak/stereo/image_raw (on-camera depth) whatever this is
         DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
+        DeclareLaunchArgument('nav', default_value='refnav', description="follower: 'refnav' or 'mppi'"),
+        DeclareLaunchArgument('mppi_v_cruise_mps', default_value='0.15', description="MPPI's cruise speed, m/s"),
         DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
         DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
         DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),

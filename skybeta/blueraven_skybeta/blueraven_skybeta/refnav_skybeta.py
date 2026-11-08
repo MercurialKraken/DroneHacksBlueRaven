@@ -29,7 +29,8 @@ HOLD_S = 0.25               # a shorter silence than STALE holds position (zero 
 CORR_MAX_MPS = 0.25         # position-loop share of the twist: past the 0.20 m off the path the reference waits at
 XY_MAX_MPS = 0.5            # the 0.3 m/s routes plus their corner lead (<= 0.23 m/s); a jam never gets 1-1.5 m/s
 VEL_LAG_S = 0.55            # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone; the T4 sim fits 0.9 s + 0.6 s dead time
-TRACK_LAND_M = 0.40         # this far from the setpoint in follow: stop and land where it is
+TRACK_LAND_M, TRACK_LAND_S = 0.40, 0.5  # this far from the setpoint for 0.5 s in follow (T4 cuVSLAM glitched 1.06 m for
+                                        # 0.13 s): stop and land where it is
 STUCK_S, STUCK_M, STUCK_ASKED_M = 3.0, 0.10, 0.45  # moved < 0.10 m in 3 s while commanded >= 0.45 m (a jam): land
 LAND_HOLD_MPS = 0.15        # the descent's pull back over its landing point
 _Q_X180 = (0.0, 1.0, 0.0, 0.0)  # FLU <-> FRD, and ENU-about-the-pad <-> NED-about-the-pad
@@ -115,11 +116,13 @@ class Track:
 
     def __init__(self) -> None:
         self.hist: list[tuple[float, tuple[float, float], float]] = []    # (t, pad (n, e), commanded m/s)
+        self.t_far: float | None = None
 
     def check(self, now: float, setpoint: tuple[float, ...], pos: tuple[float, ...], cmd_mps: float) -> str | None:
         err = math.dist(setpoint[:2], pos[:2])
-        if err > TRACK_LAND_M:
-            return f"tracking error {err:.2f} m from the setpoint (TRACK_LAND_M {TRACK_LAND_M:g})"
+        self.t_far = (self.t_far if self.t_far is not None else now) if err > TRACK_LAND_M else None
+        if self.t_far is not None and now - self.t_far >= TRACK_LAND_S:
+            return f"tracking error {err:.2f} m from the setpoint for {TRACK_LAND_S:g} s (TRACK_LAND_M {TRACK_LAND_M:g})"
         self.hist = [h for h in self.hist if now - h[0] <= STUCK_S] + [(now, pos[:2], cmd_mps)]
         if now - self.hist[0][0] < STUCK_S * 0.9:
             return None
@@ -208,7 +211,7 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
         return None, None
     tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps)
     if out.phase != "follow" or tw is None:
-        track.hist = []
+        track.hist, track.t_far = [], None
         return tw, None
     why = track.check(now, out.setpoint, v.pos, math.hypot(tw[0], tw[1]))
     if why:

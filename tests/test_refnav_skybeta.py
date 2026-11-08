@@ -409,11 +409,14 @@ def test_without_the_lead_the_sims_lag_overshoots_the_cp4_corner():
     assert max(near) > 0.1
 
 
-def test_far_from_the_setpoint_it_stops_and_lands_there():
+def test_far_from_the_setpoint_for_half_a_second_it_stops_and_lands_there():
     track, v = S.Track(), C.Vehicle(pos=(0.0, 0.0, -0.7), heading=0.0)
     out = C.Output("follow", setpoint=(0.45, 0.0, -0.7, 0.0), velocity=(0.3, 0.0), yawspeed=0.0, stream=True)
     descent = S.Descent()
-    tw, why = S.command(out, v, S.Pad(0, 0, 0, 0), descent, track, {"px4_link": True}, 1.0, 1.0, 1.0, 45.0, 0.0)
+    sends = [S.command(out, v, S.Pad(0, 0, 0, 0), descent, track, {"px4_link": True}, t, t, t, 45.0, 0.0)
+             for t in np.arange(1.0, 1.0 + S.TRACK_LAND_S + 1e-9, DT)]
+    assert all(why is None for _, why in sends[:-1])                  # a 0.13 s odometry glitch (T4 t6r3) never lands
+    tw, why = sends[-1]
     assert tw == (0.0, 0.0, 0.0, 0.0) and why.startswith("tracking error")
     assert descent.target == (0.0, 0.0)                             # the descent holds where it is, not the setpoint
 

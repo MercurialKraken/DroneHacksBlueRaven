@@ -77,11 +77,11 @@ by default), so nobody arms into the square by accident.
 
 - **NTP off** before the bench or a flight: `sudo timedatectl set-ntp false`. A clock step over 0.5 s
   restarts the whole stack. Turn it back on (`set-ntp true`) when done, before power-off.
-- **Nothing may subscribe to `/oak/*/image_raw` or `/oak/*/image_raw/compressed`**: no image bags, no
-  Foxglove camera panels, no `ros2 topic hz` on them. Delivering those out of the driver (JPEG encoding,
-  or copying the raw colour frames out of its NITROS path) delays the vision PX4 flies on past its 200 ms
-  limit (Arnav's tests, 2026-11-07). **No depth node in flight**, not even on `/oak/*/image_mono`: any
-  out-of-process image reader competes with cuVSLAM's feed (Arnav's repeat test). Nothing reads camera images.
+- **Read only `/oak/stereo/image_raw` (on-camera depth); never the `/oak/*/image_raw` colour or mono
+  streams** (nor `/compressed`, image bags, Foxglove camera panels or `ros2 topic hz` on them). Measured on
+  skybeta-09, 2026-11-07, with on-camera depth: a subscriber of `/oak/stereo/image_raw` (640x400, 30 Hz) in a
+  separate container cost ~1 ms of EV age (p50 25 -> 26 ms, p90 27 -> 28 ms), EV fusion 100%, VIO 29-30 Hz.
+  Readers of the raw colour/mono frames delayed the vision PX4 flies on past its 200 ms limit (Arnav's tests).
 - **Nobody in front of the camera** during a run.
 - Props off for the first run of any new code.
 
