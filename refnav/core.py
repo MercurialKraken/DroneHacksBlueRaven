@@ -54,6 +54,8 @@ HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 1.0   # a plan holds while the aircraft si
 
 
 DEPTH_MODES = ("blind", "assisted")
+NAVS = ("refnav", "mppi")                       # mppi: the node supplies the follow velocity and heading (Mission.ext)
+EXT_BLOCKED_LAND_S = 2.0                        # MPPI BLOCKED (every rollout crashes) this long: land
 PATH_SOURCES = ("map", "waypoints")
 LEG_MAX_M, REACH_MAX_M = 8.0, 10.0              # the course is ~6 m across: longer is a typo (Chelsea's load_route)
 
@@ -73,6 +75,7 @@ class Params:
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
+    nav: str = "refnav"
     depth_mode: str = "assisted"               # blind: waypoints and map only, no depth gates or checks, no map_align correction
     depth_stale_s: float = 0.5
     depth_lost_land_s: float = 3.0
@@ -118,6 +121,8 @@ class Params:
 
     def validate(self) -> None:
         """Raise ValueError for a route or a pair of limits the mission cannot fly."""
+        if self.nav not in NAVS:
+            raise ValueError(f"nav must be one of {', '.join(NAVS)}, not {self.nav!r}")
         if self.depth_mode not in DEPTH_MODES:
             raise ValueError(f"depth_mode must be one of {', '.join(DEPTH_MODES)}, not {self.depth_mode!r}")
         prev = (0.0, 0.0)
@@ -283,6 +288,8 @@ class Mission:
         self.corr: F.SE2 = F.SE2()                  # map-based drift correction of PX4's estimate (identity until one arrives)
         self.corr_t: float | None = None
         self.cmd: F.Command | None = None
+        self.ext: dict[str, Any] | None = None      # nav mppi: {vn, ve, yaw (pad NED), state, depth_age, ...} from the node
+        self.t_blocked: float | None = None
 
     def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
@@ -605,6 +612,8 @@ class Mission:
 
     def _follow(self, now: float, dt: float, out: Output, raw: Vehicle) -> None:
         """The path lives in the corrected frame; what goes to PX4 is mapped back into its own estimate's frame."""
+        if self.p.nav == "mppi":
+            return self._follow_ext(now, dt, out, raw)
         p, fol, v, back = self.p, self.follower, self._corrected(raw), self.corr.inverse()
         if p.depth_mode == "blind":
             self.s_limit = math.inf                          # nothing observes the path: the speed profile alone paces it
@@ -632,6 +641,28 @@ class Mission:
         elif self.cmd.done:
             self._land(now, out, "route complete")
 
+    def _follow_ext(self, now: float, dt: float, out: Output, raw: Vehicle) -> None:
+        """MPPI flies: its velocity goes out as the feed-forward with the setpoint on the aircraft (no position pull).
+        No command yet holds still; SLOW never lands by itself, only depth silent for depth_lost_land_s does."""
+        e = self.ext or {"vn": 0.0, "ve": 0.0, "yaw": None, "state": "WAIT", "depth_age": math.inf}
+        moving = e["state"] in ("GO", "SLOW")
+        self.sp[0], self.sp[1] = raw.pos[0], raw.pos[1]
+        before = self.sp[3]
+        if e["yaw"] is not None:
+            self._slew_yaw(e["yaw"], dt)
+        out.velocity = (e["vn"], e["ve"]) if moving else (0.0, 0.0)
+        out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
+        self.t_blocked = (self.t_blocked or now) if e["state"] == "BLOCKED" else None
+        silent = e["depth_age"] if e["depth_age"] is not None else math.inf
+        if e["state"] == "ARRIVED":
+            self._land(now, out, "route complete")
+        elif e["state"] == "STUCK":
+            self._land(now, out, "MPPI stuck: no progress along the route")
+        elif self.t_blocked is not None and now - self.t_blocked > EXT_BLOCKED_LAND_S:
+            self._land(now, out, f"MPPI blocked for {EXT_BLOCKED_LAND_S:g} s: every rollout crashes")
+        elif min(silent, now - self.t_phase) > self.p.depth_lost_land_s:
+            self._land(now, out, f"MPPI: depth silent for more than {self.p.depth_lost_land_s:g} s")
+
     def _on_ground(self, now: float, v: Vehicle) -> bool:
         p = self.p
         level = v.q is not None and D.quat_up_cos(*v.q) >= math.cos(math.radians(p.touchdown_tilt_deg))
@@ -653,6 +684,7 @@ class Mission:
                 "depth_age_s": None if self.depth_t is None else round(now - self.depth_t, 3),
                 "depth_valid_frac": None if self.last_valid_frac is None else round(self.last_valid_frac, 3),
                 "depth_reject": None if self.depth_reject is None else self.depth_reject[1],
+                "mppi": self.ext,
                 "health_bad_s": (None if math.isinf(self.health.bad_for(now)) else round(self.health.bad_for(now), 2)),
                 **self._follow_status(), **self.counts}
 
