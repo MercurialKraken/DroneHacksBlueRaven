@@ -558,3 +558,15 @@ def test_a_wild_fix_is_not_applied():
     m._apply_fix(W.Inputs(now=1.0, pos=(0.325, 0.0, 0.4), vel=(0, 0), yaw_err=0, t_odom=1, state=None, t_state=1,
                           ahead_m=0.3, t_depth=1), 0.325, 0.0)
     assert m.delta == (0.0, 0.0) and m.fixes[-1][3] is None
+
+def test_dashboard_view_matches_the_t4_dashboard():
+    """The T4 dashboard unpacks 'correction' as (north, east, yaw) and draws PX4's estimate + correction: so three
+    numbers, and targets / look in the TRUE pad frame (estimate + correction)."""
+    m = W.WallSeek(full_params()); m.route = load_full_route()
+    m.route_pts, m.delta = [(0.35, 0.02)], (0.05, -0.03)
+    v = m.dashboard_view()
+    cx, cy, cyaw = v["correction"]
+    assert (cx, cy, cyaw) == (0.05, -0.03, 0.0)
+    assert v["targets"][0] == [0.4, -0.01]                                   # P1 moved by the correction
+    assert v["targets"][1] == [round(c, 3) for c in m.map_to_pad(-0.662, 2.265)]    # P2: its true place
+    assert W.WallSeek(W.Params()).dashboard_view()["correction"] == [0.0, 0.0, 0.0]

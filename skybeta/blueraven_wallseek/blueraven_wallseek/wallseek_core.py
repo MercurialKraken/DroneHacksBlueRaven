@@ -699,10 +699,13 @@ class WallSeek:
         'look' = the point being steered to). Before P1 is fixed by depth: the PLANNED route (P1 at its nominal 0.48 m
         south-west of P2's 45 deg leg); after: the actual one."""
         p = self.p
-        if p.full_course and self.route is not None:         # every named point where the ESTIMATE must reach it
-            p1 = self.route_pts[0] if self.route_pts else (p.gap_n_m + 0.438 - p.standoff_m, 0.0)
-            pts = [p1] + [self._est(*pt) for _, pt in (self.named or
-                                                         [(s.get("name", ""), s["leg"]) for s in self.route["steps"] if "leg" in s])]
+        full = p.full_course and self.route is not None
+        dn, de = self.delta if full else (0.0, 0.0)
+        if full:     # TRUE positions: the dashboard draws PX4's estimate with 'correction' added, so targets match it
+            p1 = ((self.route_pts[0][0] + dn, self.route_pts[0][1] + de) if self.route_pts
+                  else (p.gap_n_m + 0.438 - p.standoff_m, 0.0))
+            pts = [p1] + [self.map_to_pad(*pt) for _, pt in (self.named or
+                                                             [(s.get("name", ""), s["leg"]) for s in self.route["steps"] if "leg" in s])]
         elif self.route_pts is not None:
             pts = self.route_pts
         else:                                                # nominal P1: Wall A's face is 0.438 m north of the gap centre
@@ -717,8 +720,12 @@ class WallSeek:
             look = [round(c, 3) for c in self.turn[2]]
         elif self.phase in ("pause", "rise", "fix", "clear") and self.hold_pt is not None:
             look = [round(c, 3) for c in self.hold_pt]
+        if look is not None:
+            look = [round(look[0] + dn, 3), round(look[1] + de, 3)]
+        # 'correction' is refnav's (north, east, yaw) shape: the dashboard unpacks exactly three (two broke its
+        # estimate trail on the T4, darion/full-course fe23c2d)
         return {"phase": self.phase, "why": self.why, "program": "wallseek",
-                "correction": [round(c, 3) for c in self.delta], "fixes": self.fixes,
+                "correction": [round(dn, 3), round(de, 3), 0.0], "fixes": self.fixes,
                 "targets": [[round(n, 3), round(e, 3)] for n, e in pts],
                 "path": [[0.0, 0.0]] + [[round(n, 3), round(e, 3)] for n, e in pts], "look": look}
 
