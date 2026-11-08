@@ -417,7 +417,7 @@ def test_without_the_lead_the_sims_lag_overshoots_the_cp4_corner():
 
 def test_far_from_the_setpoint_for_half_a_second_it_stops_and_lands_there():
     track, v = S.Track(), C.Vehicle(pos=(0.0, 0.0, -0.7), heading=0.0)
-    out = C.Output("follow", setpoint=(0.45, 0.0, -0.7, 0.0), velocity=(0.3, 0.0), yawspeed=0.0, stream=True)
+    out = C.Output("follow", setpoint=(S.TRACK_LAND_M + 0.05, 0.0, -0.7, 0.0), velocity=(0.3, 0.0), yawspeed=0.0, stream=True)
     descent = S.Descent()
     sends = [S.command(out, v, S.Pad(0, 0, 0, 0), descent, track, {"px4_link": True}, t, t, t, 45.0, 0.0)
              for t in np.arange(1.0, 1.0 + S.TRACK_LAND_S + 1e-9, DT)]

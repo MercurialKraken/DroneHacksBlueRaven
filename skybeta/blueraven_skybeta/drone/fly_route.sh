@@ -3,6 +3,7 @@
 #
 #   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go          # full checks, then GO
 #   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go --skip   # the minimum to reach GO
+#   NAV=mppi OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go   # MPPI follows (default NAV=refnav)
 #   ./fly_route.sh status     # (second terminal) one line per second until Ctrl-C
 #   ./fly_route.sh stop       # stops the program + recording, prints the bag path
 #   ./fly_route.sh build      # rebuild blueraven_skybeta after copying new code (never restarts the stack)
@@ -16,6 +17,7 @@ set -uo pipefail
 
 C=skybeta-stack                                   # the organizers' stack container
 PROGRAM=refnav
+NAV=${NAV:-refnav}                                # follower: refnav (blind) or mppi (MPPI on live depth)
 ROUTE=${ROUTE:-route_v7_cp2_simple}               # a route file name, without .json
 COURSE=${COURSE:-start-2026-11-07-tape}           # the course folder (courses/<COURSE>/routes/)
 HEIGHT=${HEIGHT:-0.7}
@@ -44,6 +46,7 @@ usage() {
 usage (on skybeta-09, in ~/team_ws):
   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go          # full checks, then GO
   OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go --skip   # the minimum to reach GO
+  NAV=mppi OFFSET=0.0 ROUTE=route_v7_cp2_simple ./fly_route.sh go   # MPPI follows (default NAV=refnav)
   ./fly_route.sh status    # one line per second (second terminal)
   ./fly_route.sh stop      # stop the program + recording
   ./fly_route.sh build     # rebuild blueraven_skybeta
@@ -254,7 +257,7 @@ go() {
   if (( full )); then N=16; else N=9; fi
   route_lookup
   echo "==================== fly_route.sh $mode ===================="
-  echo "PROGRAM $PROGRAM | ROUTE $ROUTE (sha1 ${SHA:-?}, course $COURSE) | OFFSET ${OFFSET:-UNSET} | HEIGHT $HEIGHT | DEPTH_BAG $DEPTH_BAG"
+  echo "PROGRAM $PROGRAM | NAV $NAV | ROUTE $ROUTE (sha1 ${SHA:-?}, course $COURSE) | OFFSET ${OFFSET:-UNSET} | HEIGHT $HEIGHT | DEPTH_BAG $DEPTH_BAG"
   echo
 
   step "OFFSET set and numeric"
@@ -333,7 +336,7 @@ go() {
   pass "recording ~/team_ws/bags/$run"
 
   step "refnav launched"
-  local launch="ros2 launch blueraven_skybeta refnav.launch.py course:=$COURSE route:=$ROUTE height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET"
+  local launch="ros2 launch blueraven_skybeta refnav.launch.py course:=$COURSE route:=$ROUTE height_m:=$HEIGHT odom_to_ned_yaw_offset_rad:=$OFFSET nav:=$NAV"
   docker exec -d "$C" bash -ic "cd $WS && source install/setup.bash && exec $launch > $BAGS/$run.launch.log 2>&1" \
     || fail "docker exec failed starting: $launch"
   pass "log ~/team_ws/bags/$run.launch.log"

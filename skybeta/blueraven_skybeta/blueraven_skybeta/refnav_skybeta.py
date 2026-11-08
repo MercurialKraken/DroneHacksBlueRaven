@@ -29,7 +29,7 @@ HOLD_S = 0.45               # skybeta-09 odometry arrives bunched (gaps to 0.35 
 CORR_MAX_MPS = 0.25         # position-loop share of the twist: past the 0.20 m off the path the reference waits at
 XY_MAX_MPS = 0.5            # the 0.3 m/s routes plus their corner lead (<= 0.23 m/s); a jam never gets 1-1.5 m/s
 VEL_LAG_S = 0.55            # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone; the T4 sim fits 0.9 s + 0.6 s dead time
-TRACK_LAND_M, TRACK_LAND_S = 0.40, 0.5  # this far from the setpoint for 0.5 s in follow (T4 cuVSLAM glitched 1.06 m for
+TRACK_LAND_M, TRACK_LAND_S = 1.00, 0.5  # this far from the setpoint for 0.5 s in follow (T4 cuVSLAM glitched 1.06 m for
                                         # 0.13 s): stop and land where it is
 STUCK_S, STUCK_M, STUCK_ASKED_M = 3.0, 0.10, 0.45  # moved < 0.10 m in 3 s while commanded >= 0.45 m (a jam): land
 LAND_HOLD_MPS = 0.15        # the descent's pull back over its landing point
