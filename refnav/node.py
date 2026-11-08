@@ -70,9 +70,9 @@ class RefNav(Node):
     def _map_builder(self, prm: C.Params):
         """With the course map: the route as an elastic band kept clear of the map. Without: plain arcs."""
         root = Path(__file__).resolve().parents[1]
-        path = self._param("course_map", str(root / "maps" / "course_sdf.npz"))
-        course = self._param("course_yaml", str(root / "maps" / "course.yaml"))
-        key = self._param("launch_key", "launch_sim")      # the real course: launch
+        path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
+        course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value
+        key = self.declare_parameter("launch_key", "launch_sim").value      # the real course: launch
         margin = float(self.declare_parameter("map_margin_m", 0.20).value)
         shift = float(self.declare_parameter("map_max_shift_m", 0.3).value)
         if not path:
@@ -90,34 +90,6 @@ class RefNav(Node):
         self.get_logger().info(f"course map {path}, launch {key}: the path keeps {clear:.2f} m clear where it fits")
         return map_route.builder(cm, launch, prm.height_m + launch["z"], clear, shift)
 
-    def _param(self, name: str, default: Any) -> Any:
-        """A parameter's value, declared on first use: the route planner and the map builder share some."""
-        if not self.has_parameter(name):
-            self.declare_parameter(name, default)
-        return self.get_parameter(name).value
-
-    def _planned_route(self, height_m: float) -> list[tuple[float, float]]:
-        """The route planned now from the course map (nav.route_planner): same map and yaml, same route."""
-        from nav.route_planner import gate_problems, plan_from_files
-        root = Path(__file__).resolve().parents[1]
-        sdf = self._param("course_map", str(root / "maps" / "course_sdf.npz"))
-        course = self._param("course_yaml", str(root / "maps" / "course.yaml"))
-        key = self._param("launch_key", "launch_sim")      # the real course: launch
-        cp4 = self._param("cp4_option", "window")           # or "Gate B"
-        try:
-            plan = plan_from_files(sdf, course, key, height_m, cp4)
-        except (OSError, KeyError, ValueError) as e:
-            raise SystemExit(f"refnav: no route from the course map ({e}); route_source:=file flies route.json"
-                             ) from None
-        log = self.get_logger()
-        log.info(f"route planned from the course map ({key}): {plan.summary()}")
-        for w in plan.warnings:
-            log.warning(f"route: {w}")
-        problems = gate_problems(plan)
-        if problems:
-            raise SystemExit("refnav: refusing the planned route: " + "; ".join(problems))
-        return plan.route
-
     def __init__(self) -> None:
         super().__init__("refnav")
         doc = load_route(self)
@@ -126,13 +98,6 @@ class RefNav(Node):
             prm, unknown = C.params_from_doc(doc)
             overrides = {k: self.declare_parameter(k, v).value for k, v in vars(prm).items() if k != "route"}
             prm, _ = C.params_from_doc(doc, overrides)
-            # route_source: map (default) plans the route now from the course map; file flies route_file's points
-            source = self._param("route_source", "map")
-            if source not in ("map", "file"):
-                raise ValueError(f"route_source must be map or file, not {source!r}")
-            if source == "map":
-                given = doc.get("params", {}) if isinstance(doc, dict) else {}
-                prm, _ = C.params_from_doc({"route": self._planned_route(prm.height_m), "params": given}, overrides)
         except ValueError as e:
             raise SystemExit(f"refnav: {e}") from None
         if unknown:

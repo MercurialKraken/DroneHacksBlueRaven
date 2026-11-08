@@ -5,10 +5,8 @@ odometry and `/skybeta/state`, and flies through the organizers' flight interfac
 `/skybeta/setpoint/pose` or `/skybeta/setpoint/twist`. It **never** publishes `/fmu/*`, never arms and
 never requests a mode. The safety pilot arms and switches to Position; that is the go signal.
 
-| Mission | What it does | Needs |
-|---|---|---|
-| `hover` (**default**) | take off to `height_m`, hold `hover_s` over the take-off point, descend until landed and disarmed | odometry only: no map, no route |
-| `course` | plan the route from `maps/` at start-up (`nav/route_planner.py`), follow it, land at its end | the course map; optionally depth (`wall_centring:=true`) |
+`blueraven.launch.py` runs the hover: take off to `height_m`, hold `hover_s` over the take-off point, descend
+until landed and disarmed. It needs odometry only: no map, no route.
 
 Everything below is **written from the docs and the unit tests; none of it has run on the drone yet.**
 Check each step's expected output and stop at the first surprise.
@@ -56,7 +54,7 @@ ros2 bag record -s mcap -o /root/team_ws/bags/hover_NN \
   /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude /tf /tf_static
 
 # --- NODE: our node (drone still on the launch mark). Add odom_to_ned_yaw_offset_rad:=<rad> only if agreed ---
-ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
+ros2 launch blueraven_skybeta blueraven.launch.py height_m:=0.5 hover_s:=30.0
 
 # --- WATCH: watch it ---
 ros2 topic echo /blueraven/mission/status                       # INIT -> WAIT_OFFBOARD -> ...
@@ -110,7 +108,7 @@ echo <reviewed-sha> > ~/team_ws/src/blueraven/VERSION_FLOWN
 
 ```bash
 cd /root/team_ws && team_build.sh --packages-select blueraven_skybeta && source install/setup.bash
-ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
+ros2 launch blueraven_skybeta blueraven.launch.py height_m:=0.5 hover_s:=30.0
 ```
 
 For scored runs (later, the team decides): point the stack at our package in `/etc/skybeta/drone.env`
@@ -204,34 +202,19 @@ and takes over at **any** unexpected motion.
 Pass (sw-claude's checklist step 1): no VIO jumps; horizontal drift p95 under 0.15 m; lands and disarms
 by itself.
 
-## 6. Course mission (later)
-
-`mission:=course launch_key:=launch cp4:=gate_b` (or `window`). The route is planned at start-up and
-refused (nothing published) if a checkpoint can't be crossed. `keep_centre_m` (0.02) keeps the route
-centred in corridors. `wall_centring:=true` also steers toward the real corridor centre seen in Darion's
-depth (`/blueraven/depth/image_raw`; run his depth node too): **off until it has been checked on real
-depth**. With map_align running, the node publishes `/blueraven/map_from_odom_init` once and follows
-`/blueraven/map_from_odom`.
-
 ## Parameters
 
 | Name | Default | |
 |---|---|---|
-| `mission` | `hover` | `hover` or `course` |
 | `height_m` | 0.70 | flight height above the launch point |
-| `hover_s` | 5.0 | hover: seconds at height |
+| `hover_s` | 5.0 | seconds at height |
 | `launch_key` | `launch` | `maps/course.yaml` entry: `launch` (real mark) or `launch_sim` |
-| `cruise_mps` | 0.30 | course speed |
-| `cp4` | `gate_b` | `gate_b` or `window` |
-| `keep_centre_m` | 0.02 | planner centring (< 0: the tight default) |
-| `wall_centring` | false | course: depth-based corridor centring |
 | `odom_to_ned_yaw_offset_rad` | 0.0 | measured frame offset: passed to the interface (poses) and our node (twists) |
 | `anchor_setpoints` | false | the interface's translation fix |
 
 ## Not tested
 
 Never run under ROS or on the drone. Tested only as unit tests against a kinematic toy drone
-(`tests/test_skybeta_mission.py`, `tests/test_wall_centring*.py`): the phase logic, the aborts, restarts,
-the hover, the drift interface and centring. Unknown until the bench: real `/skybeta/state` contents, the
+(`tests/test_skybeta_mission.py`): the phase logic, the aborts, restarts, the hover and the drift interface. Unknown until the bench: real `/skybeta/state` contents, the
 interface's behaviour at the handover, PX4's tracking, the frame offset, and whether a twist descent
 lands and disarms cleanly.

@@ -7,7 +7,6 @@ SmoothPath, so a planner change shows up identically in either follower.
     path.length, path.s, path.xyz, path.psi, path.k, path.clearance       # sampled every ds
     s = path.closest_s(position, s_lo=s_prev - 0.2, s_hi=s_prev + 0.6)  # windowed projection
     path.point_at(s), path.heading_at(s), path.curvature_at(s)
-    checkpoint_crossings(path, course_yaml["checkpoints"], drone_radius=0.28)
 
 Construction:
   * Each interior corner becomes a circular arc (a fillet) tangent to both legs. Its radius is the
@@ -272,32 +271,3 @@ def _turn_mid(arc: tuple) -> np.ndarray:
     a = ang0 + sweep / 2
     return np.array([C[0] + r * math.cos(a), C[1] + r * math.sin(a)])
 
-
-def checkpoint_crossings(path: SmoothPath, checkpoints: list[dict[str, Any]], drone_radius: float) -> list[dict[str, Any]]:
-    """For each checkpoint line in course.yaml form ({id, line, direction} or {id, options: [...]}):
-    how far past the line the path's centre gets (within the line's extent), and whether the whole
-    drone crosses it (that distance >= drone_radius). Circles (the pad) are reported by the
-    closest approach of the path's end to the centre."""
-    out = []
-    for cp in checkpoints:
-        for opt in cp.get("options", [cp]):
-            name = cp.get("id", "?") + (f" {opt['name']}" if opt is not cp else "")
-            if "line" in opt:
-                (x0, y0), (x1, y1) = opt["line"]
-                d = _unit(np.asarray(opt["direction"], dtype=float))
-                a = np.array([x0, y0])
-                along = _unit(np.array([x1 - x0, y1 - y0]))
-                L = math.hypot(x1 - x0, y1 - y0)
-                rel = path.xyz[:, :2] - a
-                u = rel @ along                               # position along the line
-                past = rel @ d                                # distance past it, in the travel direction
-                within = (u >= -drone_radius) & (u <= L + drone_radius)
-                beyond = float(past[within].max()) if within.any() else -math.inf
-                out.append({"checkpoint": name, "past_m": round(beyond, 3),
-                            "whole_drone_across": bool(beyond >= drone_radius)})
-            elif "centre" in opt and "outer_radius" in opt:
-                c = np.asarray(opt["centre"], dtype=float)
-                d_end = float(np.linalg.norm(path.xyz[-1, :2] - c))
-                out.append({"checkpoint": name, "end_from_centre_m": round(d_end, 3),
-                            "whole_drone_inside": bool(d_end + drone_radius <= float(opt["outer_radius"]))})
-    return out

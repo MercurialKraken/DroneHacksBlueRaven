@@ -1,5 +1,5 @@
 """nav.path_geometry on synthetic corridors (analytic distance fields): fillets, clearance limits,
-sharp corners, windowed projection, heights and checkpoint crossings. No course numbers."""
+sharp corners, windowed projection, and heights. No course numbers."""
 from __future__ import annotations
 
 import math
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from nav.path_geometry import build_path, checkpoint_crossings, smooth_path  # noqa: E402
+from nav.path_geometry import build_path, smooth_path  # noqa: E402
 
 
 class Boxes:
@@ -98,19 +98,6 @@ def test_heights_ramp_on_legs_and_hold_on_arcs():
     assert p.z[0] == pytest.approx(1.0) and p.z[-1] == pytest.approx(0.8)
     assert np.allclose(p.z[p.k > 0], 0.8)
     assert np.all(np.diff(p.z) <= 1e-12)                                     # never climbs back
-
-
-def test_checkpoint_crossings():
-    p = build_path([(0, 0), (2.0, 0)])
-    cps = [{"id": "CPa", "line": [[1.0, -1.0], [1.0, 1.0]], "direction": [1, 0]},
-           {"id": "CPb", "line": [[1.9, -1.0], [1.9, 1.0]], "direction": [1, 0]},
-           {"id": "CPc", "options": [{"name": "far", "line": [[5, -1], [5, 1]], "direction": [1, 0]}]},
-           {"id": "PAD", "centre": [2.0, 0.0], "outer_radius": 0.5}]
-    r = {x["checkpoint"]: x for x in checkpoint_crossings(p, cps, drone_radius=0.28)}
-    assert r["CPa"]["whole_drone_across"] and r["CPa"]["past_m"] == pytest.approx(1.0)
-    assert not r["CPb"]["whole_drone_across"] and r["CPb"]["past_m"] == pytest.approx(0.1)
-    assert not r["CPc far"]["whole_drone_across"]
-    assert r["PAD"]["whole_drone_inside"]
 
 
 def test_rejects_bad_input():

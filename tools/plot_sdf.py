@@ -8,8 +8,7 @@ field (right):
   colour        signed distance (red inside objects, blue free; clipped at +-1 m)
   black line    the surface (drawn at 2 cm so thin shells like the tube and the net show)
   orange dashes where the drone's centre may go: distance = drone_radius + clearance_margin
-  overlays      launch mark and heading, checkpoint lines with their direction of travel, the
-                landing area and the pad's outer ring (all from the course YAML)
+  overlays      launch mark and heading and the landing area (from the course YAML)
 Needs matplotlib and pyyaml (laptop only).
 """
 from __future__ import annotations
@@ -42,21 +41,6 @@ def draw_course(ax: Any, cfg: dict[str, Any]) -> None:
         ax.annotate("", xy=(L["x"] + 0.4 * math.cos(yaw), L["y"] + 0.4 * math.sin(yaw)), xytext=(L["x"], L["y"]),
                     arrowprops={"arrowstyle": "->", "lw": 1.5})
         ax.text(L["x"] + 0.08, L["y"] - 0.15, "launch", fontsize=7)
-    for cp in cfg.get("checkpoints", []):
-        for opt in cp.get("options", [cp]):
-            if "line" in opt:
-                (x0, y0), (x1, y1) = opt["line"]
-                ax.plot([x0, x1], [y0, y1], "-", color="lime", lw=2.5)
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-                dx, dy = opt.get("direction", (0, 0))
-                ax.annotate("", xy=(mx + 0.35 * dx, my + 0.35 * dy), xytext=(mx, my),
-                            arrowprops={"arrowstyle": "->", "color": "green", "lw": 1.5})
-                label = cp["id"] + (f" {opt['name']}" if opt is not cp else "")
-                ax.text(mx + 0.05, my + 0.05, label, fontsize=7, color="darkgreen", weight="bold")
-            if "centre" in opt and "outer_radius" in opt:
-                ax.add_patch(plt.Circle(opt["centre"], opt["outer_radius"], fill=False, color="lime", lw=2))
-                ax.text(opt["centre"][0], opt["centre"][1], cp["id"], fontsize=7, color="darkgreen",
-                        weight="bold", ha="center")
     for name, z in cfg.get("zones", {}).items():
         if "centre" in z and "radius" in z:
             ax.add_patch(plt.Circle(z["centre"], z["radius"], fill=False, color="green", ls=":", lw=1.2))

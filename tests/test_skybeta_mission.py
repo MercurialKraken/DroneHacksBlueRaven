@@ -13,11 +13,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skybeta" / "blueraven_skybeta"))
 from blueraven_skybeta.mission_core import MissionParams, SkybetaMission  # noqa: E402
-from nav.frames import pose_xyz_yaw  # noqa: E402  (mission_core put the repo on sys.path)
 
 DT = 0.05                                    # the node's 20 Hz tick
 LAUNCH = {"x": 1.0, "y": 2.0, "yaw_deg": 90.0, "z": 0.07}   # mark at (1, 2), facing course north
-ROUTE = [(1.0, 2.0), (1.0, 3.5), (2.5, 3.5)]                 # north 1.5 m, then east 1.5 m (map)
 
 
 class Sim:
@@ -82,8 +80,8 @@ def run(m: SkybetaMission, sim: Sim, t0: float, t1: float, state=True, odom=True
 
 
 def mission(**kw):
-    kw.setdefault("mission", "course")
-    return SkybetaMission(MissionParams(**kw), LAUNCH, ROUTE)
+    kw.setdefault("hover_s", 30.0)
+    return SkybetaMission(MissionParams(**kw), LAUNCH)
 
 
 def to_ready(m, sim):
@@ -116,32 +114,12 @@ def test_waits_streaming_holds_and_never_moves_before_offboard():
     assert all(np.allclose(p, (sim.x, sim.y, sim.z)) for p in poses) and all(c.twist is None for _, c in cmds)
 
 
-def test_full_flight_follows_the_route_lands_and_goes_silent():
-    m, sim = mission(), Sim()
-    t = to_ready(m, sim)
-    switch_to_offboard(t, sim)
-    t, cmds = run(m, sim, t, t + 60.0)
-    assert m.phase == "DONE", m.why
-    phases = [c.phase for _, c in cmds]
-    for ph in ("TAKEOFF", "FOLLOW", "DESCEND"):
-        assert ph in phases
-    twists = [c.twist for _, c in cmds if c.twist is not None]
-    assert max(math.sqrt(vx * vx + vy * vy + vz * vz) for vx, vy, vz, _ in twists) <= 1.5 + 1e-9
-    end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
-    assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15       # landed at the end of the route
-    after = [c for _, c in cmds if c.phase == "DONE"]
-    assert after and all(c.pose is None and c.twist is None for c in after)
-    # cruise is reached: the follow phase is not a crawl (pose-only would be ~0.1 m/s)
-    speeds = [math.hypot(c.twist[0], c.twist[1]) for _, c in cmds if c.phase == "FOLLOW" and c.twist]
-    assert np.percentile(speeds, 75) > 0.2
-
-
 def test_offboard_drop_aborts_for_good_and_goes_silent():
     m, sim = mission(), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t, _ = run(m, sim, t, t + 6.0)
-    assert m.phase in ("FOLLOW", "TAKEOFF")
+    assert m.phase in ("HOVER", "TAKEOFF")
     sim.offboard = False                                           # the pilot takes over
     t, cmds = run(m, sim, t, t + 1.0)
     assert m.phase == "ABORTED"
@@ -172,7 +150,7 @@ def test_stale_state_before_the_switch_stops_streaming_without_aborting():
 
 
 def test_descent_continues_until_landed_and_disarmed():
-    m, sim = mission(), Sim()
+    m, sim = mission(hover_s=2.0), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     while m.phase != "DESCEND":
@@ -187,58 +165,6 @@ def test_descent_continues_until_landed_and_disarmed():
     assert seen_landed_armed and m.phase == "DONE"
 
 
-def test_stack_started_elsewhere_still_flies_the_route_in_course_coordinates():
-    m = mission()
-    sim = Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))    # odom origin not at the mark
-    t = to_ready(m, sim)
-    switch_to_offboard(t, sim)
-    run(m, sim, t, t + 60.0)
-    assert m.phase == "DONE"
-    end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
-    assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15
-
-
-def test_sharp_corners_stop_and_turn_in_place_then_carry_on():
-    m, sim = mission(max_radius_m=0.0), Sim()                       # every corner sharp
-    t = to_ready(m, sim)
-    switch_to_offboard(t, sim)
-    t, cmds = run(m, sim, t, t + 60.0)
-    assert m.phase == "DONE", m.why
-    # at the corner the commanded speed drops to ~0 while the yaw rate turns the nose
-    near = [c for _, c in cmds if c.phase == "FOLLOW" and c.twist
-            and abs(c.twist[3]) > math.radians(20) and math.hypot(c.twist[0], c.twist[1]) < 0.08]
-    assert near, "never stopped to turn at the sharp corner"
-    end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
-    assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15
-
-
-# ---------------------------------------------------------------- map_align's map <- odom (drift)
-def drift(t: float, t0: float) -> np.ndarray:
-    """odom's drift from the truth since t0: 3 cm/s sideways creep and 0.6 deg/s of yaw, about the
-    odom origin. truth map pose = T_init . D(t) . odom pose. Twists act in odom, as PX4's do (its
-    estimator runs on the same drifting VIO)."""
-    a = max(0.0, t - t0)
-    return pose_xyz_yaw(0.0, -0.03 * a, 0.0, math.radians(0.6 * a))
-
-
-def fly_with_drift(correct: bool, stop_corrections_at: float | None = None):
-    m, sim = mission(), Sim()
-    t = to_ready(m, sim)
-    T_init = m.T_map_odom.copy()
-    t0 = t
-    switch_to_offboard(t, sim)
-
-    truth = {}
-
-    def hook(tt, s):
-        if correct and round(tt / DT) % 4 == 0 and (stop_corrections_at is None or tt - t0 < stop_corrections_at):
-            assert m.on_map_from_odom(tt, T_init @ drift(tt, t0)) is None    # map_align at 5 Hz
-        if not s.landed:                    # the model's drift moves a flying drone; measure at touchdown
-            truth["xy"] = (T_init @ drift(tt, t0) @ [s.x, s.y, s.z, 1])[:2]
-    t, _ = run(m, sim, t, t + 60.0, hook=hook)
-    return m, float(np.hypot(*(truth["xy"] - np.array(ROUTE[-1])))), t
-
-
 def test_init_hands_map_from_odom_to_map_align_exactly_once():
     m, sim = mission(), Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
     _, cmds = run(m, sim, 0.0, 4.0)
@@ -251,24 +177,6 @@ def test_corrections_before_init_are_ignored():
     m, sim = mission(), Sim()
     run(m, sim, 0.0, 0.5)
     assert m.on_map_from_odom(0.5, np.eye(4)) is not None and m.T_map_odom is None
-
-
-def test_drift_corrections_keep_the_flight_on_the_course():
-    m, err_corrected, t = fly_with_drift(correct=True)
-    assert m.phase == "DONE", m.why
-    assert err_corrected < 0.15
-    _, err_raw, _ = fly_with_drift(correct=False)
-    assert err_raw > 0.3, "the drift model is too weak to show anything"
-    st = m.status(t)
-    assert st["map_from_odom"] == "live" and st["corr_n"] > 20 and st["corr_step_max_m"] < 0.05
-
-
-def test_stale_corrections_keep_the_last_transform_not_init():
-    m, _, t = fly_with_drift(correct=True, stop_corrections_at=6.0)
-    T_last = m.T_map_odom.copy()
-    assert not np.allclose(T_last, m.T_init)                    # still the last correction, not INIT's
-    st = m.status(t)
-    assert st["map_from_odom"] == "stale" and st["corr_age_s"] > 1.0 and st["corr_from_init_m"] > 0.05
 
 
 def test_corrections_never_change_the_flight_height():
@@ -296,7 +204,7 @@ def test_a_short_odometry_gap_in_flight_does_not_abort():
     m, sim = mission(), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
-    t = until(m, sim, t, "FOLLOW")
+    t = until(m, sim, t, "HOVER")
     t, _ = run(m, sim, t, t + 0.35, odom=False)                    # the bench saw gaps up to ~0.3 s
     t, _ = run(m, sim, t, t + 60.0)
     assert m.phase == "DONE", m.why
@@ -320,8 +228,6 @@ def test_stack_restart_before_takeoff_refixes_map_from_odom_and_resends_it():
     switch_to_offboard(t, sim)
     run(m, sim, t, t + 60.0)
     assert m.phase == "DONE", m.why
-    end_map = (m.T_map_odom @ [sim.x, sim.y, sim.z, 1])[:2]
-    assert np.hypot(*(end_map - np.array(ROUTE[-1]))) < 0.15
 
 
 def test_odometry_reset_without_a_gap_before_takeoff_also_refixes():
@@ -338,7 +244,7 @@ def test_odometry_jump_in_flight_aborts_with_a_hold():
     m, sim = mission(), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
-    t = until(m, sim, t, "FOLLOW")
+    t = until(m, sim, t, "HOVER")
     sim.x += 1.0                                                   # a reset mid-flight
     t, cmds = run(m, sim, t, t + 0.5)
     assert m.phase == "ABORTED" and "jumped" in m.why and sum(c.call_hold for _, c in cmds) == 1
@@ -349,7 +255,7 @@ def test_a_delayed_burst_of_odometry_is_not_a_jump():
     m, sim = mission(), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
-    t = until(m, sim, t, "FOLLOW")
+    t = until(m, sim, t, "HOVER")
     x0, y0, z0, yaw0 = sim.x, sim.y, sim.z, sim.yaw
     for k in range(1, 10):                                         # 1.5 m/s, 9 samples at 30 Hz
         m.on_odom(t, x0 + 1.5 * k / 30.0, y0, z0, yaw0, stamp=t - 0.3 + k / 30.0)
@@ -384,21 +290,8 @@ class OffsetSim(Sim):
         super().apply(cmd, t)
 
 
-def hover(**kw):
-    return SkybetaMission(MissionParams(mission="hover", **kw), LAUNCH)    # no route, no map
-
-
-def test_hover_is_the_default_and_needs_no_route():
-    assert MissionParams().mission == "hover"
-    hover()
-    with pytest.raises(ValueError):
-        SkybetaMission(MissionParams(mission="course"), LAUNCH)
-    with pytest.raises(ValueError):
-        SkybetaMission(MissionParams(mission="Hover"), LAUNCH)
-
-
 def test_hover_takes_off_holds_over_the_takeoff_point_and_lands_there():
-    m, sim = hover(height_m=0.5, hover_s=5.0), Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
+    m, sim = mission(height_m=0.5, hover_s=5.0), Sim(start_odom=(0.8, -1.1, 0.0, math.radians(-35.0)))
     t = to_ready(m, sim)
     x0, y0 = sim.x, sim.y
     switch_to_offboard(t, sim)
@@ -416,7 +309,7 @@ def test_hover_takes_off_holds_over_the_takeoff_point_and_lands_there():
 
 
 def test_hover_lands_straight_down_if_px4_holds_somewhere_else():
-    m, sim = hover(hover_s=10.0), OffsetSim()
+    m, sim = mission(hover_s=10.0), OffsetSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t, cmds = run(m, sim, t, t + 40.0)
@@ -451,7 +344,7 @@ class NoClimbSim(Sim):
 
 
 def test_takeoff_with_a_steady_height_offset_still_hovers_and_lands():
-    m, sim = hover(height_m=0.5, hover_s=3.0), OffsetZSim()
+    m, sim = mission(height_m=0.5, hover_s=3.0), OffsetZSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t, cmds = run(m, sim, t, t + 40.0)
@@ -463,7 +356,7 @@ def test_takeoff_with_a_steady_height_offset_still_hovers_and_lands():
 
 
 def test_a_takeoff_that_never_climbs_lands_instead_of_hanging():
-    m, sim = hover(height_m=0.5, hover_s=30.0), NoClimbSim()
+    m, sim = mission(height_m=0.5, hover_s=30.0), NoClimbSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t, cmds = run(m, sim, t, t + 20.0)
@@ -486,7 +379,7 @@ class RotatedTwistSim(Sim):
 
 
 def descent_drift(**kw):
-    m, sim = hover(height_m=0.7, hover_s=2.0, **kw), RotatedTwistSim()
+    m, sim = mission(height_m=0.7, hover_s=2.0, **kw), RotatedTwistSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t = until(m, sim, t, "DESCEND")
@@ -521,7 +414,7 @@ class LandDetectorSim(Sim):
 
 
 def land_with_detector(**kw):
-    m, sim = hover(height_m=0.5, hover_s=2.0, **kw), LandDetectorSim()
+    m, sim = mission(height_m=0.5, hover_s=2.0, **kw), LandDetectorSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t = until(m, sim, t, "DESCEND")
@@ -547,7 +440,7 @@ def test_a_too_gentle_descent_presses_down_on_the_ground_instead_of_sitting_arme
 
 
 def test_the_descent_never_aborts_or_calls_hold_when_odometry_goes_stale():
-    m, sim = hover(height_m=0.5, hover_s=2.0), LandDetectorSim()
+    m, sim = mission(height_m=0.5, hover_s=2.0), LandDetectorSim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t = until(m, sim, t, "DESCEND")
@@ -557,16 +450,6 @@ def test_the_descent_never_aborts_or_calls_hold_when_odometry_goes_stale():
     desc = [c for _, c in cmds if c.phase == "DESCEND"]
     assert all(c.twist is not None and c.twist[2] < 0 for c in desc)
     assert any("without odometry" in c.why for c in desc)
-
-
-def test_hover_aborts_like_the_course_mission_when_offboard_drops():
-    m, sim = hover(), Sim()
-    t = to_ready(m, sim)
-    switch_to_offboard(t, sim)
-    t = until(m, sim, t, "HOVER")
-    sim.offboard = False
-    _, cmds = run(m, sim, t, t + 1.0)
-    assert m.phase == "ABORTED" and sum(c.call_hold for _, c in cmds) == 1
 
 
 def test_the_package_never_publishes_to_px4_directly():
@@ -599,7 +482,7 @@ class EnuStateSim(Sim):
 
 
 def test_a_frame_offset_keeps_init_waiting_and_clears_when_it_agrees():
-    m, sim = hover(), EnuStateSim(offset=(0.5, 0.0))
+    m, sim = mission(), EnuStateSim(offset=(0.5, 0.0))
     t, cmds = run(m, sim, 0.0, 4.0)
     assert m.phase == "INIT" and "disagree" in m.why
     assert all(c.pose is None and c.twist is None for _, c in cmds)
@@ -609,7 +492,7 @@ def test_a_frame_offset_keeps_init_waiting_and_clears_when_it_agrees():
 
 
 def test_a_frame_offset_appearing_before_takeoff_stops_the_stream():
-    m, sim = hover(), EnuStateSim()
+    m, sim = mission(), EnuStateSim()
     t = to_ready(m, sim)
     sim.offset = (0.0, 0.3)
     t, cmds = run(m, sim, t, t + 1.0)
@@ -619,7 +502,7 @@ def test_a_frame_offset_appearing_before_takeoff_stops_the_stream():
 
 
 def test_takeoff_pose_never_goes_above_the_target_height():
-    m, sim = hover(height_m=0.5), Sim()
+    m, sim = mission(height_m=0.5), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
 
@@ -632,7 +515,7 @@ def test_takeoff_pose_never_goes_above_the_target_height():
 
 
 def test_an_odometry_stall_shorter_than_odom_stale_s_does_not_abort_a_hover():
-    m, sim = hover(hover_s=20.0), Sim()
+    m, sim = mission(hover_s=20.0), Sim()
     t = to_ready(m, sim)
     switch_to_offboard(t, sim)
     t, _ = run(m, sim, t, t + 8.0)

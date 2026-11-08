@@ -3,19 +3,13 @@
 /skybeta/setpoint/pose, /skybeta/setpoint/twist, its own status and (once, latched) the INIT
 map <- odom for map_align; calls /skybeta/hold on abort. Reads map_align's corrected map <- odom.
 
-    ros2 launch blueraven_skybeta blueraven.launch.py                       # mission:=hover (default)
-    ros2 launch blueraven_skybeta blueraven.launch.py mission:=course launch_key:=launch cp4:=gate_b
+    ros2 launch blueraven_skybeta blueraven.launch.py hover_s:=5.0
 
-mission "hover" (the default, for first flights): take off, hold hover_s over the take-off point,
-land; no route and no course map. mission "course": the route is built at start-up from the course
-map by nav.route_planner (Arnav's startup planner), the corners in the map frame (.map_xy). A plan
-with gate problems is refused: the node then never publishes, so the interface never enters
-Offboard. Never arms, never requests a mode.
+Take off, hold hover_s over the take-off point, land (first flights). Never arms, never requests a mode.
 """
 from __future__ import annotations
 
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -24,7 +18,6 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.time import Time
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -34,7 +27,6 @@ from blueraven_skybeta.mission_core import MissionParams, SkybetaMission, _repo_
 ROOT = _repo_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from nav.course_map import CourseMap  # noqa: E402
 from nav.frames import (MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC, load_launch,  # noqa: E402
                         pose_msg_fields, quaternion_z, transform_from_pose_fields, yaw_from_quaternion)
 
@@ -50,43 +42,15 @@ class SkybetaMissionNode(Node):
         # from its default and rejects an int for a double at start-up); casts below restore the intended types
         from rcl_interfaces.msg import ParameterDescriptor
         loose = ParameterDescriptor(dynamic_typing=True)
-        sdf = Path(dp("course_map", str(ROOT / "maps" / "course_sdf.npz")).value)
         cfg = Path(dp("course_config", str(ROOT / "maps" / "course.yaml")).value)
         launch_key = dp("launch_key", "launch").value                  # the real mark on the drone
-        cp4 = dp("cp4", "gate_b").value                                # "gate_b" | "window"
-        # the planner's simplification may lose at most this much of the centred path's clearance (a physical
-        # course built of boards and tarp isn't exactly the published one); < 0 = the planner's tight default
-        keep_centre = float(dp("keep_centre_m", 0.02, loose).value)
         # the SAME value the flight interface gets: it corrects poses for it, but not twists, so we do
         self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0, loose).value)
         rate = float(dp("rate_hz", 20.0, loose).value)
         params = MissionParams(**{k: type(v)(dp(k, v, loose).value) for k, v in vars(MissionParams()).items()})
-        if params.mission not in ("hover", "course"):
-            raise SystemExit(f"mission must be 'hover' or 'course', not {params.mission!r}")
-
-        launch = load_launch(cfg, launch_key)
-        if params.mission == "hover":
-            self.mission = SkybetaMission(params, launch)
-            self.get_logger().info(f"mission HOVER: take off to {params.height_m:.2f} m, hold "
-                                   f"{params.hover_s:.0f} s over the take-off point, land. No route.")
-            problems = None
-        else:
-            course = CourseMap.load(sdf)
-            from nav.route_planner import gate_problems, plan_from_files
-            plan = plan_from_files(sdf, cfg, launch_key, params.height_m, cp4,
-                                   keep_centre_m=keep_centre if keep_centre >= 0.0 else None)
-            problems = gate_problems(plan)
-        if problems:
-            self.get_logger().error(f"route refused, nothing will be published: {problems}")
-            self.mission = None
-        elif params.mission == "course":
-            corners = [tuple(plan.launch_xy)] + [tuple(p) for p in plan.map_xy]   # map_xy starts AFTER launch
-            self.mission = SkybetaMission(params, launch, corners, course)
-            self.get_logger().info(f"route planned ({launch_key}): {plan.summary()}; path "
-                                   f"{self.mission.path.length:.2f} m from launch {launch}")
-            for w in getattr(plan, "warnings", []) or []:
-                self.get_logger().warning(f"planner: {w}")
-
+        self.mission = SkybetaMission(params, load_launch(cfg, launch_key))
+        self.get_logger().info(f"HOVER: take off to {params.height_m:.2f} m, hold {params.hover_s:.0f} s over the "
+                               f"take-off point, land.")
         self.pub_pose = self.create_publisher(PoseStamped, "/skybeta/setpoint/pose", 10)
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.pub_status = self.create_publisher(String, dp("status_topic", "/blueraven/mission/status").value, 10)
@@ -100,44 +64,22 @@ class SkybetaMissionNode(Node):
         self.create_timer(0.5, self._status)
         self.last = None
 
-        # wall centring (course mission, wall_centring:=true): Darion's depth node output, placed in base_link
-        # with the static TF, fed to the core with the frame's capture stamp. Never subscribes to camera images.
-        self.T_base_cam = None
-        self.K = None
-        if self.mission is not None and self.mission.centring is not None:
-            from sensor_msgs.msg import CameraInfo, Image
-            from tf2_ros import Buffer, TransformListener
-            self.base_frame = dp("base_frame", "base_link").value
-            self.tf_buffer = Buffer()
-            self.tf_listener = TransformListener(self.tf_buffer, self)
-            self.create_subscription(CameraInfo, dp("depth_info_topic", "/blueraven/depth/camera_info").value,
-                                     self._on_depth_info, ANY_PUBLISHER)
-            self.create_subscription(Image, dp("depth_topic", "/blueraven/depth/image_raw").value,
-                                     self._on_depth, ANY_PUBLISHER)
-            self.get_logger().info("wall centring ON: reading depth for the real corridor centre")
-
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _on_odom(self, m: Odometry) -> None:
-        if self.mission is None:
-            return
         p, q = m.pose.pose.position, m.pose.pose.orientation
         stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
         self.mission.on_odom(self._now(), p.x, p.y, p.z, yaw_from_quaternion(q.x, q.y, q.z, q.w),
                              stamp=stamp if stamp > 0.0 else None)
 
     def _on_state(self, m: String) -> None:
-        if self.mission is None:
-            return
         try:
             self.mission.on_state(self._now(), json.loads(m.data))
         except ValueError:
             self.get_logger().warning("unparseable /skybeta/state ignored", throttle_duration_sec=5.0)
 
     def _on_map_from_odom(self, m: PoseStamped) -> None:
-        if self.mission is None:
-            return
         if m.header.frame_id != MAP_FRAME:
             self.get_logger().warning(f"{MAP_FROM_ODOM_TOPIC} in frame {m.header.frame_id!r}, not "
                                       f"{MAP_FRAME!r}: ignored", throttle_duration_sec=5.0)
@@ -149,47 +91,7 @@ class SkybetaMissionNode(Node):
         if why is not None:
             self.get_logger().info(f"{MAP_FROM_ODOM_TOPIC} ignored: {why}", throttle_duration_sec=5.0)
 
-    def _on_depth_info(self, m) -> None:
-        import numpy as np
-        self.K = np.asarray(m.k, dtype=float).reshape(3, 3)
-
-    def _on_depth(self, m) -> None:
-        import numpy as np
-        if self.K is None:
-            return
-        if self.T_base_cam is None:                                     # static: look it up once
-            try:
-                tf = self.tf_buffer.lookup_transform(self.base_frame, m.header.frame_id, Time())
-            except Exception as e:                                      # noqa: BLE001 - tf2 raises several types
-                self.get_logger().warning(f"no TF {self.base_frame} <- {m.header.frame_id}: {e}",
-                                          throttle_duration_sec=5.0)
-                return
-            q, tr = tf.transform.rotation, tf.transform.translation
-            x, y, z, w = q.x, q.y, q.z, q.w
-            T = np.eye(4)
-            T[:3, :3] = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
-            T[:3, 3] = (tr.x, tr.y, tr.z)
-            self.T_base_cam = T
-            self.get_logger().info(f"depth camera in {self.base_frame}: t=({tr.x:.3f}, {tr.y:.3f}, {tr.z:.3f})")
-        if m.encoding == "16UC1":
-            D, scale = np.frombuffer(m.data, dtype=np.uint16).reshape(m.height, m.step // 2)[:, :m.width], 0.001
-        elif m.encoding == "32FC1":
-            D, scale = np.frombuffer(m.data, dtype=np.float32).reshape(m.height, m.step // 4)[:, :m.width], 1.0
-        else:
-            self.get_logger().warning(f"depth encoding {m.encoding} not supported", throttle_duration_sec=10.0)
-            return
-        from nav.wall_centring import points_from_depth
-        pts = points_from_depth(D, self.K, self.T_base_cam, stride=4, scale=scale)
-        stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
-        why = self.mission.on_depth_points(self._now(), stamp, pts)
-        if why is not None and why.startswith("no odometry"):
-            self.get_logger().info(f"depth frame skipped: {why}", throttle_duration_sec=5.0)
-
     def _tick(self) -> None:
-        if self.mission is None:
-            return
         cmd = self.mission.step(self._now())
         self.last = cmd
         for e in cmd.events:
@@ -228,9 +130,7 @@ class SkybetaMissionNode(Node):
                 self.get_logger().error(f"/skybeta/hold not available: {cmd.why}")
 
     def _status(self) -> None:
-        m = self.mission
-        st = {"phase": None, "why": "route refused"} if m is None else m.status(self._now())
-        self.pub_status.publish(String(data=json.dumps(st)))
+        self.pub_status.publish(String(data=json.dumps(self.mission.status(self._now()))))
 
 
 def main(args=None) -> None:
