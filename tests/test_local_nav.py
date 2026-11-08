@@ -353,3 +353,34 @@ def test_shield_stops_short_of_a_wall_that_appears_ahead():
         x = x + u * m.p.dt + (v - u) * b
         v = u + (v - u) * a
     assert x[0] < 1.2 - m.p.r_drone
+
+
+@pytest.mark.parametrize("cruise", [0.15, 0.45])
+def test_a_shut_cp2_gap_is_never_flown_through_even_after_waiting(cruise):
+    """Hinson's integration agent's case (hinson/mppi 218ec30, strict xfail on c29d114): the CP2 gap is SHUT and the
+    drone lingers there. With time-based grid memory (12 s) it forgot wall B, out of view beside it, and flew through.
+    Memory now fades per metre flown, so 60 s of waiting at 0.15 or 0.45 m/s must never get it through or let it touch."""
+    from nav.local_nav import LocalNavParams
+    L = START_FINAL
+    a, b = np.array(L["wall_a"][1]), np.array(L["wall_b"][1])
+    w0 = new_start_world(L)
+    plug = np.array([a + (a - b) * 0.05, b + (b - a) * 0.05])            # a wall right across the gap
+    n = np.array([-(plug[1] - plug[0])[1], (plug[1] - plug[0])[0]]) / np.hypot(*(plug[1] - plug[0])) * 0.05
+    w = World(w0.x_range, w0.y_range, boxes=w0.boxes, nets=w0.nets,
+              polys=w0.polys + [(np.array([plug[0] - n, plug[1] - n, plug[1] + n, plug[0] + n]), WALL)])
+    start, yaw0 = (-2.515, 0.914), math.pi / 2
+    nav = LocalNav(L["wps"], start, yaw0, nav=LocalNavParams(v_cruise=cruise))
+    drone = Drone(np.array(start, float), yaw0)
+    traj, states = [drone.x.copy()], []
+    for k in range(int((45.0 / cruise ** 0.5 + 60.0) / 0.1)):           # reach the gap, then linger ~60 s
+        cam = drone.cam()
+        nav.add_depth(w.depth_points(cam, drone.yaw), cam, drone.z, k * 0.1)
+        cmd = nav.step(drone.x, drone.v, k * 0.1)
+        states.append(cmd.state)
+        drone.step((cmd.vx, cmd.vy), cmd.yaw, 0.1)                       # keeps obeying, as if nobody lands it
+        traj.append(drone.x.copy())
+    traj = np.array(traj)
+    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone  # never touched anything
+    side = np.sign((b[0] - a[0]) * (traj[:, 1] - a[1]) - (b[1] - a[1]) * (traj[:, 0] - a[0]))
+    assert (side == side[0]).all()                                       # never crossed the gap line
+    assert "STUCK" in states or "BLOCKED" in states                      # and it said so
