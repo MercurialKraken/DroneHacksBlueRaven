@@ -18,9 +18,10 @@ from typing import Any
 
 NAV_OFFBOARD = 14
 AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg", "rise",
-            "wapproach", "fix", "clear")
+            "wapproach", "fix", "clear", "vhold")
+ROUTE_PHASES = ("turn", "pause", "leg", "rise", "wapproach", "fix", "clear")   # after P1: vision trouble -> vhold
 DEPTH_PHASES = ("approach", "settle", "translate", "wapproach", "fix", "clear")
-STEP_KINDS = ("fix", "face", "leg", "approach", "height", "clear")
+STEP_KINDS = ("fix", "face_yaw", "face", "leg", "approach", "height", "clear")
 
 
 def load_route(d: dict) -> dict:
@@ -161,6 +162,15 @@ class Params:
     fix_min_frames: int = 5
     fix_spread_m: float = 0.272     # the corridor's 10th percentile at an angled wall: 0.8 x the corridor's half width
     rotate_push_on_turns: bool = True   # full course: the learned push is BODY-fixed, so it turns with the nose
+    # VISION HOLD (Darion: a safety pilot with a kill switch is always ready, so don't auto-land on vision trouble):
+    # on a cuVSLAM variance spike / position jump / FAILED report after P1, stop and hover (zero velocity: PX4 holds
+    # attitude on the IMU, heading on the gyro), wait until cuVSLAM is quiet for vhold_recover_s, re-anchor (the drone
+    # hovered, so it is where it was: any jump goes into the correction) and resume the interrupted step. No recovery
+    # within vhold_max_s: land straight down. PX4 leaving Offboard (its own failsafe) still yields to the pilot.
+    vio_loss_hold: bool = False
+    vhold_recover_s: float = 1.0
+    vhold_max_s: float = 10.0
+    leg_yaw_rate_dps: float = 10.0  # a leg's gradual nose turn ('yaw_to') never turns faster than this
 
 
 @dataclass
@@ -259,6 +269,11 @@ class WallSeek:
     step_arg: Any = None            # the current fix / approach / clear step
     wa: tuple | None = None         # wall approach: (start (n, e), unit (n, e), standoff, max_m)
     named: list = field(default_factory=list)    # full course: (name, map point) of every named leg end, for the dashboard
+    good_pos: tuple | None = None   # the last position sample before vision trouble (the hold's anchor)
+    vh: dict | None = None          # vision hold: t0, t_bad, anchor, the interrupted step to resume
+    leg_yaw: tuple | None = None    # a leg's gradual nose turn: (start heading, total change), degrees clockwise
+    vholds: list = field(default_factory=list)   # (t, why, seconds held, jump absorbed (n, e) or None)
+    jump_vec: tuple = (0.0, 0.0)    # the last detected jump step of the estimate (pad n, e)
 
     # ------------------------------------------------------------------ helpers
     def _set(self, phase: str, now: float, why: str) -> None:
@@ -338,6 +353,7 @@ class WallSeek:
         dt = i.t_odom - t_prev
         # a fast step counts only above 10 cm: T4 run 6 landed on a 7 cm one (1.75 m/s over 0.04 s) beside the wall
         if step > self.p.jump_m or (dt > 0 and step / dt > self.p.jump_mps and step > 0.10):
+            self.jump_vec = (i.pos[0] - prev[0], i.pos[1] - prev[1])
             return f"position estimate jumped {step:.2f} m in {dt:.2f} s"
         return None
 
@@ -439,6 +455,17 @@ class WallSeek:
                 return Output(self.phase, self.why, (0.0, 0.0, 0.0, 0.0))
 
         # ---- airborne supervision
+        if self.phase in AIRBORNE:
+            trouble = (("cuVSLAM reports tracking FAILED" if i.vo_failed else None)
+                       or (f"cuVSLAM variance {i.vio_var:.3g} m^2" if self.var_count >= p.vio_var_count else None)
+                       or jump)
+            holdable = p.vio_loss_hold and p.full_course and self.route is not None and i.pos is not None
+            if holdable and (self.phase == "vhold" or (trouble and self.phase in ROUTE_PHASES)):
+                if self.phase != "vhold":
+                    self._enter_vhold(i, trouble)
+                return self._vhold(i, jump)
+            if not trouble and self.phase in ROUTE_PHASES and odom_age <= p.odom_hold_s:
+                self.good_pos = (i.pos[0], i.pos[1])          # the last sample before any trouble: the hold's anchor
         if self.phase in AIRBORNE:
             if i.vo_failed or self.var_count >= p.vio_var_count:
                 self.blind = True
@@ -600,6 +627,12 @@ class WallSeek:
             (tn, te), (gn, ge), (un, ue), total = self.leg
             s_now = (n - tn) * un + (e - te) * ue
             if s_now >= total - 0.03:
+                if self.leg_yaw is not None:                     # finish any nose turn the leg didn't complete
+                    rem = (self.leg_yaw[0] + self.leg_yaw[1] - self.heading + 180.0) % 360.0 - 180.0
+                    self.heading = (self.leg_yaw[0] + self.leg_yaw[1]) % 360.0
+                    self.leg_yaw = None
+                    if abs(rem) >= 0.5:
+                        self.plan.insert(0, ("turn", -rem))
                 self._next_step(i, n, e)
             elif self.ahead_f is not None and self.ahead_f < p.contact_m and i.now - i.t_depth <= p.depth_hold_s:
                 self._land(i, f"surface {self.ahead_f:.2f} m ahead on a leg")
@@ -609,7 +642,20 @@ class WallSeek:
                 if self.leg_index == 1 and p.leg_climb_to_m > 0:    # the leg through the gap: climb with progress
                     frac = _clamp(s_now / max(total, 1e-6), 0.0, 1.0)
                     self.h_target = p.height_m + (p.leg_climb_to_m - p.height_m) * frac
-                return Output(self.phase, self.why, (*self._leg_cmd(n, e, vn_m, ve_m, p.leg_mps), self._vz(i), 0.0))
+                wz = 0.0
+                if self.leg_yaw is not None:                     # the nose follows the leg's progress, rate-capped
+                    h0, tot = self.leg_yaw
+                    want = h0 + tot * _clamp(s_now / max(total, 1e-6), 0.0, 1.0)
+                    err = (want - self.heading + 180.0) % 360.0 - 180.0
+                    rate = _clamp(err / max(self.dt, 0.05), -p.leg_yaw_rate_dps, p.leg_yaw_rate_dps)   # deg/s cw
+                    step = rate * self.dt
+                    self.heading = (self.heading + step) % 360.0
+                    if p.full_course and p.rotate_push_on_turns:  # the body-fixed push turns with the nose
+                        a = math.radians(step)
+                        c, s = math.cos(a), math.sin(a)
+                        self.i_n, self.i_e = c * self.i_n - s * self.i_e, s * self.i_n + c * self.i_e
+                    wz = -math.radians(rate)                     # ENU yaw rate: + = counter-clockwise
+                return Output(self.phase, self.why, (*self._leg_cmd(n, e, vn_m, ve_m, p.leg_mps), self._vz(i), wz))
 
         if self.phase == "gap":
             (tn, te), (gn, ge), (un, ue), total = self.leg
@@ -755,6 +801,67 @@ class WallSeek:
                         f"P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
         self._next_step(i, n, e)
 
+    # ------------------------------------------------------------------ vision hold (full course)
+    def _enter_vhold(self, i: Inputs, why: str) -> None:
+        """Remember what was interrupted (to resume it in the TRUE frame) and where the drone was, then hover."""
+        resume = None
+        if self.phase == "leg" and self.leg is not None:
+            end = self.leg[1]
+            yaw_to = self.leg_yaw[0] + self.leg_yaw[1] if self.leg_yaw else None
+            resume = ("leg_true", (end[0] + self.delta[0], end[1] + self.delta[1]), yaw_to)
+        elif self.phase == "turn" and self.turn is not None:
+            sign, angle, _ = self.turn
+            rem = angle - self.turned
+            resume = ("turn", sign * rem) if rem > 0.5 else None
+        elif self.phase == "rise":
+            resume = ("rise", self.h_target)
+        elif self.phase == "fix":
+            resume = {"fix": self.step_arg}
+        elif self.phase == "clear":
+            resume = {"clear": self.step_arg}
+        elif self.phase == "wapproach" and self.wa is not None:
+            resume = {"approach": self.step_arg, "standoff": self.wa[2], "max_m": self.wa[3]}
+        jumped = why is not None and why.startswith("position estimate jumped")
+        self.vh = {"t0": i.now, "t_bad": i.now, "anchor": self.good_pos or (i.pos[0], i.pos[1]), "resume": resume,
+                   "why": why, "jsum": self.jump_vec if jumped else (0.0, 0.0)}
+        self._set("vhold", i.now, f"{why}: hovering on PX4/IMU (nose on the gyro) until cuVSLAM is quiet for "
+                                  f"{self.p.vhold_recover_s:.1f} s (at most {self.p.vhold_max_s:.0f} s)")
+
+    def _vhold(self, i: Inputs, jump: str | None) -> Output:
+        p, vh = self.p, self.vh
+        n, e = i.pos[0], i.pos[1]
+        if i.state is None or i.now - i.t_state > p.state_land_s:
+            self._land(i, f"/skybeta/state silent for {i.now - i.t_state:.2f} s (in a vision hold)")
+            self.blind = True
+            return self._descend(i, (i.state or {}).get("armed"), (i.state or {}).get("offboard_active"))
+        if jump:                                           # sum the estimate's own jump steps: real motion is not one
+            vh["jsum"] = (vh["jsum"][0] + self.jump_vec[0], vh["jsum"][1] + self.jump_vec[1])
+        if jump or i.vo_failed or (i.vio_var is not None and i.vio_var > p.vio_var_m2):
+            vh["t_bad"] = i.now
+        if i.now - vh["t0"] > p.vhold_max_s:
+            self.blind = True
+            self._land(i, f"cuVSLAM did not recover within {p.vhold_max_s:.0f} s: landing straight down")
+            return self._descend(i, (i.state or {}).get("armed"), (i.state or {}).get("offboard_active"))
+        if i.now - vh["t_bad"] >= p.vhold_recover_s and i.now - i.t_odom <= p.odom_hold_s:
+            jn, je = -vh["jsum"][0], -vh["jsum"][1]        # undo the estimate's jumps; coasting into the hover is real
+            absorbed = None
+            if math.hypot(jn, je) > 0.10:
+                self.delta = (self.delta[0] + jn, self.delta[1] + je)
+                absorbed = (round(jn, 3), round(je, 3))
+            self.vholds.append((round(vh["t0"], 2), vh["why"], round(i.now - vh["t0"], 2), absorbed))
+            self.log.append(f"{i.now:.2f} cuVSLAM quiet again after {i.now - vh['t0']:.1f} s: "
+                            + (f"its jump N {jn:+.2f} E {je:+.2f} absorbed into the correction" if absorbed
+                               else f"no jump (moved {math.hypot(jn, je):.2f} m), estimate kept") + "; resuming")
+            r = vh["resume"]
+            self.vh, self.good_pos = None, (n, e)
+            if isinstance(r, tuple) and r[0] == "leg_true":
+                self.plan.insert(0, ("leg", (r[1][0] - self.delta[0], r[1][1] - self.delta[1]), r[2]))
+            elif r is not None:
+                self.plan.insert(0, r)
+            self._next_step(i, n, e)
+            return Output(self.phase, self.why, (0.0, 0.0, 0.0, 0.0))
+        return Output(self.phase, self.why, (0.0, 0.0, 0.0, 0.0))
+
     # ------------------------------------------------------------------ full course (route file)
     def map_to_pad(self, x: float, y: float) -> tuple[float, float]:
         """A map point -> the TRUE pad (north, east), from the route's launch pose (nose along yaw_deg)."""
@@ -832,8 +939,17 @@ class WallSeek:
         if isinstance(item, dict):                           # a full-course step (map frame)
             kind = next(k for k in STEP_KINDS if k in item)
             arg = item[kind]
-            if kind in ("face", "leg"):
-                self.plan.insert(0, (kind, self._est(*arg)))
+            cw = lambda enu: self.route["launch"][2] - float(enu)          # noqa: E731  map ENU yaw -> pad clockwise
+            if kind == "face":
+                self.plan.insert(0, ("face", self._est(*arg)))
+            elif kind == "leg":                               # yaw_to: the nose turns gradually during the leg
+                self.plan.insert(0, ("leg", self._est(*arg), cw(item["yaw_to"]) if "yaw_to" in item else None))
+            elif kind == "face_yaw":                          # turn in place to a map heading (ENU degrees)
+                d = (cw(arg) - self.heading + 180.0) % 360.0 - 180.0
+                self.heading = cw(arg) % 360.0
+                if abs(d) >= 0.5:
+                    self.plan.insert(0, ("turn", -d))
+            if kind in ("face", "leg", "face_yaw"):
                 self._next_step(i, n, e)
                 return
             if kind == "height":
@@ -853,7 +969,8 @@ class WallSeek:
                 self.t_in_tol = self.t_at_height = None
                 self._set("wapproach", i.now, f"forward until {arg} is {self.wa[2]:.2f} m ahead (at most {self.wa[3]:.2f} m)")
             return
-        kind, arg = item
+        kind, arg = item[0], item[1]
+        extra = item[2] if len(item) > 2 else None
         if kind == "rise":                                   # climb / descend straight up or down, in place
             self.h_target, self.hold_pt, self.t_at_height = arg, (n, e), None
             self._set("rise", i.now, f"{'climbing' if arg > i.pos[2] else 'descending'} in place to {arg:.2f} m")
@@ -880,6 +997,10 @@ class WallSeek:
             d = math.hypot(dn, de)
             u = (dn / d, de / d) if d > 1e-6 else (1.0, 0.0)
             self.leg, self.s_ref = ((n, e), arg, u, d), 0.0
+            self.leg_yaw = None
+            if extra is not None:                            # turn the nose gradually to `extra` over the leg
+                tot = (extra - self.heading + 180.0) % 360.0 - 180.0
+                self.leg_yaw = (self.heading, tot) if abs(tot) >= 0.5 else None
             self.leg_index += 1
             if self.leg_index > 1 and self.p.leg_climb_to_m > 0:
                 self.h_target = self.p.leg_climb_to_m        # after the gap leg: hold the tunnel height

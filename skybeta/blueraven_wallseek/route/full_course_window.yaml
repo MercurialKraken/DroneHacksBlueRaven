@@ -23,13 +23,13 @@ steps:
   - {fix: wall_a}                         # P1 (stopped by depth): fix north
   - {face: [-0.662, 2.265]}
   - {leg: [-0.662, 2.265], name: P2}      # through the CP2 gap
-  - {face: [0.456, 2.090]}
-  - {leg: [0.456, 2.090], name: P3}
-  - {face: [1.046, 0.932]}                # a point on Wall C, 1.0 m from its west end: face it head-on (yaw -63 deg)
-  - {approach: wall_c, standoff: 0.80, max_m: 0.60, name: S3}
+  # v2 (Darion): NO head-on stop at Wall C (three T4 runs: cuVSLAM spiked / diverged on the turn away after stopping
+  # 0.84 m from it). Past the gap the nose turns GRADUALLY while flying, so Wall C stays in view: from the gap heading
+  # (~13 deg) round to -50 deg (Wall C's east half, 13 deg off square) over P2 -> P3, a 1 s depth fix there from ~1.25 m,
+  # then on round to due south over P3 -> P4, arriving at the tunnel's mouth already facing into it.
+  - {leg: [0.456, 2.090], name: P3, yaw_to: -50.0}
   - {fix: wall_c}
-  - {face: [2.3115, 1.850]}
-  - {leg: [2.3115, 1.850], name: P4}      # north of the tunnel's mouth
+  - {leg: [2.3115, 1.850], name: P4, yaw_to: -90.0}   # north of the tunnel's mouth, nose into the tube
   - {height: 0.85}                        # the tube's free space is centred ~0.94 m up: only 0.36 m clearance at 0.40
   - {face: [2.400, -1.100]}
   - {leg: [2.400, -1.100], name: P5}      # through the tunnel: CP3 (whole drone past y -0.305)
