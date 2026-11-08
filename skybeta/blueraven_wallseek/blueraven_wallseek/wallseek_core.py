@@ -274,6 +274,7 @@ class WallSeek:
     leg_yaw: tuple | None = None    # a leg's gradual nose turn: (start heading, total change), degrees clockwise
     vholds: list = field(default_factory=list)   # (t, why, seconds held, jump absorbed (n, e) or None)
     jump_vec: tuple = (0.0, 0.0)    # the last detected jump step of the estimate (pad n, e)
+    pt_hold: tuple | None = None    # full course: the last leg's END point: later stops hold THERE, not where it stopped
 
     # ------------------------------------------------------------------ helpers
     def _set(self, phase: str, now: float, why: str) -> None:
@@ -627,6 +628,8 @@ class WallSeek:
             (tn, te), (gn, ge), (un, ue), total = self.leg
             s_now = (n - tn) * un + (e - te) * ue
             if s_now >= total - 0.03:
+                if p.full_course:                                # the stops after this leg hold its exact end point
+                    self.pt_hold = self.leg[1]
                 if self.leg_yaw is not None:                     # finish any nose turn the leg didn't complete
                     rem = (self.leg_yaw[0] + self.leg_yaw[1] - self.heading + 180.0) % 360.0 - 180.0
                     self.heading = (self.leg_yaw[0] + self.leg_yaw[1]) % 360.0
@@ -848,6 +851,8 @@ class WallSeek:
             if math.hypot(jn, je) > 0.10:
                 self.delta = (self.delta[0] + jn, self.delta[1] + je)
                 absorbed = (round(jn, 3), round(je, 3))
+                if self.pt_hold is not None:               # the held set point, in the estimate's new frame
+                    self.pt_hold = (self.pt_hold[0] - jn, self.pt_hold[1] - je)
             self.vholds.append((round(vh["t0"], 2), vh["why"], round(i.now - vh["t0"], 2), absorbed))
             self.log.append(f"{i.now:.2f} cuVSLAM quiet again after {i.now - vh['t0']:.1f} s: "
                             + (f"its jump N {jn:+.2f} E {je:+.2f} absorbed into the correction" if absorbed
@@ -936,6 +941,8 @@ class WallSeek:
             self._land(i, "route complete")
             return
         item = self.plan.pop(0)
+        if self.pt_hold is not None:                         # stops hold the last leg's end point (the set point)
+            n, e = self.pt_hold
         if isinstance(item, dict):                           # a full-course step (map frame)
             kind = next(k for k in STEP_KINDS if k in item)
             arg = item[kind]
@@ -993,6 +1000,8 @@ class WallSeek:
             self.hold_pt = (n, e)
             self._set("pause", i.now, f"stopped at ({n:.2f}, {e:.2f}) for {self.p.pause_s:.1f} s")
         else:
+            self.pt_hold = None
+            n, e = i.pos[0], i.pos[1]                       # a leg starts from where the drone actually is
             dn, de = arg[0] - n, arg[1] - e
             d = math.hypot(dn, de)
             u = (dn / d, de / d) if d > 1e-6 else (1.0, 0.0)

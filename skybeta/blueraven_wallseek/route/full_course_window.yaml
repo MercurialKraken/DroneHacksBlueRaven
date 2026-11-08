@@ -23,23 +23,18 @@ steps:
   - {fix: wall_a}                         # P1 (stopped by depth): fix north
   - {face: [-0.662, 2.265]}
   - {leg: [-0.662, 2.265], name: P2}      # through the CP2 gap
-  # v2 (Darion): NO head-on stop at Wall C (three T4 runs: cuVSLAM spiked / diverged on the turn away after stopping
-  # 0.84 m from it). Past the gap the nose turns GRADUALLY while flying, so Wall C stays in view: from the gap heading
-  # (~13 deg) round to -50 deg (Wall C's east half, 13 deg off square) over P2 -> P3, a 1 s depth fix there from ~1.25 m,
-  # then on round to due south over P3 -> P4, arriving at the tunnel's mouth already facing into it.
-  - {leg: [0.456, 2.090], name: P3, yaw_to: -50.0}
-  - {fix: wall_c}
-  - {leg: [2.3115, 1.850], name: P4, yaw_to: -90.0}   # north of the tunnel's mouth, nose into the tube
+  # v4 (Darion): every leg NOSE-FIRST (face, then straight ahead: never sideways); no Wall C fix (its turns to face the
+  # wall and back are the in-place turns that broke cuVSLAM); climb to the tube's height at P2, so the whole approach to
+  # the tunnel is flown at it. Stops after a leg hold that leg's exact end point (v3 stopped 11 cm short at the window).
   - {height: 0.85}                        # the tube's free space is centred ~0.94 m up: only 0.36 m clearance at 0.40
+  - {face: [2.3115, 1.850]}
+  - {leg: [2.3115, 1.850], name: P4}      # north of the tunnel's mouth (Wall C off the right of the nose)
   - {face: [2.400, -1.100]}
   - {leg: [2.400, -1.100], name: P5}      # through the tunnel: CP3 (whole drone past y -0.305)
-  # v3 (Darion): no corridor / barrier fix and no slide along the window's wall (old points 7 and 8: cuVSLAM held 9 times
-  # on the T4 in those big in-place chicane turns, and both chicane depth fixes disagreed by 0.5-1.1 m). Straight from
-  # the tunnel's exit to a point square in front of the window, the nose sweeping round DURING the leg (no in-place
-  # turn), then straight through. (Straight from the old P6 would cross the window 0.15 m from its north jamb.)
-  - {leg: [0.427, -2.600], name: P6, yaw_to: 160.0}   # 0.96 m in front of the window on its axis; 0.32 m over the boulder
+  - {face: [0.427, -2.600]}
+  - {leg: [0.427, -2.600], name: P6}      # 0.96 m in front of the window on its axis; 0.32 m over the boulder
   - {height: 0.72}                        # window: sill 0.305, top 1.219; 0.20 m over the chicane boulder beside P6
-  - {face_yaw: 160.0}                     # square to the window (a top-up if the leg's sweep fell short)
+  - {face_yaw: 160.0}                     # square to the window
   - {clear: 1.30}                         # go / no-go: depth must see THROUGH the window (nothing within 1.30 m)
   - {leg: [-0.988, -2.084], name: W2}     # through the window: CP4 (+5), whole drone 0.26 m past its line
   - {face: [-2.042, -0.792]}

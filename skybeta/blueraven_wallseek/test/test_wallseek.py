@@ -482,6 +482,7 @@ class FullSim(Sim):
 
     def step(self):
         super().step()
+        self.hdgs = getattr(self, "hdgs", []) + [self.hdg]
         if self.pos[2] > 0.1:
             d = min(seg_dist(self.pos[:2], a, b) for a, b in self.segs)
             if d < self.min_clear:
@@ -524,7 +525,7 @@ def test_full_course_flies_every_checkpoint_and_lands_on_the_pad(plant):
     x, y = true_map(s)
     assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"CP5: landed at ({x:.2f}, {y:.2f})"
     assert s.min_clear > 0.31, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}"
-    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 2, s.m.fixes          # Wall A, Wall C
+    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 1, s.m.fixes          # Wall A
 
 
 def test_full_course_depth_fixes_cancel_a_drifting_estimate():
@@ -538,7 +539,7 @@ def test_full_course_depth_fixes_cancel_a_drifting_estimate():
     log = "\n".join(s.m.log)
     assert "route complete" in log, log
     applied = [f for f in s.m.fixes if f[3] is not None]
-    assert len(applied) >= 2, s.m.fixes
+    assert len(applied) >= 1, s.m.fixes
     assert s.min_clear > 0.30, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}\n{log}"
     x, y = true_map(s)
     assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"landed at ({x:.2f}, {y:.2f})\n{log}"
@@ -599,9 +600,22 @@ def test_vision_hold_lands_if_cuvslam_never_recovers():
     assert "did not recover within 10 s" in log and s.m.phase == "done", log
 
 
-def test_the_nose_turns_gradually_on_a_yaw_to_leg():
-    """P2 -> P3 turns the nose from the gap heading to -50 deg ENU while flying, never faster than 10 deg/s."""
-    s = FullSim().run(60)
-    leg_rates = [abs(math.degrees(w)) for (t, ph, _), w in zip(s.trace, s.wz_trace) if ph == "leg" and abs(w) > 1e-3]
-    assert leg_rates and max(leg_rates) <= 10.0 + 1e-6
-    assert any("fix wall_c" in x for x in s.m.log), s.m.log
+def test_every_leg_is_flown_nose_first_and_stops_hold_the_set_point():
+    """Darion: never sideways. On every leg the nose doesn't turn and the drone moves along it (sideways speed
+    ~0 against ~0.15 forward); the window check is made AT P6 (held there after the leg), not short of it."""
+    s = FullSim().run(420)
+    log = "\n".join(s.m.log)
+    assert "route complete" in log, log
+    side, fwd = [], []
+    for k in range(1, len(s.trace)):
+        (_, ph0, p0), (_, ph1, p1) = s.trace[k - 1], s.trace[k]
+        if ph0 == ph1 == "leg":
+            assert abs(s.wz_trace[k]) < 1e-9                    # no nose turn during a leg
+            vn, ve = (p1[0] - p0[0]) / s.dt, (p1[1] - p0[1]) / s.dt
+            h = s.hdgs[k]
+            fwd.append(vn * math.cos(h) + ve * math.sin(h))
+            side.append(-vn * math.sin(h) + ve * math.cos(h))
+    assert np.median(fwd) > 0.10 and np.percentile(np.abs(side), 95) < 0.03, (np.median(fwd), np.percentile(np.abs(side), 95))
+    at_clear = [pos for _, ph, pos in s.trace if ph == "clear"]
+    x, y = at_clear[-1][1] + LAUNCH_MAP[0], at_clear[-1][0] + LAUNCH_MAP[1]
+    assert math.hypot(x - 0.427, y + 2.600) < 0.05, f"window check made at ({x:.3f}, {y:.3f}), not at P6"
