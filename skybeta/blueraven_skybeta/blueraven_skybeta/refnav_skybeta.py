@@ -311,7 +311,9 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
     if out.phase != "follow" or tw is None:
         track.hist, track.t_far = [], None
         return tw, None
-    why = track.check(now, out.setpoint, v.pos, math.hypot(tw[0], tw[1]))
+    # the stuck guard counts the motion ASKED for: leaning against a learned push is not asking to move
+    lean = math.hypot(push.f, push.r) if push is not None and push_tau_s > 0 else 0.0
+    why = track.check(now, out.setpoint, v.pos, max(0.0, math.hypot(tw[0], tw[1]) - lean))
     if why:
         descent.target = v.pos[:2]
         return (0.0, 0.0, 0.0, 0.0), why

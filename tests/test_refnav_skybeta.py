@@ -614,3 +614,17 @@ def test_the_push_estimator_learns_a_body_push_turns_with_the_drone_and_resets()
     assert math.hypot(*b) == pytest.approx(0.15)                         # bounded
     p.reset()
     assert (p.f, p.r, p.exp) == (0.0, 0.0, None)
+
+
+def test_leaning_against_the_push_is_not_counted_as_a_jam_by_the_stuck_guard():
+    # slow T4-like response + the real push, fixed 10 s hold: the route starts off the point while the estimate is still
+    # learning; the drone leans against the push while the reference waits. Before: 'stuck: moved 0.04 m in 3 s while
+    # commanded 0.66 m' -> landed. The lean is not motion asked for.
+    m, start, off, hold = _push_flight(tau=1.5, delay=0.6, lag=1.5, offset=-math.pi / 2, hover_tol_m=0.0)
+    assert not str(m.result).startswith("landed: landing requested: stuck")
+    assert m.result == "complete"
+
+
+def test_with_no_push_the_estimator_never_stops_a_clean_route():
+    m, start, off, hold = _push_flight(push=(0.0, 0.0), climb=(0.0, 0.0), hover_tol_m=0.0)
+    assert m.result == "complete"            # (real jams: test_a_jammed_drone_stops_pushing_and_lands_where_it_is)
