@@ -142,6 +142,7 @@ class CmdLink:
         return f"MPPI command silent for {a:.2f} s (CMD_LAND_S {CMD_LAND_S:g})" if a > CMD_LAND_S else None
 
 
+GRID_Z_RESET_M = 0.10       # odometry height this far from where MPPI's grid was built: clear it (refnav's ext climb)
 DEPTH_KEEP = 8              # depth frames mppi_node keeps (~0.27 s at 30 Hz), newest last
 
 
@@ -182,6 +183,7 @@ class MppiFollow:
                                  u_max=max(U_MAX_MIN, U_MAX_PER_CRUISE * v_cruise))
         self.lost: str | None = None                # why the odometry is no longer trusted (latched until start())
         self._odom_prev: tuple[float, np.ndarray, float] | None = None    # (stamp, position, ENU yaw)
+        self._z_grid: float | None = None          # odometry height MPPI's grid was built at
         self._frozen_since: float | None = None
         self._repeats = 0
         self.poses = PoseBuffer()
@@ -221,6 +223,12 @@ class MppiFollow:
         self.poses.add_position(stamp, p)
         self.poses.add_attitude(stamp, (w, x, y, z))
         self.pos, self.stamp = np.asarray(p, float), stamp
+        if self.nav is not None and math.isfinite(self.pos[2]):
+            if self._z_grid is None:
+                self._z_grid = float(self.pos[2])
+            elif abs(float(self.pos[2]) - self._z_grid) > GRID_Z_RESET_M:   # a height step: the old band's cells lie
+                self.nav.clear_grid()
+                self._z_grid = float(self.pos[2])
         self.vel = (D.quat_to_mat(w, x, y, z) @ np.asarray(v_flu, float))[:2]
         self.yaw = yaw_enu(q_xyzw)
 
@@ -241,6 +249,7 @@ class MppiFollow:
         self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
                             grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p, fence=fence)
         self.lost, self._frozen_since, self._repeats = None, None, 0   # a new follow: the odometry guards start afresh
+        self._z_grid = None
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:
         """Every 20 Hz tick in follow; steps MPPI on every STEP_EVERY-th. -> the Mission.ext command."""

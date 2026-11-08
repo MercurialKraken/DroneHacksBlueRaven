@@ -166,6 +166,13 @@ class LocalNav:
         self._scale = 1.0
         self._prog = (None, -math.inf)          # (time, progress) of the last real progress
 
+    def clear_grid(self) -> None:
+        """Forget every obstacle cell (the drone changed height: cells were classified with the old height band,
+        e.g. a window sill seen from below still blocks after a climb). Fresh depth rebuilds it."""
+        self.grid.L[:] = 0.0
+        self.grid.low[:] = False
+        self._dirty = True
+
     def add_depth(self, pts_odom: Any, sensor_xyz: Any, z_drone: float, t: float | None = None) -> dict[str, int]:
         """One depth frame, already in the odometry frame (pose at the frame's capture time)."""
         out = self.grid.integrate(pts_odom, sensor_xyz, z_drone, t)

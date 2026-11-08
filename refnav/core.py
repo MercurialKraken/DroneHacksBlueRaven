@@ -97,6 +97,10 @@ class Params:
     depth_mode: str = "assisted"               # blind: waypoints and map only, no depth gates or checks, no map_align correction
     depth_stale_s: float = 0.5
     depth_lost_land_s: float = 3.0
+    ext_climb_max_m: float = 0.0                # nav mppi: > 0 = on BLOCKED/STUCK don't land: step the height up to this
+                                                # (above home), then back down to height_m, and repeat (the pilot lands)
+    ext_climb_step_m: float = 0.15              # ... in steps this big ...
+    ext_climb_settle_s: float = 3.0             # ... at most one per this long (MPPI replans with its band at the new z)
     stop_m: float = 0.9
     corridor_half_m: float = 0.6
     obstacle_band_m: float = 0.4                # depth points within this of flight height can be obstacles
@@ -141,6 +145,9 @@ class Params:
         """Raise ValueError for a route or a pair of limits the mission cannot fly."""
         if self.nav not in NAVS:
             raise ValueError(f"nav must be one of {', '.join(NAVS)}, not {self.nav!r}")
+        if self.ext_climb_max_m and not (self.height_m < self.ext_climb_max_m <= 1.6 and self.ext_climb_step_m > 0):
+            raise ValueError("ext_climb_max_m must be above height_m and at most 1.6 m (rule 7.7: part of the frame "
+                             "stays below the 1.727 m wall tops), with ext_climb_step_m > 0")
         if self.depth_mode not in DEPTH_MODES:
             raise ValueError(f"depth_mode must be one of {', '.join(DEPTH_MODES)}, not {self.depth_mode!r}")
         prev = (0.0, 0.0)
@@ -225,6 +232,7 @@ class Output:
     accel: tuple[float, float] | None = None      # (an, ae) feed-forward, follow mode only
     yawspeed: float | None = None                 # rad/s feed-forward: the slew this tick, follow mode only
     tangent: tuple[float, float] | None = None    # (n, e) unit direction of the path at the reference, refnav follow only
+    holding: bool = False             # nav mppi: MPPI holds (not moving): its push-cancelling velocity isn't a 'move'
     stream: bool = False              # publish offboard_control_mode + the setpoint this tick
     commands: list[str] = field(default_factory=list)   # "offboard" | "arm" | "land" | "disarm" (checked)
     events: list[str] = field(default_factory=list)
@@ -319,6 +327,8 @@ class Mission:
         self.cmd: F.Command | None = None
         self.ext: dict[str, Any] | None = None      # nav mppi: {vn, ve, yaw (pad NED), state, depth_age, ...} from the node
         self.t_blocked: float | None = None
+        self.t_climb: float | None = None           # the last ext height step (nav mppi, ext_climb_max_m)
+        self.climb_dir = 1.0
 
     def request_land(self, why: str = "requested") -> None:
         """An outside request to end the flight through the mission's own landing (no second controller)."""
@@ -700,6 +710,7 @@ class Mission:
         before = self.sp[3]
         if e["yaw"] is not None:
             self._slew_yaw(e["yaw"], dt)
+        out.holding = not moving
         if moving:
             out.velocity = (e["vn"], e["ve"])
         elif e["state"] in EXT_HOLD_STATES:
@@ -711,14 +722,34 @@ class Mission:
         out.yawspeed = float(F.wrap(self.sp[3] - before)) / dt if dt > 0 else 0.0
         self.t_blocked = (self.t_blocked or now) if e["state"] == "BLOCKED" else None
         silent = e["depth_age"] if e["depth_age"] is not None else math.inf
+        blocked = self.t_blocked is not None and now - self.t_blocked > EXT_BLOCKED_LAND_S
         if e["state"] == "ARRIVED":
             self._land(now, out, "route complete")
+        elif (e["state"] == "STUCK" or blocked) and self.p.ext_climb_max_m > 0:
+            if self.t_climb is None or now - self.t_climb >= self.p.ext_climb_settle_s:
+                self._ext_climb_step(now, e["state"])
         elif e["state"] == "STUCK":
             self._land(now, out, "MPPI stuck: no progress along the route")
-        elif self.t_blocked is not None and now - self.t_blocked > EXT_BLOCKED_LAND_S:
+        elif blocked:
             self._land(now, out, f"MPPI blocked for {EXT_BLOCKED_LAND_S:g} s: every rollout crashes")
         elif min(silent, now - self.t_phase) > self.p.depth_lost_land_s:
             self._land(now, out, f"MPPI: depth silent for more than {self.p.depth_lost_land_s:g} s")
+
+    def _ext_climb_step(self, now: float, state: str) -> None:
+        """MPPI found no plan (BLOCKED/STUCK) at this height: step it, up to ext_climb_max_m, then back down to height_m,
+        and repeat; MPPI's obstacle band follows the drone's height, so e.g. a window sill drops out of it once the
+        drone is high enough. No landing here (the pilot lands); LOST, a silent MPPI or silent depth still land."""
+        p = self.p
+        h = self.home[2] - self.sp[2]                                        # the commanded height above home
+        nxt = h + self.climb_dir * p.ext_climb_step_m
+        if nxt > p.ext_climb_max_m + 1e-6:
+            self.climb_dir, nxt = -1.0, h - p.ext_climb_step_m
+        elif nxt < p.height_m - 1e-6:
+            self.climb_dir, nxt = 1.0, h + p.ext_climb_step_m
+        nxt = min(max(nxt, p.height_m), p.ext_climb_max_m)
+        self.sp[2] = self.home[2] - nxt
+        self.t_climb, self.t_blocked = now, None
+        self.why = f"MPPI {state} at {h:.2f} m: height -> {nxt:.2f} m"
 
     def _on_ground(self, now: float, v: Vehicle) -> bool:
         p = self.p

@@ -321,7 +321,9 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
         return tw, None
     # the stuck guard counts the motion ASKED for: leaning against a learned or known push is not asking to move
     lean = (math.hypot(push.f, push.r) if push is not None and push_tau_s > 0 else 0.0) + math.hypot(*push_ff)
-    why = track.check(now, out.setpoint, v.pos, max(0.0, math.hypot(tw[0], tw[1]) - lean))
+    # an MPPI hold (BLOCKED/STUCK/WAIT/HOLD) sends only push-cancelling velocity: that is no 'move', so it can't be a jam
+    asked = 0.0 if getattr(out, "holding", False) else max(0.0, math.hypot(tw[0], tw[1]) - lean)
+    why = track.check(now, out.setpoint, v.pos, asked)
     if why:
         descent.target = v.pos[:2]
         return (0.0, 0.0, 0.0, 0.0), why
