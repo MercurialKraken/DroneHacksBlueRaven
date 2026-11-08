@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skybeta" / "blueraven_skybeta"))
@@ -18,9 +19,9 @@ from blueraven_skybeta import refnav_skybeta as S  # noqa: E402
 from nav.depth_points import R_FLU_OPTICAL  # noqa: E402
 from refnav import core as C  # noqa: E402
 from sim_world import WALL, World, start_world  # noqa: E402
-from test_local_nav import TAPE, crossed, tape_course  # noqa: E402
 from test_refnav_skybeta import DT, LAUNCH_PARAMS, Stack, _rz  # noqa: E402
 
+TAPE = ROOT / "courses" / "start-2026-11-07-tape"
 STAGE1 = json.loads((TAPE / "routes" / "route_v6_start2_stage1_sim.json").read_text())
 W, H = 80, 50                                           # the drone's 640x400 at 1/8: K scaled, every pixel used
 K = np.array([[50.2, 0.0, 39.2], [0.0, 50.2, 24.2], [0.0, 0.0, 1.0]])
@@ -28,11 +29,28 @@ T_BASE_CAM = np.eye(4)
 T_BASE_CAM[:3, :3], T_BASE_CAM[:3, 3] = R_FLU_OPTICAL, (0.105, 0.038, 0.031)
 
 
+def tape_course():
+    """The tape course (CP2 gap 1.0 m), its sim spawn, Chelsea's stage-1 route in map coordinates, and CP2's line."""
+    y = yaml.safe_load((TAPE / "course.yaml").read_text())
+    L, cp2 = y["launch_sim"], y["checkpoints"][0]["line"]
+    yaw = math.radians(L["yaw_deg"])
+    wps = M.route_to_odom(STAGE1["route"], (L["x"], L["y"]), yaw)
+    return start_world(TAPE / "course.yaml"), (L["x"], L["y"]), yaw, wps, np.array(cp2)
+
+
+def crossed(traj: np.ndarray, line: np.ndarray) -> bool:
+    """The trajectory crossed the segment between the line's ends."""
+    p, q = line
+    side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
+    k = int(np.argmax(side != side[0]))
+    return k > 0 and 0.0 < float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p)) < 1.0
+
+
 @pytest.mark.parametrize("p0, yaw0", [((0.0, 0.0, 0.0), 0.0), ((1.2, -0.7, 0.1), 2.3), ((-3.0, 2.0, 0.0), -1.0)])
 def test_route_to_odom_is_the_pads_forward_left(p0, yaw0):
     pad, route = S.Pad(*p0, yaw0), STAGE1["route"]
     want = [np.add(p0[:2], pad.to_odom(f, -l)) for f, l in route]
-    assert np.allclose(M.route_to_odom(route, p0, yaw0), want, atol=1e-12)
+    assert np.allclose(M.route_to_odom(route, p0[:2], yaw0), want, atol=1e-12)
 
 
 def test_despeckle_keeps_surfaces_and_drops_lone_spikes_and_holes():
@@ -129,7 +147,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     prm, _ = C.params_from_doc(STAGE1, {**LAUNCH_PARAMS, "nav": "mppi"})
     m, sk, v, pad, descent, track = C.Mission(prm), Stack(off, 0.0, tau=plant[0], delay=plant[1]), C.Vehicle(), None, S.Descent(), S.Track()
     lag = plant[0] + plant[1]                                               # vel_lag_s: the Stack's lag + dead time
-    mf = M.MppiFollow(0.15, lag)
+    mf = M.MppiFollow(0.15, plant[0], plant[1])                              # MPPI models the plant
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []

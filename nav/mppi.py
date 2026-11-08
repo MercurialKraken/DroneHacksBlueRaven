@@ -40,9 +40,9 @@ normal) at p_ref(t). A detour therefore never leaves the drone "behind schedule"
 COST per step t, summed until the rollout crashes:
     q_lat e_lat^2 + q_lon e_lon^2         position error to p_ref(t), split in the path frame
     q_vel |v - v_ref(t)|^2
-    w_obs exp(-(d - r_drone) / obs_len)   d = clearance at the rollout's position (below)
+    w_obs exp(-(d - r_crash) / obs_len)   d = clearance at the rollout's position (below)
     w_du |V_t - V_(t-1)|^2 / dt^2
-  crash (d < r_drone, or outside the map) at step t:  CRASH * (H - t), and nothing after it counts
+  crash (d < r_crash = r_drone + r_buffer, or outside the map) at step t:  CRASH * (H - t), nothing after counts
   terminal (no crash):  qf_lat e_lat^2 + qf_lon e_lon^2
 
 CLEARANCE d: a 2D distance grid at flight height (Grid2D), one bilinear lookup per rollout step, on CPU or GPU.
@@ -59,6 +59,10 @@ the reference. If both sides carry real weight (each > split_mass), only one sid
 is averaged. The side chosen stays chosen unless the other side's weight is switch_ratio times larger, and it is
 forgotten after side_memory_s without a split.
 
+SAFETY SHIELD. A plan can look passable until newer depth closes the gap, and by then the drone may be unable to stop.
+So every cycle MPPI checks that after this cycle's command the drone could still brake to a stop (the change limit and
+the lag model) without coming within r_drone + shield_margin of anything; if not, it brakes now (`shielded`). The
+invariant 'we can always stop' holds unless something appears inside the braking distance.
 If every candidate crashes (the brake included) the output is a zero-velocity command and `blocked` is set; the
 supervisor decides what next.
 """
@@ -105,12 +109,23 @@ class MppiParams:
     sigma_inc: float = 0.10      # m/s per step, std of the Brownian increments per path-frame axis
     ess_target: float = 0.10     # fraction of K the temperature is tuned to keep as effective samples
     tau: float = 0.55            # s, PX4 velocity-loop lag = 1 / MPC_XY_VEL_P_ACC (1.8)
+    dead_time_s: float = 0.0     # s, command -> PX4 starts responding. T4 fit: tau 0.9 + 0.6 s. MPPI plans from the
+                                 # state PREDICTED at (pose stamp + age + dead time), rolling the pose forward through
+                                 # the commands it sent since: the pose's age (odometry latency, delivery gaps of up
+                                 # to 0.35 s in flight) is passed per call (step(..., pose_age_s))
+    max_pose_age_s: float = 0.5  # s: ages beyond this are clamped (a stamp on a wrong clock must not make MPPI predict
+                                 # seconds ahead); past 0.45 s of silence the flight program holds anyway
     v_max: float = 0.60          # m/s, command speed cap (the organizers' interface clamps at 1.5)
     v_lat: float = 0.50          # m/s, sideways command cap in the path frame
     a_cmd: float = 1.5           # m/s^2, command change limit (half of PX4's MPC_ACC_HOR 3.0)
     v_stopped: float = 0.05      # m/s: where the reference is slower than this, samples may back up ...
     v_back: float = 0.20         # ... at up to this speed (else forward >= 0 along the path)
-    r_drone: float = 0.28        # m, collision radius (course.yaml limits)
+    r_drone: float = 0.29        # m, the drone's physical radius: skybeta-09 fits a 23 in circle (Darion, measured)
+    r_buffer: float = 0.025      # m, safety buffer: MPPI treats anything within r_drone + r_buffer as a crash. The depth
+                                 # grid already pulls walls up to 3.5 cm closer (rasterisation), so the real margin is
+                                 # >= 2.5 cm, ~4 cm typical. (5 cm on top left ~2 cm in the CP4 chicane: it stopped.)
+    shield_margin: float = 0.02  # m: the safety shield brakes NOW if, after this cycle's command, braking to a stop
+                                 # would bring the drone within r_drone + shield_margin of an obstacle
     obs_len: float = 0.05        # m, decay length of the exponential obstacle cost: it matters within ~10 cm of
                                  # r_drone (13% of w_obs at +10 cm), so open corridors aren't slowed by far walls
     w_obs: float = 20.0          # obstacle cost at d = r_drone, per step
@@ -145,6 +160,7 @@ class MppiResult:
     min_d_plan: float                      # smallest predicted clearance along the chosen plan (m)
     ms: float                              # compute time (ms)
     plan: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 2)))   # predicted positions (H x 2)
+    shielded: bool = False                 # the safety shield overrode the plan with a brake
     # debug only (Mppi.debug_samples > 0): a subset of the rollouts and their weights, and the reference
     samples: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 0, 2)))
     sample_w: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
@@ -166,6 +182,7 @@ class Mppi:
         self.u_last: np.ndarray | None = None
         self._side, self._side_age = 0, 0
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
+        self._inflight: list[np.ndarray] = []                        # the last commands sent, newest last (<= 6 s)
         self._vr_now = self.xp.full((self.p.horizon, 2), 1.0)       # the reference velocities this cycle
         self.debug_samples = 0                                       # >0: return that many rollouts (debug/vis only)
         self.rng = self.xp.random.default_rng(self.p.seed)
@@ -270,6 +287,7 @@ class Mppi:
         """Forget the plan, the last command and the detour side (e.g. after a pilot takeover)."""
         self.U[:] = 0.0
         self.u_last = None
+        self._inflight = []
         self.s_now = s_hint
         self._side, self._side_age = 0, 0
 
@@ -347,6 +365,24 @@ class Mppi:
             prev_s, prev_n = vs, vn
         return V
 
+    def brake_seq(self, u_from: Any, steps: int) -> Any:
+        """Commands ramping from u_from to zero under the change limit (steps x 2)."""
+        xp, p = self.xp, self.p
+        amax = p.a_cmd * p.dt
+        out = xp.empty((steps, 2))
+        prev = xp.asarray(u_from, dtype=float)
+        for t in range(steps):
+            prev = prev + self._clipnorm(-prev, amax)
+            out[t] = prev
+        return out
+
+    def _can_stop_after(self, x0: Any, v0: Any, u: Any) -> bool:
+        """After one step of command u from (x0, v0), can braking stop the drone clear of every obstacle?"""
+        xp, p = self.xp, self.p
+        seq = xp.concatenate([xp.asarray(u, dtype=float)[None], self.brake_seq(u, p.horizon)], axis=0)
+        X, _ = self.rollout(x0, v0, seq[None])
+        return bool(xp.min(self.clearance(X[0])) >= p.r_drone + p.shield_margin)
+
     def rollout(self, x0: Any, v0: Any, V: Any) -> tuple[Any, Any]:
         """Exact first-order-lag rollout of command sequences V (K, H, 2): positions and velocities after each step."""
         xp, p = self.xp, self.p
@@ -374,11 +410,12 @@ class Mppi:
         e_lat = xp.sum(E * nm[None], axis=-1)
         d = self.clearance(X)
         dV = xp.diff(xp.concatenate([xp.broadcast_to(xp.asarray(u_last), (K, 1, 2)), V], axis=1), axis=1)
-        obs = p.w_obs * xp.exp(xp.minimum(-(d - p.r_drone) / p.obs_len, 50.0))
+        r_crash = p.r_drone + p.r_buffer
+        obs = p.w_obs * xp.exp(xp.minimum(-(d - r_crash) / p.obs_len, 50.0))
         step = (p.q_lat * e_lat ** 2 + p.q_lon * e_lon ** 2
                 + p.q_vel * xp.sum((Vel - vr[None]) ** 2, axis=-1)
                 + obs + p.w_du * xp.sum(dV ** 2, axis=-1) / (p.dt * p.dt))
-        hit = d < p.r_drone
+        hit = d < r_crash
         crashed = xp.any(hit, axis=1)
         first = xp.where(crashed, xp.argmax(hit, axis=1), H)        # index of the first crashing step
         alive = xp.arange(H)[None, :] < first[:, None]
@@ -431,13 +468,25 @@ class Mppi:
         return self._side
 
     # ------------------------------------------------------------------ step
-    def step(self, pos: Any, vel: Any, u_ext: Any | None = None) -> MppiResult:
-        """One control cycle from the drone's map-frame position (x, y) and velocity (vx, vy)."""
+    def step(self, pos: Any, vel: Any, u_ext: Any | None = None, pose_age_s: float = 0.0) -> MppiResult:
+        """One control cycle from the drone's map-frame position (x, y) and velocity (vx, vy), measured pose_age_s
+        ago (now - the odometry's capture stamp)."""
         t0 = time.perf_counter()
         xp, p = self.xp, self.p
         H, K = p.horizon, p.samples
         x0 = np.asarray(_to_np(pos), float)[:2]
         v0 = np.asarray(_to_np(vel), float)[:2]
+        age = min(max(float(pose_age_s), 0.0), p.max_pose_age_s)  # a future stamp -> 0; a stale/odd one -> capped
+        n_dead = int(round((age + p.dead_time_s) / p.dt))
+        n_dead = min(n_dead, 60)
+        if n_dead > 0:                                               # Smith-predictor style: where the drone will be
+            q = self._inflight[-n_dead:]                             # when this cycle's command starts to act
+            q = [np.zeros(2)] * (n_dead - len(q)) + q
+            ad = math.exp(-p.dt / p.tau)
+            bd = p.tau * (1.0 - ad)
+            for uq in q:
+                x0 = x0 + uq * p.dt + (v0 - uq) * bd
+                v0 = uq + (v0 - uq) * ad
         s_proj, e_now = self._project_point(x0, self.s_now)
         self.s_now = s_proj if self.s_now is None else max(self.s_now, s_proj)   # progress never goes backwards
         if self.u_last is None:
@@ -470,6 +519,10 @@ class Mppi:
                 w = xp.zeros_like(S)
                 w[keep] = w_sub
             U_new = xp.einsum("k,kti->ti", w, V)
+        shielded = False
+        if not blocked and not self._can_stop_after(x0, v0, U_new[0]):  # safety shield: keep 'we can always stop'
+            U_new = self.brake_seq(u_last, H)
+            shielded = True
         Xp, _ = self.rollout(x0, v0, U_new[None])
         dbg = {}
         if self.debug_samples > 0:                                   # the best half by weight, the rest at random
@@ -482,8 +535,9 @@ class Mppi:
                    "reference": _to_np(pr)}
         u = (float(U_new[0, 0]), float(U_new[0, 1]))
         self.u_last = np.array(u)
+        self._inflight = (self._inflight + [self.u_last.copy()])[-60:]
         self.U = xp.concatenate([U_new[1:], U_new[-1:]], axis=0)    # warm start: shift by one step
         return MppiResult(u=u, s=self.s_now, e_lat=e_now, lam=lam, ess=float(ess),
                           best_cost=float(xp.min(S)), crash_frac=float(xp.mean(crashed.astype(float))),
-                          side=side, blocked=blocked, min_d_plan=float(xp.min(self.clearance(Xp[0]))),
+                          side=side, blocked=blocked, shielded=shielded, min_d_plan=float(xp.min(self.clearance(Xp[0]))),
                           ms=(time.perf_counter() - t0) * 1e3, plan=_to_np(Xp[0]), **dbg)

@@ -18,18 +18,21 @@ Per depth frame:
    camera's lowest ray reaches the band's bottom ((z_cam - band bottom) / tan(vfov/2)) are not cleared IF their
    hits came from low returns (low_mark_m under the drone): a rock that drops out of view under the camera stays
    marked, while a stray return at the drone's own height still gets cleared there.
-   A cell is an obstacle only after hits in two frames (l_occ = 2 l_hit - margin): a single stray stereo return,
-   which is common, never becomes a wall.
+   A cell is an obstacle only after hits in two frames (l_occ = 2 l_hit - margin) AND with at least one obstacle
+   neighbour: stray stereo returns are lone cells, real surfaces never are. A lone phantom 0.46 m ahead (two strays
+   in one cell) used to leave every MPPI candidate crashing, BLOCKED, in the realistic-error course sim. Low cells
+   are protected from clearing under the camera only after 3 hits (l_protect), so strays can't lock themselves in.
 3. Log-odds are clamped to [l_min, l_max]. Cells the camera no longer sees keep their value, so side walls stay
-   after they leave the field of view. mem_tau_s fades everything towards unknown, which bounds what odometry drift
-   can do to old walls.
+   after they leave the field of view. Everything fades towards unknown with distance flown (mem_dist_m), which
+   bounds what odometry drift can do to old walls without forgetting walls while the drone waits.
 
 The window is size_m square, centred on the drone, and shifts by whole cells once the drone is recentre_m from its
 centre (cells shifted in are unknown).
 
 Output (grid2d): the signed clearance on the window for nav.mppi / nav.centerline. Occupied cells (log-odds >=
 l_occ) are obstacles; unknown and free cells are both free space (nav.centerline penalises unknown separately, via
-known()). Distances are reduced by half a cell's diagonal so rasterisation never makes a wall look further away.
+known()). Distances are reduced by half a cell's diagonal (3.5 cm) so rasterisation never makes a wall look further
+away; nav.mppi's r_buffer (2.5 cm) sits on top of that: a guaranteed real margin of 2.5 cm, typically ~4 cm.
 """
 from __future__ import annotations
 
@@ -69,9 +72,16 @@ class LocalGridParams:
     l_max: float = 3.5
     l_occ: float = 1.2                # two frames of hits: one stray stereo return never makes a wall
     low_mark_m: float = 0.15          # a hit this far under the drone marks its cell LOW (a rock, a sill)
+    l_protect: float = 2.4            # ...protected from clearing under the camera only with this much evidence (3 hits)
+    min_neighbours: int = 1           # an obstacle cell needs this many obstacle neighbours (8-connected) to count:
+                                      # walls and rocks are always several cells, stray stereo returns are lone cells
     hit_margin_cells: int = 2
     recentre_m: float = 2.0
-    mem_tau_s: float = 60.0
+    mem_dist_m: float = 3.0           # unseen cells fade with DISTANCE FLOWN: a wall last seen ~3 m of flight ago drops
+                                      # below l_occ. Odometry drift grows with distance, so old walls get misplaced (they
+                                      # doubled in the course sim); but a drone waiting beside a wall it can't see must
+                                      # not forget it (a 12 s time constant did, at the CP2 gap, and it hit wall A)
+    mem_tau_s: float = 0.0            # optional extra fading with time (0 = off)
     max_clear_m: float = 3.0          # distances saturate here (also the no-obstacle value)
 
 
@@ -102,6 +112,7 @@ class LocalGrid:
         self.origin = np.zeros(2)                     # world position of cell (0, 0)'s centre
         self._place(np.asarray(centre, dtype=float)[:2])
         self.t_last: float | None = None
+        self.last_sensor: np.ndarray | None = None
         self.frames = 0
 
     # ------------------------------------------------------------------ window
@@ -140,11 +151,17 @@ class LocalGrid:
     def integrate(self, pts_odom: Any, sensor_xyz: Any, z_drone: float, t: float | None = None) -> dict[str, int]:
         """One depth frame: points (N, 3) and the camera's position, both in the odometry frame."""
         p = self.p
+        sensor = np.asarray(sensor_xyz, dtype=float)[:3]
+        k = 0.0
         if t is not None and self.t_last is not None and t > self.t_last and p.mem_tau_s > 0:
-            self.L *= np.float32(math.exp(-(t - self.t_last) / p.mem_tau_s))
+            k += (t - self.t_last) / p.mem_tau_s
+        if self.last_sensor is not None and p.mem_dist_m > 0:
+            k += float(np.hypot(*(sensor[:2] - self.last_sensor[:2]))) / p.mem_dist_m
+        if k > 0:
+            self.L *= np.float32(math.exp(-k))
         if t is not None:
             self.t_last = t
-        sensor = np.asarray(sensor_xyz, dtype=float)[:3]
+        self.last_sensor = sensor.copy()
         self.follow(sensor[:2])
         P = np.asarray(pts_odom, dtype=float).reshape(-1, 3)
         P = P[np.isfinite(P).all(axis=1)]
@@ -176,7 +193,7 @@ class LocalGrid:
             in_blind = np.broadcast_to(steps[None, :] < blind, use.shape)[use]
             i, j, ok = self.cells(pts[use])
             flat = i[ok] * self.n + j[ok]
-            protect = in_blind[ok] & self.low.ravel()[flat]           # low obstacles under the camera stay
+            protect = in_blind[ok] & self.low.ravel()[flat] & (self.L.ravel()[flat] >= p.l_protect)
             flat = np.unique(flat[~protect])
             if len(flat):
                 self.L.ravel()[flat] += np.float32(p.l_miss)
@@ -199,7 +216,13 @@ class LocalGrid:
 
     # ------------------------------------------------------------------ outputs
     def occupied(self) -> np.ndarray:
-        return self.L >= self.p.l_occ
+        occ = self.L >= self.p.l_occ
+        if self.p.min_neighbours <= 0 or not occ.any():
+            return occ
+        o = np.pad(occ, 1).astype(np.int8)
+        nb = sum(o[1 + di:o.shape[0] - 1 + di, 1 + dj:o.shape[1] - 1 + dj]
+                 for di in (-1, 0, 1) for dj in (-1, 0, 1) if di or dj)
+        return occ & (nb >= self.p.min_neighbours)
 
     def known(self) -> np.ndarray:
         return np.abs(self.L) > 1e-3
@@ -212,5 +235,5 @@ class LocalGrid:
             d = np.full(occ.shape, p.max_clear_m)
         else:
             d = np.minimum(_edt_cells(~occ, max_cells) * p.cell, p.max_clear_m)
-        d = d - 0.7072 * p.cell
+        d = d - 0.7072 * p.cell                    # half a cell's diagonal: a wall never looks further than it is
         return Grid2D(d, (float(self.origin[0]), float(self.origin[1])), p.cell)

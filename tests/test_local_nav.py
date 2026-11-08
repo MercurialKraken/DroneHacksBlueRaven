@@ -2,19 +2,16 @@
 closed loop against a simulated forward depth camera in small 2.5D worlds (tests/sim_world.py)."""
 from __future__ import annotations
 
-import json
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
-import yaml
 
 from nav.local_grid import LocalGrid, LocalGridParams
 from nav.local_nav import LocalNav, LocalNavParams, waypoint_path
-from sim_world import WALL, Drone, World, start_world
+from sim_world import Drone, World
 
-TAPE = Path(__file__).resolve().parents[1] / "courses" / "start-2026-11-07-tape"
+WALL = 1.73          # walls are 68 in tall
 
 
 def cell_value(g: LocalGrid, x: float, y: float) -> float:
@@ -188,9 +185,9 @@ def test_a_slanted_wall_crossing_the_line_is_slid_along():
 
 
 def test_a_tall_boulder_on_the_line_is_flown_round():
-    w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 6.5, 1.0, 1.2, WALL),
-                                               (-0.7, 6.5, -1.2, -1.0, WALL), (6.3, 6.5, -1.2, 1.2, WALL),
-                                               (2.8, 3.25, -0.22, 0.23, 0.46)])
+    w = World((-1.0, 7.0), (-1.6, 1.6), boxes=[(-0.7, -0.5, -1.3, 1.3, WALL), (-0.7, 6.5, 1.1, 1.3, WALL),
+                                               (-0.7, 6.5, -1.3, -1.1, WALL), (6.3, 6.5, -1.3, 1.3, WALL),
+                                               (2.8, 3.25, -0.22, 0.23, 0.46)])      # passages 0.87 m each side
     traj, states, nav = fly(w, [(5.6, 0.0)])
     assert states[-1] == "ARRIVED", states[-5:]
     boulder = np.hypot(np.maximum(np.abs(traj[:, 0] - 3.025) - 0.225, 0), np.maximum(np.abs(traj[:, 1] - 0.005) - 0.225, 0))
@@ -207,28 +204,39 @@ def test_a_moved_wall_jutting_across_the_line():
     assert w.clearance(traj).min() > nav.mppi.p.r_drone
 
 
-def tape_course():
-    """The tape course (CP2 gap 1.0 m) and its stage-1 route (Chelsea's file) in map coordinates from the sim spawn."""
-    y = yaml.safe_load((TAPE / "course.yaml").read_text())
-    L, cp2 = y["launch_sim"], y["checkpoints"][0]["line"]
-    route = np.array(json.loads((TAPE / "routes" / "route_v6_start2_stage1_sim.json").read_text())["route"])
-    c, s = math.cos(math.radians(L["yaw_deg"])), math.sin(math.radians(L["yaw_deg"]))
-    wps = np.c_[L["x"] + route[:, 0] * c - route[:, 1] * s, L["y"] + route[:, 0] * s + route[:, 1] * c]
-    return start_world(TAPE / "course.yaml"), (L["x"], L["y"]), math.radians(L["yaw_deg"]), wps, np.array(cp2)
+def _start_world(wall_a, wall_b, cone) -> World:
+    a, b = np.array(wall_b[0], float), np.array(wall_b[1], float)
+    n = np.array([-(b - a)[1], (b - a)[0]]) / np.hypot(*(b - a)) * 0.05
+    (ax0, ay), (ax1, _) = wall_a
+    cx, cy = cone
+    return World((-3.3, 1.2), (0.2, 3.3),
+                 boxes=[(-3.048, 1.0, 0.41, 0.51, WALL),                 # the barrier
+                        (ax0, ax1, ay - 0.05, ay + 0.05, WALL),          # wall A
+                        (cx - 0.115, cx + 0.115, cy - 0.115, cy + 0.115, 0.30)],   # the cone (as a 0.23 m box)
+                 polys=[(np.array([a - n, b - n, b + n, a + n]), WALL)],          # wall B, the diagonal
+                 nets=[(-3.3, -3.048, 0.2, 3.3), (-3.3, 1.2, 3.048, 3.3)])
 
 
-def crossed(traj: np.ndarray, line: np.ndarray) -> bool:
-    """The trajectory crossed the segment between the line's ends."""
-    p, q = line
-    side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
-    k = int(np.argmax(side != side[0]))
-    return k > 0 and 0.0 < float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p)) < 1.0
+# The rebuilt start. FINAL = Darion's tape map (chelsea/course-map ea5071d): CP2 gap 1.00 m, centre (-1.098, 2.153).
+# V2_TIGHT = his earlier drawing, a 0.752 m gap with the cone just before it: kept as a tight-gap stress test.
+START_FINAL = dict(wall_a=((-2.743, 2.591), (-1.339, 2.591)), wall_b=((-1.747, 0.762), (-0.857, 1.715)),
+                   cone=(-1.431, 2.286), wps=[(-2.45, 2.00), (-1.098, 2.153), (-0.485, 2.490)])
+START_V2_TIGHT = dict(wall_a=((-2.743, 2.640), (-1.277, 2.640)), wall_b=((-1.747, 0.762), (-1.023, 1.932)),
+                      cone=(-1.369, 2.335), wps=[(-2.45, 2.05), (-1.13, 2.30), (-0.49, 2.52)])
 
 
+def new_start_world(layout: dict | None = None) -> World:
+    L = layout or START_FINAL
+    return _start_world(L["wall_a"], L["wall_b"], L["cone"])
+
+
+@pytest.mark.parametrize("layout", ["final", "v2_tight"])
 @pytest.mark.parametrize("noisy", [False, True])
-def test_tape_start_through_the_cp2_gap_over_the_cone(noisy):
-    w, start, yaw0, wps, cp2 = tape_course()
-    nav = LocalNav(wps, start, yaw0)
+def test_new_start_through_the_cp2_gap_over_the_cone(noisy, layout):
+    L = START_FINAL if layout == "final" else START_V2_TIGHT
+    w = new_start_world(L)
+    start, yaw0 = (-2.515, 0.914), math.pi / 2                          # the launch mark, facing north
+    nav = LocalNav(L["wps"], start, yaw0)
     drone = Drone(np.array(start, float), yaw0)
     rng = np.random.default_rng(3)
     dt = nav.mppi.p.dt
@@ -245,9 +253,18 @@ def test_tape_start_through_the_cp2_gap_over_the_cone(noisy):
         drone.step((cmd.vx, cmd.vy), cmd.yaw, dt)
         traj.append(drone.x.copy())
     traj = np.array(traj)
+    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # never touches (walls, nets; cone flown over)
+    if layout == "v2_tight":                       # 0.752 m: with the 5 cm buffer ~1 cm to spare: stopping is right
+        assert states[-1] in ("ARRIVED", "BLOCKED") or "STUCK" in states
+        return
     assert states[-1] == "ARRIVED", states[-5:]
-    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # walls and nets; the cone is flown over
-    assert crossed(traj, cp2)
+    # it went THROUGH the gap: crossed the segment between wall A's east end and wall B's NE end
+    p, q = np.array(L["wall_a"][1]), np.array(L["wall_b"][1])
+    side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
+    k = int(np.argmax(side != side[0]))
+    assert k > 0
+    t = float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p))
+    assert 0.0 < t < 1.0
 
 
 # ---------------------------------------------------------------------------------------------- supervisor
@@ -316,3 +333,23 @@ def test_goes_round_an_obstacle_on_the_trajectory_and_rejoins_it(cy):
     assert np.abs(traj[:, 1]).max() > 0.08                                  # it did leave the trajectory
     after = traj[traj[:, 0] > 4.6]                                          # 1.4 m past the box's far side
     assert len(after) and np.abs(after[:, 1]).max() < 0.10                  # and came back onto it
+
+
+
+def test_shield_stops_short_of_a_wall_that_appears_ahead():
+    """Flying at 0.45 m/s, a wall appears 1.2 m ahead across the whole corridor: it must stop clear of it."""
+    from nav.mppi import Grid2D, Mppi
+    free = Grid2D(np.full((200, 60), 3.0), (-1.0, -1.5), 0.05)
+    m = Mppi(free, np.array([[0.0, 0.0], [8.0, 0.0]]), np.array([0.45, 0.45]))
+    x, v = np.zeros(2), np.array([0.45, 0.0])
+    m.step(x, v)
+    X = -1.0 + 0.05 * np.arange(200)[:, None] + np.zeros((200, 60))
+    m.set_grid(Grid2D(np.minimum(3.0, 1.2 - X), (-1.0, -1.5), 0.05))      # wall face at x = 1.2
+    a = math.exp(-m.p.dt / m.p.tau)
+    b = m.p.tau * (1 - a)
+    for _ in range(60):
+        r = m.step(x, v)
+        u = np.array(r.u)
+        x = x + u * m.p.dt + (v - u) * b
+        v = u + (v - u) * a
+    assert x[0] < 1.2 - m.p.r_drone

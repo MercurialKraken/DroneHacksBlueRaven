@@ -312,3 +312,35 @@ def test_grid_can_be_swapped_every_cycle():
     m.set_grid(Grid2D(np.full((10, 10), 0.3), (2.5, -0.5), 0.1))
     assert float(m.clearance(q)[0]) == pytest.approx(0.3)
     assert float(m.clearance(np.array([[9.0, 0.0]]))[0]) == -1.0          # off the new grid
+
+
+def test_dead_time_plans_from_the_predicted_state():
+    """With dead time, MPPI rolls the commands already in flight forward first: same commands, later start."""
+    P, vref = straight_path()
+    m = Mppi(corridor_map(), P, vref, MppiParams(dead_time_s=0.3))
+    r1 = m.step((1.0, 0.0), (0.3, 0.0))
+    assert len(m._inflight) == 1                                          # this cycle's command is now remembered
+    for _ in range(4):
+        m.step((1.0, 0.0), (0.3, 0.0))
+    assert len(m._inflight) == 5
+    assert r1.plan[0, 0] > 1.0 + 0.3 * 0.1                                # the plan starts ahead of the drone
+    r_old = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=0.3)                # a 0.3 s old pose: predicted further on
+    r_new = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=0.0)
+    assert r_old.plan[0, 0] > r_new.plan[0, 0]
+    m.reset()
+    assert m._inflight == []
+
+
+def test_pose_age_is_capped_and_never_negative():
+    """A stamp on the wrong clock must not make MPPI predict seconds ahead (capped at max_pose_age_s), and a stamp
+    from the future means no age at all."""
+    P, vref = straight_path()
+
+    def plan_start(age):
+        m = Mppi(corridor_map(), P, vref, MppiParams(seed=5))
+        for _ in range(8):
+            m.step((1.0, 0.0), (0.3, 0.0))
+        return m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=age).plan[0, 0]
+    assert plan_start(5.0) == pytest.approx(plan_start(0.5))
+    assert plan_start(-1.0) == pytest.approx(plan_start(0.0))
+    assert plan_start(0.5) > plan_start(0.0)

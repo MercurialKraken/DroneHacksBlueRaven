@@ -17,19 +17,13 @@ from nav.depth_points import depth_to_odom  # noqa: E402
 from nav.local_grid import LocalGridParams  # noqa: E402
 from nav.local_nav import LocalNav, LocalNavParams  # noqa: E402
 from nav.mppi import MppiParams  # noqa: E402
+from nav.mppi_ros import route_to_odom  # noqa: E402
 from nav.pose_buffer import PoseBuffer  # noqa: E402
 from refnav import depth as D  # noqa: E402
 
 STEP_EVERY = 2              # nav.step at 10 Hz from the 20 Hz tick: MPPI's warm start shifts one 0.1 s step per call
 DEPTH_STRIDE = 4            # 640x400 -> 160x100 samples
 SPIKE_WIN, SPIKE_TOL_M = 5, 0.3   # a sample is kept only within 0.3 m of its 5x5 median (stereo speckle)
-
-
-def route_to_odom(route: Any, p0: Any, yaw0: float) -> np.ndarray:
-    """[forward, left] from the take-off pose -> odom ENU (x, y)."""
-    r = np.asarray(route, float).reshape(-1, 2)
-    c, s = math.cos(yaw0), math.sin(yaw0)
-    return np.c_[p0[0] + r[:, 0] * c - r[:, 1] * s, p0[1] + r[:, 0] * s + r[:, 1] * c]
 
 
 def despeckle(depth_m: np.ndarray, stride: int = DEPTH_STRIDE) -> np.ndarray:
@@ -46,20 +40,23 @@ def despeckle(depth_m: np.ndarray, stride: int = DEPTH_STRIDE) -> np.ndarray:
 
 
 class MppiFollow:
-    def __init__(self, v_cruise: float, tau_s: float) -> None:
-        self.nav_p, self.mppi_p = LocalNavParams(v_cruise=v_cruise), MppiParams(tau=tau_s)
+    def __init__(self, v_cruise: float, tau_s: float, dead_time_s: float = 0.0) -> None:
+        self.nav_p = LocalNavParams(v_cruise=v_cruise)
+        self.mppi_p = MppiParams(tau=tau_s, dead_time_s=dead_time_s)
         self.poses = PoseBuffer()
         self.nav: LocalNav | None = None
-        self.pos: np.ndarray | None = None          # latest odom ENU position and velocity
+        self.pos: np.ndarray | None = None          # latest odom ENU position, its stamp, and velocity
+        self.stamp = 0.0
         self.vel = np.zeros(2)
         self.ticks = 0
         self.ext: dict[str, Any] | None = None
+        self.cmd = None                             # the latest NavCommand
 
     def on_odom(self, stamp: float, p: Any, q_xyzw: Any, v_flu: Any) -> None:
         x, y, z, w = q_xyzw
         self.poses.add_position(stamp, p)
         self.poses.add_attitude(stamp, (w, x, y, z))
-        self.pos = np.asarray(p, float)
+        self.pos, self.stamp = np.asarray(p, float), stamp
         self.vel = (D.quat_to_mat(w, x, y, z) @ np.asarray(v_flu, float))[:2]
 
     def on_depth(self, stamp: float, depth_m: np.ndarray, K: Any, T_base_cam: np.ndarray,
@@ -75,7 +72,7 @@ class MppiFollow:
 
     def start(self, route: Any, pad: Any) -> None:
         """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it)."""
-        self.nav = LocalNav(route_to_odom(route, pad.p0, pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
+        self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
                             grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p)
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:
@@ -83,7 +80,7 @@ class MppiFollow:
         self.ticks += 1
         if self.nav is None or self.pos is None or (self.ticks - 1) % STEP_EVERY:
             return self.ext
-        c = self.nav.step(self.pos[:2], self.vel, now)
+        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp)
         vn, ve = pad.vector(c.vx, c.vy)
         r = c.mppi
         self.ext = {"vn": vn, "ve": ve, "yaw": math.remainder(pad.yaw0 - c.yaw, math.tau), "state": c.state,
