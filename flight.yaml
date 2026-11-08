@@ -11,4 +11,4 @@
     base_frame: base_link
     control_topic: /refnav/control
     status_topic: /refnav/status
-    yaw_rate_dps: 45.0   # faster turns broke cuVSLAM tracking near walls
+    yaw_rate_dps: 30.0   # 45 deg/s at 0.15 m/s slipped cuVSLAM 14 m in a 90 deg turn on the T4; 30 held 2 cm
