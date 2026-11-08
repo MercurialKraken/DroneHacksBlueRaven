@@ -40,7 +40,8 @@ class SkybetaRefNav(RefNav):
         if self.mission.p.nav == "mppi":
             from blueraven_skybeta.mppi_follow import MppiFollow
             tau = float(self.declare_parameter("mppi_tau_s", 0.55, LOOSE).value)   # 1 / MPC_XY_VEL_P_ACC
-            self.mppi, self.mppi_state = MppiFollow(self.mission.p.speed_mps, tau), None
+            v_cruise = float(self.declare_parameter("mppi_v_cruise_mps", 0.15, LOOSE).value)
+            self.mppi, self.mppi_state = MppiFollow(v_cruise, tau), None
             if self.mission.p.depth_mode != "assisted":      # assisted: RefNav subscribes to the same topics
                 from tf2_ros import Buffer, TransformListener
                 self.tf_buffer = Buffer()

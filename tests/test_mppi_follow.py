@@ -119,7 +119,7 @@ def test_nav_must_be_refnav_or_mppi():
 
 
 # ---------------------------------------------------------------------------------------------- flights
-def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 120.0, world=None):
+def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
     so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone."""
     w0, start, yaw_map, _, _ = tape_course()
@@ -127,7 +127,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     off = math.radians(offset_deg)
     prm, _ = C.params_from_doc(STAGE1, {**LAUNCH_PARAMS, "nav": "mppi"})
     m, sk, v, pad, descent = C.Mission(prm), Stack(off, 0.0), C.Vehicle(), None, S.Descent()
-    mf = M.MppiFollow(prm.speed_mps, 0.3)                                   # the Stack's velocity lag
+    mf = M.MppiFollow(0.15, 0.3)                                           # the Stack's velocity lag
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []

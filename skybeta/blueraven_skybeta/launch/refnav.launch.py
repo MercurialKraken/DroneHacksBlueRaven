@@ -39,6 +39,7 @@ def generate_launch_description():
             'depth_mode': LaunchConfiguration('depth_mode'),
             'nav': LaunchConfiguration('nav'),
             'mppi_tau_s': PythonExpression(['float(', LaunchConfiguration('mppi_tau_s'), ')']),
+            'mppi_v_cruise_mps': PythonExpression(['float(', LaunchConfiguration('mppi_v_cruise_mps'), ')']),
             'depth_topic': LaunchConfiguration('depth_topic'),
             'depth_info_topic': LaunchConfiguration('depth_info_topic'),
             # the pilot arms and switches whenever he is ready after "wait -> arm"; the descent ends only when PX4
@@ -51,6 +52,7 @@ def generate_launch_description():
         # blind: refnav's own depth checks off. nav:=mppi reads /oak/stereo/image_raw (on-camera depth) whatever this is
         DeclareLaunchArgument('depth_mode', default_value='blind', description="'blind' or 'assisted'"),
         DeclareLaunchArgument('nav', default_value='refnav', description="follower: 'refnav' or 'mppi'"),
+        DeclareLaunchArgument('mppi_v_cruise_mps', default_value='0.15', description="MPPI's cruise speed, m/s"),
         DeclareLaunchArgument('mppi_tau_s', default_value='0.55',
                               description='PX4 velocity-loop lag MPPI models (1 / MPC_XY_VEL_P_ACC; T4 sim 1.25)'),
         DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
