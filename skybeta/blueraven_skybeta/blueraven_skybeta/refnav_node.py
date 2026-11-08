@@ -41,8 +41,11 @@ class SkybetaRefNav(RefNav):
         self.mppi = None
         if self.mission.p.nav == "mppi":
             from blueraven_skybeta.mppi_follow import MppiFollow
-            v_cruise = float(self.declare_parameter("mppi_v_cruise_mps", 0.15, LOOSE).value)
-            self.mppi, self.mppi_state = MppiFollow(v_cruise, self.vel_lag_s), None
+            from nav.mppi_ros import MppiPublisher
+            prm = {k: float(self.declare_parameter(k, v, LOOSE).value) for k, v in
+                   (("mppi_v_cruise_mps", 0.15), ("mppi_tau_s", 0.55), ("mppi_dead_time_s", 0.0))}
+            self.mppi = MppiFollow(prm["mppi_v_cruise_mps"], prm["mppi_tau_s"], prm["mppi_dead_time_s"])
+            self.mppi_state, self.mppi_pub = None, MppiPublisher(self, z=self.mission.p.height_m)
             if self.mission.p.depth_mode != "assisted":      # assisted: RefNav subscribes to the same topics
                 from tf2_ros import Buffer, TransformListener
                 self.tf_buffer = Buffer()
@@ -103,7 +106,11 @@ class SkybetaRefNav(RefNav):
         if self.mppi is not None and self.mission.phase == "follow" and now - self.t_odom <= S.HOLD_S:
             if self.mppi.nav is None:
                 self.mppi.start(self.mission.p.route, self.pad)
+                self.mppi_pub.publish_trajectory(self.mppi.nav)
+            cmd = self.mppi.cmd
             self.mission.ext = self.mppi.tick(now, self.pad)
+            if self.mppi.cmd is not cmd:
+                self.mppi_pub.publish(self.mppi.cmd, self.mppi.nav)
             state = (self.mission.ext or {}).get("state")
             if state != self.mppi_state:
                 self.get_logger().info(f"MPPI {self.mppi_state} -> {state}: {self.mission.ext}")

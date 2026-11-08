@@ -105,6 +105,8 @@ class MppiParams:
     sigma_inc: float = 0.10      # m/s per step, std of the Brownian increments per path-frame axis
     ess_target: float = 0.10     # fraction of K the temperature is tuned to keep as effective samples
     tau: float = 0.55            # s, PX4 velocity-loop lag = 1 / MPC_XY_VEL_P_ACC (1.8)
+    dead_time_s: float = 0.0     # s, command -> PX4 starts responding (+ pose latency). T4 fit: tau 0.9 + 0.6 s.
+                                 # MPPI plans from the state PREDICTED after the commands already in flight
     v_max: float = 0.60          # m/s, command speed cap (the organizers' interface clamps at 1.5)
     v_lat: float = 0.50          # m/s, sideways command cap in the path frame
     a_cmd: float = 1.5           # m/s^2, command change limit (half of PX4's MPC_ACC_HOR 3.0)
@@ -166,6 +168,7 @@ class Mppi:
         self.u_last: np.ndarray | None = None
         self._side, self._side_age = 0, 0
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
+        self._inflight: list[np.ndarray] = []                        # commands sent within the last dead_time_s
         self._vr_now = self.xp.full((self.p.horizon, 2), 1.0)       # the reference velocities this cycle
         self.debug_samples = 0                                       # >0: return that many rollouts (debug/vis only)
         self.rng = self.xp.random.default_rng(self.p.seed)
@@ -270,6 +273,7 @@ class Mppi:
         """Forget the plan, the last command and the detour side (e.g. after a pilot takeover)."""
         self.U[:] = 0.0
         self.u_last = None
+        self._inflight = []
         self.s_now = s_hint
         self._side, self._side_age = 0, 0
 
@@ -438,6 +442,15 @@ class Mppi:
         H, K = p.horizon, p.samples
         x0 = np.asarray(_to_np(pos), float)[:2]
         v0 = np.asarray(_to_np(vel), float)[:2]
+        n_dead = int(round(p.dead_time_s / p.dt))
+        if n_dead > 0:                                               # Smith-predictor style: where the drone will be
+            q = self._inflight[-n_dead:]                             # when this cycle's command starts to act
+            q = [np.zeros(2)] * (n_dead - len(q)) + q
+            ad = math.exp(-p.dt / p.tau)
+            bd = p.tau * (1.0 - ad)
+            for uq in q:
+                x0 = x0 + uq * p.dt + (v0 - uq) * bd
+                v0 = uq + (v0 - uq) * ad
         s_proj, e_now = self._project_point(x0, self.s_now)
         self.s_now = s_proj if self.s_now is None else max(self.s_now, s_proj)   # progress never goes backwards
         if self.u_last is None:
@@ -482,6 +495,8 @@ class Mppi:
                    "reference": _to_np(pr)}
         u = (float(U_new[0, 0]), float(U_new[0, 1]))
         self.u_last = np.array(u)
+        if n_dead > 0:
+            self._inflight = (self._inflight + [self.u_last.copy()])[-n_dead:]
         self.U = xp.concatenate([U_new[1:], U_new[-1:]], axis=0)    # warm start: shift by one step
         return MppiResult(u=u, s=self.s_now, e_lat=e_now, lam=lam, ess=float(ess),
                           best_cost=float(xp.min(S)), crash_frac=float(xp.mean(crashed.astype(float))),
