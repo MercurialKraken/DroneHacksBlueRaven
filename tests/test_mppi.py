@@ -329,3 +329,18 @@ def test_dead_time_plans_from_the_predicted_state():
     assert r_old.plan[0, 0] > r_new.plan[0, 0]
     m.reset()
     assert m._inflight == []
+
+
+def test_pose_age_is_capped_and_never_negative():
+    """A stamp on the wrong clock must not make MPPI predict seconds ahead (capped at max_pose_age_s), and a stamp
+    from the future means no age at all."""
+    P, vref = straight_path()
+
+    def plan_start(age):
+        m = Mppi(corridor_map(), P, vref, MppiParams(seed=5))
+        for _ in range(8):
+            m.step((1.0, 0.0), (0.3, 0.0))
+        return m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=age).plan[0, 0]
+    assert plan_start(5.0) == pytest.approx(plan_start(0.5))
+    assert plan_start(-1.0) == pytest.approx(plan_start(0.0))
+    assert plan_start(0.5) > plan_start(0.0)

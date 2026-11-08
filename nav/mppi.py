@@ -113,6 +113,8 @@ class MppiParams:
                                  # state PREDICTED at (pose stamp + age + dead time), rolling the pose forward through
                                  # the commands it sent since: the pose's age (odometry latency, delivery gaps of up
                                  # to 0.35 s in flight) is passed per call (step(..., pose_age_s))
+    max_pose_age_s: float = 0.5  # s: ages beyond this are clamped (a stamp on a wrong clock must not make MPPI predict
+                                 # seconds ahead); past 0.45 s of silence the flight program holds anyway
     v_max: float = 0.60          # m/s, command speed cap (the organizers' interface clamps at 1.5)
     v_lat: float = 0.50          # m/s, sideways command cap in the path frame
     a_cmd: float = 1.5           # m/s^2, command change limit (half of PX4's MPC_ACC_HOR 3.0)
@@ -474,7 +476,8 @@ class Mppi:
         H, K = p.horizon, p.samples
         x0 = np.asarray(_to_np(pos), float)[:2]
         v0 = np.asarray(_to_np(vel), float)[:2]
-        n_dead = int(round((max(pose_age_s, 0.0) + p.dead_time_s) / p.dt))
+        age = min(max(float(pose_age_s), 0.0), p.max_pose_age_s)  # a future stamp -> 0; a stale/odd one -> capped
+        n_dead = int(round((age + p.dead_time_s) / p.dt))
         n_dead = min(n_dead, 60)
         if n_dead > 0:                                               # Smith-predictor style: where the drone will be
             q = self._inflight[-n_dead:]                             # when this cycle's command starts to act
