@@ -20,5 +20,6 @@ setup(
     license='MIT',
     entry_points={'console_scripts': ['mission = blueraven_skybeta.mission_node:main',
                                       'refnav_mission = blueraven_skybeta.refnav_node:main',
+                                      'mppi_shadow = blueraven_skybeta.mppi_shadow:main',
                                       'yaw_offset_probe = blueraven_skybeta.yaw_offset_probe:main']},
 )
