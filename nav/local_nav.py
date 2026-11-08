@@ -4,9 +4,9 @@ Frame: the odometry (take-off) frame, metres. Waypoints are rough by design: the
 dimensions, so a line may clip a wall that moved or slants. MPPI's obstacle cost outweighs its pull towards the line,
 so it slides along such a wall and keeps making progress.
 
-* Reference: the polyline start -> waypoint 1 -> ... -> last waypoint, densified. Speed: cruise on the straights,
-  v_corner within corner_slow_m of a waypoint where the line turns by more than corner_deg, braking (a_stop) only
-  into the last waypoint.
+* Reference: a smooth trajectory through start -> waypoint 1 -> ... -> last waypoint (waypoint_path): straight legs,
+  corners rounded into arcs at most corner_dev_m inside the waypoint, speed from curvature (sqrt(a_lat R)) and
+  limited to a_long speeding up and slowing down; it stops at the last waypoint.
 * Progress: the projection onto that polyline (nav.mppi: monotone, searched only in a window around the current
   progress, so it can't jump to a later leg that passes nearby).
 * Obstacles: nav.local_grid from depth (add_depth), handed to MPPI as its clearance grid whenever it changed.
@@ -36,10 +36,10 @@ from nav.mppi import Mppi, MppiParams, MppiResult
 @dataclass(frozen=True)
 class LocalNavParams:
     v_cruise: float = 0.45
-    v_corner: float = 0.25
-    corner_deg: float = 30.0
-    corner_slow_m: float = 0.6
-    a_stop: float = 0.4
+    corner_dev_m: float = 0.08        # rounded corners pass at most this far inside the waypoint
+    a_lat: float = 0.40               # m/s^2: speed on a corner arc of radius R is at most sqrt(a_lat R)
+    a_long: float = 0.40              # m/s^2: speed-up and slow-down along the trajectory (into and out of corners)
+    v_start: float = 0.0              # the trajectory starts from rest
     step_m: float = 0.05
     accept_m: float = 0.25
     arrive_speed: float = 0.10
@@ -53,30 +53,70 @@ class LocalNavParams:
 
 
 def waypoint_path(start: Any, waypoints: Sequence[Sequence[float]], p: LocalNavParams) -> tuple[np.ndarray, np.ndarray]:
-    """Densified polyline start -> waypoints with its speed profile."""
+    """A smooth trajectory through the waypoints: dense points (step_m apart) and a speed for each.
+
+    Geometry: straight legs between waypoints, each interior corner replaced by a circular arc tangent to both legs.
+    The arc's radius is the largest that keeps it within corner_dev_m of the waypoint and uses at most half of either
+    leg: for a heading change phi, R = corner_dev / (1/cos(phi/2) - 1), tangent length R tan(phi/2).
+    Speed: v_cruise, at most sqrt(a_lat R) on an arc, then limited by a_long both ways (forward pass from v_start,
+    backward pass to 0 at the last waypoint). So it slows smoothly into a corner, speeds up out of it, and stops at
+    the end."""
     V = np.r_[np.asarray(start, float)[None, :2], np.asarray(waypoints, float).reshape(-1, 2)]
     keep = np.r_[True, np.hypot(*np.diff(V, axis=0).T) > 1e-6]
     V = V[keep]
     if len(V) < 2:
         raise ValueError("need at least one waypoint away from the start")
-    pts, s_corner = [V[:1]], []
-    s_acc = 0.0
-    for a, b in zip(V[:-1], V[1:]):
-        L = float(np.hypot(*(b - a)))
-        n = max(1, int(math.ceil(L / p.step_m)))
+    legs = np.diff(V, axis=0)
+    L = np.hypot(*legs.T)
+    u = legs / L[:, None]
+    # per interior corner: tangent length and radius
+    tl, rad, sgn = np.zeros(len(V)), np.full(len(V), np.inf), np.zeros(len(V))
+    for k in range(1, len(V) - 1):
+        cross = u[k - 1, 0] * u[k, 1] - u[k - 1, 1] * u[k, 0]
+        phi = math.atan2(cross, float(np.dot(u[k - 1], u[k])))
+        if abs(phi) < 1e-3:
+            continue
+        R = p.corner_dev_m / (1.0 / math.cos(abs(phi) / 2.0) - 1.0)
+        R = min(R, 0.5 * min(L[k - 1], L[k]) / math.tan(abs(phi) / 2.0))
+        tl[k], rad[k], sgn[k] = R * math.tan(abs(phi) / 2.0), R, math.copysign(1.0, phi)
+    pts, kap = [V[:1]], [0.0]
+
+    def line(a: np.ndarray, b: np.ndarray) -> None:
+        d = float(np.hypot(*(b - a)))
+        if d < 1e-9:
+            return
+        n = max(1, int(math.ceil(d / p.step_m)))
         t = np.linspace(0.0, 1.0, n + 1)[1:]
         pts.append(a + t[:, None] * (b - a))
-        s_acc += L
-        s_corner.append(s_acc)
+        kap.extend([0.0] * n)
+
+    cur = V[0]
+    for k in range(1, len(V)):
+        a_end = V[k] - u[k - 1] * tl[k] if k < len(V) - 1 else V[k]
+        line(cur, a_end)
+        cur = a_end
+        if k < len(V) - 1 and np.isfinite(rad[k]):
+            R, sg = rad[k], sgn[k]
+            normal = np.array([-u[k - 1, 1], u[k - 1, 0]]) * sg           # towards the arc's centre
+            c = a_end + normal * R
+            th0 = math.atan2(*(a_end - c)[::-1])
+            phi = 2.0 * math.atan(tl[k] / R) * sg
+            n = max(2, int(math.ceil(abs(phi) * R / p.step_m)))
+            th = th0 + np.linspace(0.0, phi, n + 1)[1:]
+            arc = c + R * np.c_[np.cos(th), np.sin(th)]
+            pts.append(arc)
+            kap.extend([1.0 / R] * n)
+            cur = arc[-1]
     P = np.concatenate(pts)
+    kap = np.asarray(kap)
     s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
-    v = np.full(len(P), p.v_cruise)
-    for k in range(1, len(V) - 1):                                 # interior waypoints: slow if the line turns
-        d1, d2 = V[k] - V[k - 1], V[k + 1] - V[k]
-        turn = abs(math.degrees(math.atan2(d1[0] * d2[1] - d1[1] * d2[0], float(np.dot(d1, d2)))))
-        if turn > p.corner_deg:
-            v = np.where(np.abs(s - s_corner[k - 1]) <= p.corner_slow_m, np.minimum(v, p.v_corner), v)
-    v = np.minimum(v, np.sqrt(2.0 * p.a_stop * np.maximum(s[-1] - s, 0.0)))
+    v = np.minimum(p.v_cruise, np.sqrt(p.a_lat / np.maximum(kap, 1e-9)))
+    v[0] = min(v[0], p.v_start)
+    for i in range(1, len(v)):                                           # speed up at most a_long
+        v[i] = min(v[i], math.sqrt(v[i - 1] ** 2 + 2.0 * p.a_long * (s[i] - s[i - 1])))
+    v[-1] = 0.0
+    for i in range(len(v) - 2, -1, -1):                                  # slow down at most a_long
+        v[i] = min(v[i], math.sqrt(v[i + 1] ** 2 + 2.0 * p.a_long * (s[i + 1] - s[i])))
     return P, v
 
 

@@ -119,14 +119,21 @@ def test_the_window_follows_the_drone_and_keeps_world_positions():
 
 
 # ---------------------------------------------------------------------------------------------- path
-def test_waypoint_path_slows_at_corners_and_stops_at_the_end():
+def test_waypoint_trajectory_rounds_corners_slows_on_them_and_stops_at_the_end():
     p = LocalNavParams()
     P, v = waypoint_path((0, 0), [(3, 0), (3, -3)], p)
     s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
-    assert s[-1] == pytest.approx(6.0, abs=1e-6)
+    assert np.hypot(*np.diff(P, axis=0).T).max() <= p.step_m + 1e-9           # dense, no jumps
+    corner = np.hypot(P[:, 0] - 3.0, P[:, 1]).min()
+    assert corner == pytest.approx(p.corner_dev_m, abs=0.01)                  # cuts the corner by corner_dev_m only
+    R = p.corner_dev_m / (1 / math.cos(math.pi / 4) - 1)
+    assert v[np.argmin(np.abs(s - s[-1] / 2))] == pytest.approx(math.sqrt(p.a_lat * R), abs=0.01)
     assert v[np.argmin(np.abs(s - 1.5))] == pytest.approx(p.v_cruise)
-    assert v[np.argmin(np.abs(s - 3.0))] <= p.v_corner + 1e-9
-    assert v[-1] == pytest.approx(0.0)
+    assert v[0] == 0.0 and v[-1] == 0.0
+    dv2 = np.abs(np.diff(v ** 2)) / np.maximum(np.diff(s), 1e-9)
+    assert dv2.max() <= 2 * p.a_long + 1e-6                                   # speed changes within a_long
+    P2, v2 = waypoint_path((0, 0), [(1.0, 0), (1.0, 0.3)], p)                 # a short leg limits the radius
+    assert np.hypot(P2[:, 0] - 1.0, P2[:, 1]).min() <= p.corner_dev_m + 1e-9
 
 
 # ---------------------------------------------------------------------------------------------- closed loop
@@ -289,3 +296,25 @@ def test_a_dead_end_stops_short_and_reports_it():
     assert states[-1] in ("STUCK", "BLOCKED") or "STUCK" in states
     assert w.clearance(traj).min() > nav.mppi.p.r_drone
     assert traj[:, 0].max() < 3.0 - nav.mppi.p.r_drone
+
+
+
+# ---------------------------------------------------------------------------------------------- go round and rejoin
+def clip_world(cy: float = 0.15) -> World:
+    """A 2.2 m wide corridor along +x with a wall-height 0.4 m box at (3.0, cy) on / beside the trajectory (y = 0)."""
+    return World((-1.0, 8.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.3, 1.3, WALL), (-0.7, 7.5, 1.1, 1.3, WALL),
+                                                  (-0.7, 7.5, -1.3, -1.1, WALL), (7.3, 7.5, -1.3, 1.3, WALL),
+                                                  (2.8, 3.2, cy - 0.2, cy + 0.2, WALL)])
+
+
+@pytest.mark.parametrize("cy", [0.15, 0.40])                                # through the line / clipping its edge
+def test_goes_round_an_obstacle_on_the_trajectory_and_rejoins_it(cy):
+    w = clip_world(cy)
+    traj, states, nav = fly(w, [(6.5, 0.0)], seconds=45.0)
+    assert states[-1] == "ARRIVED", states[-5:]
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone                     # never touched it
+    box = np.hypot(np.maximum(np.abs(traj[:, 0] - 3.0) - 0.2, 0), np.maximum(np.abs(traj[:, 1] - cy) - 0.2, 0))
+    assert box.min() > nav.mppi.p.r_drone
+    assert np.abs(traj[:, 1]).max() > 0.08                                  # it did leave the trajectory
+    after = traj[traj[:, 0] > 4.6]                                          # 1.4 m past the box's far side
+    assert len(after) and np.abs(after[:, 1]).max() < 0.10                  # and came back onto it

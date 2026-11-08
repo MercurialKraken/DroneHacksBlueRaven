@@ -26,7 +26,8 @@ SAMPLING (Brownian in the path frame, change-limited). Each sample builds its co
     delta_t ~ N(0, sigma_inc^2) per axis, i.i.d.
 so V - U is a random walk (Brownian), every sample changes by at most a_cmd * dt per step (PX4 adds no limit of
 its own on offboard velocity setpoints), and box_t keeps the forward speed along the reference in [0, v_max]
-(never backwards along the path), the sideways speed in [-v_lat, v_lat] and |V| <= v_max. A convex combination of
+(never backwards along the path; where the reference is stopped, e.g. at the path's end, backing up to v_back is
+allowed, or clipping the noise at 0 would bias the average forward and creep the drone on), the sideways speed in [-v_lat, v_lat] and |V| <= v_max. A convex combination of
 such sequences obeys the same limits, so U does too (the change limit only approximately where the path frame
 turns at a corner, because the box is applied after it). Fixed candidates are always included: the previous plan
 (delta = 0), a brake to zero, the reference velocities, and an external command if given, each reached under the
@@ -107,8 +108,11 @@ class MppiParams:
     v_max: float = 0.60          # m/s, command speed cap (the organizers' interface clamps at 1.5)
     v_lat: float = 0.50          # m/s, sideways command cap in the path frame
     a_cmd: float = 1.5           # m/s^2, command change limit (half of PX4's MPC_ACC_HOR 3.0)
+    v_stopped: float = 0.05      # m/s: where the reference is slower than this, samples may back up ...
+    v_back: float = 0.20         # ... at up to this speed (else forward >= 0 along the path)
     r_drone: float = 0.28        # m, collision radius (course.yaml limits)
-    obs_len: float = 0.10        # m, decay length of the exponential obstacle cost
+    obs_len: float = 0.05        # m, decay length of the exponential obstacle cost: it matters within ~10 cm of
+                                 # r_drone (13% of w_obs at +10 cm), so open corridors aren't slowed by far walls
     w_obs: float = 20.0          # obstacle cost at d = r_drone, per step
     crash: float = 1.0e3         # per remaining step after a crash
     q_lat: float = 4.0
@@ -141,6 +145,11 @@ class MppiResult:
     min_d_plan: float                      # smallest predicted clearance along the chosen plan (m)
     ms: float                              # compute time (ms)
     plan: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 2)))   # predicted positions (H x 2)
+    # debug only (Mppi.debug_samples > 0): a subset of the rollouts and their weights, and the reference
+    samples: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 0, 2)))
+    sample_w: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
+    sample_crashed: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0, bool))
+    reference: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 2)))
 
 
 def _to_np(a: Any) -> np.ndarray:
@@ -157,6 +166,8 @@ class Mppi:
         self.u_last: np.ndarray | None = None
         self._side, self._side_age = 0, 0
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
+        self._vr_now = self.xp.full((self.p.horizon, 2), 1.0)       # the reference velocities this cycle
+        self.debug_samples = 0                                       # >0: return that many rollouts (debug/vis only)
         self.rng = self.xp.random.default_rng(self.p.seed)
         self._depth_grid: np.ndarray | None = None
         self.set_grid(grid)
@@ -304,11 +315,11 @@ class Mppi:
         n = xp.sqrt(xp.sum(a * a, axis=-1, keepdims=True))
         return a * xp.minimum(1.0, r / xp.maximum(n, 1e-12))
 
-    def _box(self, v: Any, tg: Any, nm: Any) -> Any:
-        """Path-frame box: forward speed in [0, v_max], sideways in [-v_lat, v_lat], |v| <= v_max."""
+    def _box(self, v: Any, tg: Any, nm: Any, f_lo: float = 0.0) -> Any:
+        """Path-frame box: forward speed in [f_lo, v_max], sideways in [-v_lat, v_lat], |v| <= v_max."""
         xp, p = self.xp, self.p
         vmax = min(p.v_max, self.v_cap)
-        f = xp.clip(v @ tg, 0.0, vmax)
+        f = xp.clip(v @ tg, f_lo, vmax)
         l = xp.clip(v @ nm, -min(p.v_lat, vmax), min(p.v_lat, vmax))
         return self._clipnorm(f[..., None] * tg + l[..., None] * nm, vmax)
 
@@ -326,9 +337,12 @@ class Mppi:
         V = xp.empty((S_ + n_noisy, H, 2))
         prev_s = xp.broadcast_to(xp.asarray(u_last), (S_, 2))
         prev_n = xp.broadcast_to(xp.asarray(u_last), (n_noisy, 2))
+        # forward >= 0 only where the reference moves: where it is stopped (the path's end, waiting), clipping the
+        # noise at 0 would bias the average forward and creep the drone on, so backing up (v_back) is allowed there
+        f_lo = [0.0 if float(xp.sqrt(xp.sum(vr_t * vr_t))) > p.v_stopped else -p.v_back for vr_t in self._vr_now]
         for t in range(H):
-            vs = self._box(prev_s + self._clipnorm(targets[:, t] - prev_s, amax), tg[t], nm[t])
-            vn = self._box(prev_n + self._clipnorm(dU[t] + delta[:, t], amax), tg[t], nm[t])
+            vs = self._box(prev_s + self._clipnorm(targets[:, t] - prev_s, amax), tg[t], nm[t], f_lo[t])
+            vn = self._box(prev_n + self._clipnorm(dU[t] + delta[:, t], amax), tg[t], nm[t], f_lo[t])
             V[:S_, t], V[S_:, t] = vs, vn
             prev_s, prev_n = vs, vn
         return V
@@ -429,6 +443,7 @@ class Mppi:
         if self.u_last is None:
             self.u_last = v0.copy()
         pr, vr, tg, nm = (xp.asarray(a) for a in self.reference(self.s_now))
+        self._vr_now = vr
         u_last = xp.asarray(self.u_last)
 
         targets = [self.U, xp.zeros((H, 2)), vr]                     # previous plan, brake, reference
@@ -456,10 +471,19 @@ class Mppi:
                 w[keep] = w_sub
             U_new = xp.einsum("k,kti->ti", w, V)
         Xp, _ = self.rollout(x0, v0, U_new[None])
+        dbg = {}
+        if self.debug_samples > 0:                                   # the best half by weight, the rest at random
+            n = min(self.debug_samples, int(K if blocked else S.shape[0]))
+            wv = _to_np(w) if not blocked else np.full(int(S.shape[0]), 1.0 / int(S.shape[0]))
+            top = np.argsort(-wv)[: n // 2]
+            rest = np.setdiff1d(np.arange(len(wv)), top)
+            pick = np.r_[top, np.random.default_rng(0).choice(rest, n - len(top), replace=False)]
+            dbg = {"samples": _to_np(X)[pick], "sample_w": wv[pick], "sample_crashed": _to_np(crashed)[pick],
+                   "reference": _to_np(pr)}
         u = (float(U_new[0, 0]), float(U_new[0, 1]))
         self.u_last = np.array(u)
         self.U = xp.concatenate([U_new[1:], U_new[-1:]], axis=0)    # warm start: shift by one step
         return MppiResult(u=u, s=self.s_now, e_lat=e_now, lam=lam, ess=float(ess),
                           best_cost=float(xp.min(S)), crash_frac=float(xp.mean(crashed.astype(float))),
                           side=side, blocked=blocked, min_d_plan=float(xp.min(self.clearance(Xp[0]))),
-                          ms=(time.perf_counter() - t0) * 1e3, plan=_to_np(Xp[0]))
+                          ms=(time.perf_counter() - t0) * 1e3, plan=_to_np(Xp[0]), **dbg)
