@@ -204,11 +204,16 @@ by itself.
 
 ## 6. The route: refnav
 
-`ros2 launch blueraven_skybeta refnav.launch.py` (add `depth_mode:=blind` to fly without depth) starts the
-same flight interface and refnav flying `route.json` start to finish, then descending until PX4 lands and
-disarms. Put the drone on the launch mark facing the launch heading; refnav plans from where it sits. Arm
-only after its log says `wait -> arm`. It sends twists only (`/skybeta/setpoint/twist`, refnav's velocity
-feed-forward plus a position loop, yaw rate at most 45 deg/s); Offboard ending stops it for good.
+`ros2 launch blueraven_skybeta refnav.launch.py` starts the same flight interface and refnav flying
+`routes/route_v6_start2.json` (`route:=route_v6_start2_stage1` for stage 1) as waypoints: the route's own
+corners joined by arcs at most 5 cm inside each corner, slower where they turn tighter, yaw rate at most
+45 deg/s, no map read. Blind by default (`depth_mode:=assisted` adds depth stops only, if a depth topic is
+allowed). Then it descends until PX4 lands and disarms. Put the drone on the launch mark facing the launch
+heading; the route starts from the pose it has when the climb begins, and the log prints that pose. The
+pilot arms and switches whenever he is ready after `wait -> arm`; refnav waits as long as it takes. It
+sends twists only (`/skybeta/setpoint/twist`); odometry silent 0.25 s or `/skybeta/state` 0.5 s in the air
+stops it and lands; Offboard ending stops it for good. Check a route against the map before it flies:
+`python tools/check_waypoint_path.py routes/<route>.json` (`--launch launch_sim` for `*_sim` files).
 
 ## Parameters
 
