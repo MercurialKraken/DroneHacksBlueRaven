@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # fly_route.sh -- fly a route file on skybeta-09: ROUTE 1 (take-off -> through the CP2 gap -> land) by default.
-# Run ON THE DRONE HOST (ssh dronehacks@skybeta-09.local), in its own SSH window.
+# Run ON THE DRONE HOST (ssh dronehacks@skybeta-09.local). Arnav's run routine: two terminals, two commands.
 #
-#   OFFSET=0.0 PROGRAM=refnav ./fly_route.sh go          # refnav (hinson/real-drone), route 1 (Darion's method)
-#   OFFSET=0.0 PROGRAM=refnav ROUTE=route_v7_window ./fly_route.sh go    # the full course (route 2, Hinson's)
-#   ./fly_route.sh status    # another window: nodes, mission phase, PX4 state (one shot)
-#   ./fly_route.sh stop      # stop the program and the recording (also what Ctrl-C or any failure in 'go' does)
-#   ./fly_route.sh check     # only the pre-flight checks
+#   Terminal 1:  cd ~/team_ws && PROGRAM=refnav COURSE=start-2026-11-07-tape ROUTE=route_v7_cp2_simple OFFSET=0.0 ./fly_route.sh go
+#   Terminal 2:  cd ~/team_ws && ./fly_route.sh status       # one line per second until Ctrl-C
+#   Afterwards:  ./fly_route.sh stop                          # stops the program + recording, prints the bag path
+#   ./fly_route.sh check     # only the pre-flight checks (go runs them first)
 #   ./fly_route.sh build     # rebuild blueraven_skybeta after copying new code (never restarts the stack)
 #
-# OFFSET is odom_to_ned_yaw_offset_rad. It has no default ON PURPOSE (a wrong value flies the drone off at that angle);
-# skybeta-09's measured value is 0.0 (Darion's hover_160526 read-out: -0.11 deg in flight). PROGRAM=shell (our
-# blueraven_skybeta route mission) failed route following on the T4 (2026-11-07): it is refused unless the built
-# package has the route mission, and refnav is the program for routes.
-# The hover's go.sh/stop.sh waited a fixed 4 s (the example exiting), 15 s (reaching WAIT_OFFBOARD) and 3+2 s (the
-# bag closing). Here each is a poll on the event itself. NTP is never turned back on. Never restarts the stack (a
-# restart needs an FC replug); never arms. Reviewed by hinson-claude (10 fixes applied).
+# 'go' does everything in one shot: NTP off, the image, the organizers' example stopped, process counts (ps, never
+# 'ros2 node list': a cold daemon printed zeros), odometry ~30 Hz, the PX4 link, the route file refnav will read (its
+# speed and points printed); then the recording, the launch, and GO once refnav logs 'take-off pose'. It REFUSES if
+# a flight_interface, mission, launch or recording already runs (stop first). No fixed sleeps: every wait polls
+# every 0.5 s with a timeout and names the failing check. It never arms and never restarts the stack (a restart
+# needs an FC replug). OFFSET is odom_to_ned_yaw_offset_rad and has no default ON PURPOSE (a wrong value flies the
+# drone off at that angle); skybeta-09's measured value is 0.0 (Darion's hover_160526 read-out: -0.11 deg).
+# ABORT: the pilot takes over -> Ctrl-C terminal 1 (the interface stops publishing) -> the pilot disarms.
 set -uo pipefail
 
 C=skybeta-stack                                   # the organizers' stack container
@@ -24,14 +24,21 @@ ROUTE=${ROUTE:-route_v7_cp2_simple}               # a route file name, without .
 COURSE=${COURSE:-start-2026-11-07-tape}           # the course folder (courses/<COURSE>/routes/)
 HEIGHT=${HEIGHT:-0.7}
 RADIUS=${RADIUS:-0.3}                             # shell only: corner arcs (m)
-BAGS=/root/team_ws/bags
+EXPECT_IMAGE=${EXPECT_IMAGE:-skybeta-team:0.3.3}  # the stack image Arnav expects (on-camera depth)
+MAX_SPEED=${MAX_SPEED:-0.15}                      # the route file's speed_mps may not exceed this (Chelsea: all 0.15)
+BAGS=/root/team_ws/bags                           # = ~/team_ws/bags on the drone host
 WS=/root/team_ws
+MON=/tmp/fly_status.py                            # the status monitor, copied into the container on use
 TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybeta/setpoint/pose \
-/skybeta/setpoint/twist /blueraven/mission/status /fmu/in/vehicle_visual_odometry /fmu/out/vehicle_local_position \
-/fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude /fmu/out/vehicle_land_detected \
-/fmu/out/distance_sensor /tf /tf_static"          # no camera images: an outside image reader starved cuVSLAM
+/skybeta/setpoint/twist /blueraven/mission/status /refnav/status /fmu/in/vehicle_visual_odometry \
+/fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude \
+/fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static"   # no camera images: an outside image reader starved cuVSLAM
 FI_PROC="lib/skybeta_flight_interface/flight_interface"
-OURS_PROC="ros2 launch blueraven_skybeta|ros2 bag record|$FI_PROC|lib/blueraven_skybeta/(mission|refnav_mission)"
+MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
+EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
+LAUNCH_PROC="ros2 launch blueraven_skybeta"
+BAG_PROC="ros2 bag record"
+OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC"
 
 in_c() { docker exec "$C" bash -ic "$1" 2>/dev/null; }      # inside the stack container, ROS sourced
 in_ws() { in_c "source $WS/install/setup.bash >/dev/null 2>&1; $1"; }   # ...with the team workspace too
@@ -45,17 +52,144 @@ poll() {                                          # poll <timeout s> <what> <com
     sleep 0.5                                     # the poll interval, not a wait: it goes on the moment it's true
   done
 }
-nodes() { in_c "ros2 node list" | tr -d '\r'; }
-count() { nodes | grep -cx "$1"; }
-procs() { docker exec "$C" pgrep -fc "$1" 2>/dev/null || echo 0; }   # process-level count (a node list can be empty)
+# processes in the container matching an ERE, not counting shells/tmux that merely mention it (exactly one number)
+procs() { docker exec "$C" pgrep -af "$1" 2>/dev/null | grep -vE '^[0-9]+ (([^ ]*/)?(ba)?sh|tmux|pgrep) ' | grep -c . ; }
 state() { in_c "timeout 3 ros2 topic echo --once /skybeta/state" | tr -d '\r'; }
-phase() { in_c "timeout 3 ros2 topic echo --once /blueraven/mission/status" | grep -o '"phase": "[A-Z_]*"' | cut -d'"' -f4; }
+
+put_monitor() {                                   # the status monitor: rclpy, small topics only (no images)
+  docker exec -i "$C" bash -c "cat > $MON" <<'PY'
+import glob, json, os, re, statistics, sys, time
+import rclpy
+from rclpy.qos import qos_profile_sensor_data as QOS   # best effort: matches reliable and best-effort publishers
+from nav_msgs.msg import Odometry
+from std_msgs.msg import String
+try:
+    from px4_msgs.msg import EstimatorStatusFlags, VehicleOdometry
+except ImportError:
+    EstimatorStatusFlags = VehicleOdometry = None
+PATS = {"interface": r"lib/skybeta_flight_interface/flight_interface",
+        "mission": r"lib/blueraven_skybeta/(mission|refnav_mission)( |$)",
+        "example": r"ros2 launch competitor_example|/lib/competitor_example/",
+        "recorder": r"ros2 bag record"}
+SHELL = re.compile(r"^(([^ ]*/)?(ba)?sh|tmux|pgrep) ")
+
+
+def procs():
+    n = dict.fromkeys(PATS, 0)
+    for f in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            cmd = open(f, "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        if not cmd or SHELL.match(cmd) or "fly_status.py" in cmd:
+            continue
+        for k, p in PATS.items():
+            n[k] += bool(re.search(p, cmd))
+    return n
+
+
+def yn(v):
+    return "?" if v is None else ("YES" if v else "no")
+
+
+def main():
+    until = "--until-disarmed" in sys.argv
+    summary = "--summary" in sys.argv
+    dur = float(os.environ.get("DURATION") or 0)
+    rclpy.init()
+    node = rclpy.create_node("fly_status")
+    st = {"odom": 0, "ev": 0, "ev_age": None, "flags": None, "state": None, "rphase": None, "mphase": None}
+
+    def js(m):
+        try:
+            return json.loads(m.data)
+        except ValueError:
+            return None
+
+    def on_odom(m):
+        st["odom"] += 1
+
+    def on_ev(m):
+        st["ev"] += 1
+        st["ev_age"] = (m.timestamp - m.timestamp_sample) / 1000.0
+
+    def on_flags(m):
+        st["flags"] = (bool(getattr(m, "cs_ev_pos", False)), bool(getattr(m, "cs_ev_yaw", False)))
+
+    def on_state(m):
+        st["state"] = js(m)
+
+    def on_r(m):
+        st["rphase"] = (js(m) or {}).get("phase")
+
+    def on_m(m):
+        st["mphase"] = (js(m) or {}).get("phase")
+
+    node.create_subscription(Odometry, "/visual_slam/tracking/odometry", on_odom, QOS)
+    node.create_subscription(String, "/skybeta/state", on_state, QOS)
+    node.create_subscription(String, "/refnav/status", on_r, QOS)
+    node.create_subscription(String, "/blueraven/mission/status", on_m, QOS)
+    if VehicleOdometry is not None:
+        node.create_subscription(VehicleOdometry, "/fmu/in/vehicle_visual_odometry", on_ev, QOS)
+        node.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", on_flags, QOS)
+    t0 = last = time.monotonic()
+    rates, armed_seen, line = [], False, ""
+    try:
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+            now = time.monotonic()
+            if now - last < 1.0:
+                continue
+            dt, last = now - last, now
+            s = st["state"] or {}
+            armed = s.get("armed")
+            n = procs()
+            hz, ev_hz = st["odom"] / dt, st["ev"] / dt
+            rates.append(hz)
+            st["odom"] = st["ev"] = 0
+            age = "" if st["ev_age"] is None else f" age {st['ev_age']:.0f} ms"
+            f = st["flags"]
+            fused = "fusion ?" if f is None else ("fused " + "+".join(k for k, v in zip(("pos", "yaw"), f) if v)
+                                                   if any(f) else "NOT FUSED")
+            line = (f"[{time.strftime('%H:%M:%S')}] phase {st['rphase'] or st['mphase'] or '-'} | odom {hz:4.1f} Hz | "
+                    f"EV {ev_hz:4.1f} Hz{age} {fused} | PX4 link {yn(s.get('px4_link'))} armed {yn(armed)} "
+                    f"landed {yn(s.get('landed'))} | procs interface {n['interface']} mission {n['mission']} "
+                    f"example {n['example']} recorder {n['recorder']}")
+            print(line, flush=True)
+            armed_seen = armed_seen or armed is True
+            if until and armed_seen and armed is False:
+                print("DISARMED", flush=True)
+                break
+            if dur and now - t0 >= dur:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if summary:
+            steady = rates[1:] or rates            # the first second includes discovery
+            print(f"SUMMARY odom_hz={statistics.median(steady) if steady else 0:.1f}", flush=True)
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+main()
+PY
+}
 
 check() {
   [ "$(hostname)" = skybeta-09 ] || die "this is $(hostname), not skybeta-09 (another team's drone is a disqualification)"
-  [ "$(timedatectl show -p NTP --value)" = no ] || die "NTP is on: sudo timedatectl set-ntp false (a clock step restarts the stack)"
+  if [ "$(timedatectl show -p NTP --value)" != no ]; then          # turning it OFF never steps the clock
+    say "NTP is on: turning it off (sudo may ask for the drone password)"
+    sudo timedatectl set-ntp false || die "couldn't turn NTP off: sudo timedatectl set-ntp false"
+  fi
   docker ps --format '{{.Names}}' | grep -qx "$C" || die "the $C container isn't running"
+  local img; img=$(docker inspect -f '{{.Config.Image}}' "$C")
+  say "image: $img"
+  [[ $img == *"$EXPECT_IMAGE"* ]] || die "the stack runs $img, expected $EXPECT_IMAGE (EXPECT_IMAGE=$img to accept it)"
   [[ $ROUTE == *_sim ]] && die "ROUTE=$ROUTE is a SIM file (it starts at the simulator's spawn, 0.2 m north of the real mark): use ${ROUTE%_sim}"
+  local n                                         # a second launch must never start: nobody re-runs go without stop
+  n=$(procs "$LAUNCH_PROC|$BAG_PROC|$MISSION_PROC")
+  [ "$n" = 0 ] || die "our launch/mission/recording is already running ($n processes): ./fly_route.sh stop first"
   # the repository refnav/the shell actually read (blueraven_skybeta.mission_core._repo_root), not a guess
   REPO=$(in_ws "python3 -c 'from blueraven_skybeta.mission_core import _repo_root; print(_repo_root())'" | tr -d '\r' | tail -1)
   [ -n "$REPO" ] || die "can't import blueraven_skybeta in $WS: build it (./fly_route.sh build)"
@@ -63,52 +197,74 @@ check() {
   if [ "$PROGRAM" = refnav ]; then
     in_ws "ros2 pkg executables blueraven_skybeta" | grep -q refnav_mission || die "refnav isn't built in $WS (needs hinson/real-drone): ./fly_route.sh build"
     in_ws "test -f \$(ros2 pkg prefix blueraven_skybeta)/share/blueraven_skybeta/launch/refnav.launch.py" || die "refnav.launch.py isn't installed"
+    RF=$REPO/courses/$COURSE/routes/$ROUTE.json   # exactly the file refnav.launch.py reads
   elif [ "$PROGRAM" = shell ]; then
     in_c "grep -q 'def load_route' $REPO/skybeta/blueraven_skybeta/blueraven_skybeta/mission_core.py" \
       || die "this blueraven_skybeta has no route mission (hinson/real-drone's shell is hover-only): use PROGRAM=refnav"
+    RF=$(in_c "for f in $REPO/courses/$COURSE/routes/$ROUTE.json $REPO/routes/$ROUTE.json; do [ -f \$f ] && echo \$f && break; done" | tr -d '\r')
   else
     die "PROGRAM must be refnav or shell"
   fi
-  RF=$(in_c "for f in $REPO/courses/$COURSE/routes/$ROUTE.json $REPO/routes/$ROUTE.json; do [ -f \$f ] && echo \$f && break; done" | tr -d '\r')
-  [ -n "$RF" ] || die "no $ROUTE.json under $REPO/courses/$COURSE/routes or $REPO/routes"
+  [ -n "$RF" ] && in_c "test -f $RF" || die "no route file $REPO/courses/$COURSE/routes/$ROUTE.json"
+  local info
+  info=$(in_c "python3 -c \"import json,hashlib; b=open('$RF','rb').read(); d=json.loads(b); p=d.get('params',{}); print('speed', p.get('speed_mps'), 'm/s, fillet', p.get('fillet_m'), 'm, points', d['route'], 'sha1', hashlib.sha1(b).hexdigest()[:7])\"" | tr -d '\r' | tail -1)
+  [ -n "$info" ] || die "route file $RF doesn't parse"
   say "route: $RF"
-  in_c "timeout 3 ros2 topic echo --once /visual_slam/tracking/odometry" | grep -q position || die "no odometry (cuVSLAM)"
+  say "route: $info"
   local s; s=$(state)
-  echo "$s" | grep -q '"px4_link": true' || die "/skybeta/state: no PX4 link: $s"
+  echo "$s" | grep -q '"px4_link": true' || die "/skybeta/state: no PX4 link (FC plugged? replugged after a stack restart?): $s"
   echo "$s" | grep -q '"armed": false' || die "PX4 is ARMED already"
   echo "$s" | grep -q '"landed": true' || die "PX4 doesn't report landed"
-  [ -n "$(nodes)" ] || die "ros2 node list is empty (ROS daemon?): every count below would pass wrongly"
-  if (( $(count /competitor_example) > 0 )); then   # the stack starts the organizers' example (a 5 m square on arm)
+  if [ "$(procs "$EXAMPLE_PROC")" != 0 ]; then    # the stack starts the organizers' example (a 5 m square on arm)
     say "stopping the organizers' example (Ctrl-C in its tmux window)"
     docker exec "$C" tmux send-keys -t skybeta:competitor C-c
-    poll 20 "the organizers' example AND its own flight_interface exiting" \
-      bash -c "[ \$(docker exec $C bash -ic 'ros2 node list' 2>/dev/null | tr -d '\r' | grep -cxE '/competitor_example|/flight_interface') = 0 ] && ! docker exec $C pgrep -f '$FI_PROC' >/dev/null"
+    poll 30 "the organizers' example AND its own flight_interface exiting" \
+      bash -c "[ \"\$(docker exec $C pgrep -af '$EXAMPLE_PROC|$FI_PROC' 2>/dev/null | grep -vE '^[0-9]+ (([^ ]*/)?(ba)?sh|tmux|pgrep) ' | grep -c .)\" = 0 ]"
   fi
-  (( $(count /flight_interface) == 0 && $(procs "$FI_PROC") == 0 )) \
-    || die "a flight_interface is already running (two must never run): ./fly_route.sh stop, or find who started it"
-  (( $(count /oak) == 1 )) || die "expected exactly one /oak camera node, found $(count /oak)"
-  say "checks passed (PROGRAM=$PROGRAM ROUTE=$ROUTE HEIGHT=$HEIGHT)"
+  n=$(procs "$FI_PROC")
+  [ "$n" = 0 ] || die "a flight_interface is already running ($n; two must never run): ./fly_route.sh stop, or find who started it"
+  put_monitor || die "couldn't copy the status monitor into $C"
+  local sum hz
+  sum=$(in_c "DURATION=4 python3 $MON --summary" | tr -d '\r')
+  echo "$sum" | grep -v SUMMARY | tail -1
+  hz=$(echo "$sum" | grep -o 'odom_hz=[0-9.]*' | cut -d= -f2)
+  awk -v h="${hz:-0}" 'BEGIN { exit !(h >= 20) }' || die "odometry ${hz:-none} Hz over 4 s (need ~30: cuVSLAM)"
+  say "checks passed: odometry $hz Hz (PROGRAM=$PROGRAM ROUTE=$ROUTE HEIGHT=$HEIGHT)"
 }
 
 stop() {                                          # SIGINT, then wait until they have exited (a bag closes cleanly)
-  docker exec "$C" pkill -INT -f "ros2 launch blueraven_skybeta" 2>/dev/null && say "stopping the program"
-  docker exec "$C" pkill -INT -f "ros2 bag record" 2>/dev/null && say "stopping the recording"
-  local deadline=$((SECONDS + 20))
-  while docker exec "$C" pgrep -f "$OURS_PROC" >/dev/null 2>&1; do
-    (( SECONDS >= deadline )) && { say "still running after 20 s: docker exec $C pkill -f '$OURS_PROC'"; return 1; }
+  docker exec "$C" pkill -INT -f "$LAUNCH_PROC" 2>/dev/null && say "stopping the program"
+  docker exec "$C" pkill -INT -f "$BAG_PROC" 2>/dev/null && say "stopping the recording"
+  docker exec "$C" pkill -INT -f "$MON --until-disarmed" 2>/dev/null
+  local deadline=$((SECONDS + 20)) ok=0
+  while [ "$(procs "$OURS_PROC")" != 0 ]; do
+    (( SECONDS >= deadline )) && { say "still running after 20 s: docker exec $C pkill -f '$OURS_PROC'"; ok=1; break; }
     sleep 0.5
   done
-  say "stopped (NTP untouched: keep it off on flight days)"
+  local run; run=$(docker exec "$C" cat "$BAGS/LAST_RUN" 2>/dev/null | tr -d '\r')
+  if [ -n "$run" ]; then
+    if docker exec "$C" test -f "$BAGS/$run/metadata.yaml"; then
+      say "bag: ~/team_ws/bags/$run (closed cleanly; log ~/team_ws/bags/$run.launch.log)"
+    else
+      say "bag: ~/team_ws/bags/$run (NOT closed: no metadata.yaml yet; log ~/team_ws/bags/$run.launch.log)"
+    fi
+    say "copy it off: scp -r dronehacks@skybeta-09.local:~/team_ws/bags/$run ."
+  fi
+  (( ok == 0 )) && say "stopped (NTP untouched: keep it off between flights)"
+  return $ok
 }
 
 build() {                                         # after copying new code to the drone; the stack is not restarted
   in_c "cd $WS && team_build.sh --packages-select blueraven_skybeta" | tail -3
 }
 
-status() {
-  say "nodes: flight_interface $(count /flight_interface) (processes $(procs "$FI_PROC")), mission $(( $(count /blueraven_mission) + $(count /refnav) )), oak $(count /oak), competitor_example $(count /competitor_example)"
-  say "mission: $(in_c "timeout 3 ros2 topic echo --once /blueraven/mission/status" | grep -o "'{.*}'" | tr -d "'")"
-  say "state: $(state | grep -o "'{.*}'" | tr -d "'")"
+status() {                                        # one line per second: phase, odometry, EV fusion, PX4, processes
+  put_monitor || die "couldn't copy the status monitor into $C"
+  if [ -t 0 ] && [ -t 1 ]; then
+    docker exec -it "$C" bash -ic "python3 $MON" 2>/dev/null   # Ctrl-C reaches the monitor through the tty
+  else
+    in_c "DURATION=${DURATION:-10} python3 $MON"
+  fi
 }
 
 go() {
@@ -119,10 +275,11 @@ go() {
   trap 'stop' EXIT                                # any failure from here on stops the recording and the program
   trap 'echo; say "Ctrl-C: stopping"; exit 130' INT
   # 1. record, and only go on once the recorder has actually subscribed (no fixed wait)
+  docker exec "$C" bash -c "mkdir -p $BAGS && echo $run > $BAGS/LAST_RUN"
   docker exec -d "$C" bash -ic "mkdir -p $BAGS && cd $BAGS && exec ros2 bag record -s mcap -o $run $TOPICS > $BAGS/$run.record.log 2>&1"
-  poll 15 "the recorder subscribing to /skybeta/state" \
+  poll 30 "the recorder subscribing to /skybeta/state" \
     bash -c "docker exec $C bash -ic 'ros2 topic info -v /skybeta/state' 2>/dev/null | grep -q rosbag2"
-  say "recording $BAGS/$run"
+  say "recording ~/team_ws/bags/$run"
   # 2. the program, in the background with its log
   local launch
   if [ "$PROGRAM" = shell ]; then
@@ -132,44 +289,29 @@ go() {
   fi
   say "launching: $launch"
   docker exec -d "$C" bash -ic "cd $WS && source install/setup.bash && exec $launch > $BAGS/$run.launch.log 2>&1"
-  poll 30 "one /flight_interface" bash -c "[ \$(docker exec $C bash -ic 'ros2 node list' 2>/dev/null | tr -d '\r' | grep -cx /flight_interface) = 1 ]"
+  poll 30 "one flight_interface process" bash -c "[ \"\$(docker exec $C pgrep -fc '$FI_PROC' 2>/dev/null)\" = 1 ]"
   # 3. ready, by the program's own word
   if [ "$PROGRAM" = shell ]; then
     poll 60 "the shell reaching WAIT_OFFBOARD (drone still on the mark, landed, fresh odometry)" \
       bash -c "docker exec $C bash -ic 'timeout 3 ros2 topic echo --once /blueraven/mission/status' 2>/dev/null | grep -q WAIT_OFFBOARD"
   else
-    poll 60 "refnav's 'take-off pose' log line (it has the pad frame)" \
+    poll 60 "refnav's 'take-off pose' log line (it has the pad frame; see ~/team_ws/bags/$run.launch.log)" \
       bash -c "docker exec $C grep -q 'take-off pose' $BAGS/$run.launch.log"
+    docker exec "$C" grep -m1 'take-off pose' "$BAGS/$run.launch.log" | tr -d '\r'
   fi
-  local nfi nm
-  nfi=$(count /flight_interface); nm=$(( $(count /blueraven_mission) + $(count /refnav) ))
-  [ "$nfi" = 1 ] && [ "$(procs "$FI_PROC")" = 1 ] && [ "$nm" = 1 ] && [ "$(count /competitor_example)" = 0 ] \
-    || die "process count: flight_interface $nfi (processes $(procs "$FI_PROC")), mission $nm, competitor_example $(count /competitor_example) (need 1, 1, 1, 0)"
+  local nfi nm nex
+  nfi=$(procs "$FI_PROC"); nm=$(procs "$MISSION_PROC"); nex=$(procs "$EXAMPLE_PROC")
+  [ "$nfi" = 1 ] && [ "$nm" = 1 ] && [ "$nex" = 0 ] \
+    || die "process count: flight_interface $nfi, mission $nm, competitor_example $nex (need 1, 1, 0)"
   echo
-  say "READY. Team approves, then the PILOT: arm with the mode switch on ALTITUDE, throttle low, then switch to POSITION within a few seconds."
+  say "GO. Team approves, then the PILOT: arm with the mode switch on ALTITUDE, throttle low, then switch to POSITION within a few seconds."
   say "Abort: the pilot takes over (Position/Altitude). If it then sits ARMED on the ground, Ctrl-C here (the interface stops publishing), then disarm."
-  # 4. follow it to the end: phases (shell) or PX4 arming state (refnav), and warn if the processes change
-  local last="" p s pass=0
-  while :; do
-    s=$(state)                                    # once per pass
-    if [ "$PROGRAM" = shell ]; then
-      p=$(phase); [ -n "$p" ] && [ "$p" != "$last" ] && { say "phase: $p"; last=$p; }
-      [ "$p" = DONE ] || [ "$p" = ABORTED ] && break
-    else
-      echo "$s" | grep -q '"armed": true' && [ "$last" != armed ] && { say "armed"; last=armed; }
-      [ "$last" = armed ] && echo "$s" | grep -q '"armed": false' && break
-    fi
-    if (( ++pass % 10 == 0 )); then              # about every 5 s
-      nfi=$(count /flight_interface); nm=$(( $(count /blueraven_mission) + $(count /refnav) ))
-      [ "$nfi" = 1 ] && [ "$nm" = 1 ] || say "WARNING: flight_interface $nfi, mission $nm (expected 1 and 1)"
-    fi
-    sleep 0.5
-  done
+  # 4. follow it to the disarm: one status line per second (the same as 'status')
+  in_c "python3 $MON --until-disarmed" | tr -d '\r'
   poll 30 "PX4 disarming" bash -c "docker exec $C bash -ic 'timeout 3 ros2 topic echo --once /skybeta/state' 2>/dev/null | grep -q '\"armed\": false'"
   say "disarmed"
   trap - EXIT
   stop
-  say "done. Bag: $BAGS/$run (log: $BAGS/$run.launch.log). Off the drone: scp -r dronehacks@skybeta-09.local:~/team_ws/bags/$run ."
 }
 
 case "${1:-go}" in
