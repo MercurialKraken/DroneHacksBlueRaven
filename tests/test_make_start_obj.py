@@ -29,7 +29,8 @@ def test_the_committed_start_mesh_is_what_the_numbers_make(tmp_path):
     p = tmp_path / "start.obj"
     p.write_text(M.obj_text(M.start_geometry(CFG)), encoding="utf-8")
     made, committed = parse_obj_groups(p), parse_obj_groups(M.START_OBJ)
-    assert set(made) == set(committed) == {"Start wall A", "Start wall B diagonal", "Boulder 6 CP2 cone"}
+    assert set(made) == set(committed) == {"Start wall A", "Start wall B diagonal", "Boulder 6 CP2 cone",
+                                           "Start wall C open area"}
     for k in made:
         assert np.allclose(made[k], committed[k], atol=1e-4), k
 
@@ -45,8 +46,21 @@ def test_mark_frame_points_are_forward_and_left_of_the_launch_mark():
 def test_the_same_tape_numbers_in_either_frame_give_the_same_start():
     g0 = M.start_geometry(CFG)
     rs = {**CFG["rebuilt_start"], "frame": "mark", "wall_a": _to_mark(g0["A"]), "wall_b": _to_mark(g0["B"]),
-          "cone": _to_mark(g0["cone"])[0]}
+          "cone": _to_mark(g0["cone"])[0], "wall_c": _to_mark(g0["C"])}
     assert M.obj_text(M.start_geometry({**CFG, "rebuilt_start": rs})) == M.obj_text(g0)
+
+
+def test_wall_c_is_centred_on_its_line_and_optional():
+    g = M.start_geometry(CFG)
+    fp = np.array(M.centred_footprint(g["C"][0], g["C"][1], g["t"]))
+    assert np.allclose(fp.mean(axis=0), g["C"].mean(axis=0))                         # centred on its line
+    assert abs(np.linalg.norm(fp[3] - fp[0]) - g["t"]) < 1e-9                         # 4 in thick
+    assert abs(np.linalg.norm(fp[1] - fp[0]) - np.linalg.norm(g["C"][1] - g["C"][0])) < 1e-9
+    assert abs(np.linalg.norm(g["C"][1] - g["C"][0]) - 1.613) < 0.005                 # Darion's 63.5 in
+    no_c = {k: v for k, v in CFG["rebuilt_start"].items() if k != "wall_c"}           # older numbers still build
+    assert "Start wall C" not in M.obj_text(M.start_geometry({**CFG, "rebuilt_start": no_c}))
+    with pytest.raises(ValueError, match="wall_c"):
+        M.start_geometry({**CFG, "rebuilt_start": {**CFG["rebuilt_start"], "wall_c": [[0.0, 0.0], [0.0, 0.0]]}})
 
 
 def test_cp2_follows_the_wall_ends_and_points_away_from_the_launch_mark():

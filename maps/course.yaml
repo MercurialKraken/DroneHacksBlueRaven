@@ -12,6 +12,8 @@
 # M1, M2, M3 are gone; a back wall (Wall A) and a diagonal (Wall B) are new, with a cone in the CP2 gap.
 # They come from Darion's FINAL map (~19:48, from his on-site tape), added as a small
 # extra mesh. CP1 is removed; CP2 is the gap between Wall A and Wall B. The rest is unchanged.
+# 2026-11-08 ~10:29: a third new wall, Wall C, in the open area past CP2 (Darion, on site): from the barrier's
+# north face to the tunnel block's NW corner, about where M3 stood. In the same extra mesh (rebuilt_start.wall_c).
 # NOT FOR FLIGHT AT RUNTIME (Arnav's directive): this map is for sims, offline checks and waypoints.
 course:
   name: dronehacks-2026-v3-start2
@@ -95,6 +97,12 @@ rebuilt_start:
   wall_a: [[-2.743, 2.591], [-1.339, 2.591]]    # west end, EAST end (the gap side)
   wall_b: [[-1.747, 0.762], [-0.857, 1.715]]    # south-west end, NORTH-EAST end (the gap side)
   cone: [-1.431, 2.286]                         # centre: a cone ~0.30 m tall, modelled as a box
+  # Wall C (2026-11-08, Darion's CORRECTED post ~10:29, confirmed by him): its CENTRE LINE, west end -> east end,
+  # 63.5 in = 1.613 m long, 27 deg below east (west-south-west). West end on the barrier's north face; east end
+  # flush with the tunnel entrance = the tunnel block's NW corner (1.575, 1.219) in the OBJ, 2 cm off. Thickness
+  # and height assumed like the other walls (Darion: unless he says otherwise). Same numbers as the T4 world
+  # start-2026-11-08-wallc (hinson-claude). Unlike A and B, the thickness is split evenly about this line.
+  wall_c: [[0.155, 0.478], [1.592, 1.210]]
   wall_thickness: 0.1016                        # 4 in, as the published walls
   wall_height: 1.727
   cone_size: 0.23
@@ -145,3 +153,4 @@ sanity:                                         # (the rebuilt start's own check
   - {name: "inside barrier 2",              at: [-0.6, 0.457, 1.0],      max: 0.0}
   - {name: "inside boulder 1",              at: [2.0115, -2.4685, 0.27], max: -0.1}
   - {name: "inside wall C2a, below window", at: [-0.471, -2.272, 0.15],  max: 0.01}  # diagonal 10 cm wall
+  - {name: "inside Wall C (new 2026-11-08)", at: [0.8735, 0.844, 1.0],   max: 0.0}   # its centre line's midpoint
