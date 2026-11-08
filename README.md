@@ -36,3 +36,26 @@ workspace packaging change is separate from moving-flight qualification.
 nodes, launch configuration and process manager. See `onboard/README.md`.
 `python3 onboard/services.py status` names the running source and log files;
 stop/start explicitly after editing perception code. Startup never arms.
+
+## Drone-faithful sim runs on the T4 (`tools/drone_sim/`)
+
+SIM-ONLY. `tools/drone_sim/run.sh` flies the drone program on the T4 the way it runs on skybeta-09: the
+organizers' `skybeta_flight_interface` 0.3.3 (cloned and built in `/tmp/drone_sim_ws`, rebuilt after a container
+restart) started by the drone's own launch file, with `odom_to_ned_yaw_offset_rad:=-1.5708` (the T4's frame) and
+`launch_key:=launch_sim`. The repo's `skybeta/` packages are rebuilt every run. Each run resets the world, checks
+the frame with `yaw_offset_probe` (refuses beyond 5 deg), records a light bag (no images), starts the program,
+lets `pilot.py` arm and switch to Position like the safety pilot, and scores against Gazebo truth (`score.py`).
+It leaves nothing running. Run inside the `dronehacks_gpu` container, one flight at a time:
+
+```sh
+MISSION=blueraven_skybeta/blueraven.launch.py tools/drone_sim/run.sh --route none --name hover hover_s:=10.0
+```
+
+- `MISSION`: PACKAGE/LAUNCH_FILE of the drone program; every `ARG:=VALUE` goes to that launch file.
+- `--depth none|sim`: `sim` publishes the sim's stereo depth as `/oak/stereo/image_raw` + `camera_info` (640x400 16UC1 mm).
+- `--latency-ms MS`, `--drop P`: added vision latency and frame drop probability on the cuVSLAM stereo input (default 0 and 0.01, the sim's own).
+- `--route FILE|none`: route scored for completion (default `route.json`); `--timeout S`: wall seconds before the pilot lands it.
+
+The score (`score.json` in the bag folder `~/bags/drone_sim_NAME_<UTC>/`) gives route points reached, flight time,
+minimum truth clearance, estimate error p95 (PX4 xy against truth), landing distance and whether PX4 disarmed
+itself; "completed" means the pilot never took over.
