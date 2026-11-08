@@ -86,6 +86,7 @@ class Params:
     depth_border_px: int = 24                   # image edge ignored (stereo matching is weakest there)
     confirm_frames: int = 2                     # an obstacle must be in this many consecutive frames to stop
     stream_lead_s: float = 1.0                  # setpoints stream this long before Offboard is requested
+    pilot_arms: bool = False                    # a pilot arms and switches to Offboard: no arm or mode commands
     wait_s: float = 300.0                       # nothing ready this long: give up without arming
     arm_wait_s: float = 30.0
     cmd_resend_s: float = 1.0
@@ -367,7 +368,10 @@ class Mission:
             return out
 
         if self.phase in ("wait", "arm") and self.t_cmd is None:
-            if v.armed is True:
+            if v.armed is True and p.pilot_arms:
+                if self.phase == "wait":                     # in Offboard on the ground with no route: back down
+                    self._land(now, out, "armed in Offboard before this mission was ready")
+            elif v.armed is True:
                 self._end(now, out, "yielded: vehicle armed before this mission requested control")
             elif now - self.t_started > p.wait_s:
                 self._end(now, out, f"refused: {self.why or 'not ready'} after {p.wait_s:.0f} s")
@@ -437,11 +441,15 @@ class Mission:
             if not ok:
                 if self.t_cmd is None and v.armed is False:
                     self._requalify(now, out, f"{why}; requalifying before any control request")
+                elif p.pilot_arms and v.armed:
+                    self._land(now, out, f"{why} as Offboard began")
                 else:
                     self._end(now, out, f"refused: {why} before arming")
             elif not blind and self.t_cmd is None and not self.depth_ready_for_arm(now):
                 if v.armed is False:
                     self._requalify(now, out, "depth not continuously usable; requalifying before any control request")
+                elif p.pilot_arms:
+                    self._land(now, out, "depth lost as Offboard began")
                 else:
                     self._end(now, out, "yielded: depth lost before this mission requested control")
             elif now - self.t_phase > p.arm_wait_s:
@@ -451,7 +459,7 @@ class Mission:
             elif v.armed and v.nav_state == NAV_OFFBOARD:
                 self.offboard_seen = True
                 self._set("climb", now, out)
-            elif now - self.t_phase >= p.stream_lead_s and self._resend(now):
+            elif not p.pilot_arms and now - self.t_phase >= p.stream_lead_s and self._resend(now):
                 out.commands += ["offboard", "arm"]
         elif ph == "climb":
             target = self.home[2] - p.height_m

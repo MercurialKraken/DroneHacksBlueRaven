@@ -28,9 +28,9 @@ def generate_launch_description():
             'depth_mode': LaunchConfiguration('depth_mode'),
             'depth_topic': '/oak/stereo/image_raw',
             'depth_info_topic': '/oak/stereo/camera_info',
-            # the interface asks for Offboard when the pilot switches, any time after "wait -> arm"; the descent
-            # ends only when PX4 disarms or Offboard ends, never in a hold
-            'stream_lead_s': 0.0, 'arm_wait_s': 120.0, 'land_timeout_s': float('inf'),
+            # the pilot arms and switches whenever he is ready after "wait -> arm"; the descent ends only when PX4
+            # disarms or Offboard ends, never in a hold
+            'pilot_arms': True, 'wait_s': float('inf'), 'arm_wait_s': float('inf'), 'land_timeout_s': float('inf'),
             'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
             'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],
     )

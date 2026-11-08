@@ -25,8 +25,8 @@ from refnav import map_route as M  # noqa: E402
 
 DT = 0.05                                     # refnav's 20 Hz tick
 DOC = json.loads((ROOT / "route.json").read_text())
-LAUNCH_PARAMS = {"depth_mode": "blind", "stream_lead_s": 0.0, "arm_wait_s": 120.0,   # refnav.launch.py's
-                 "land_timeout_s": math.inf}
+LAUNCH_PARAMS = {"depth_mode": "blind", "pilot_arms": True, "wait_s": math.inf, "arm_wait_s": math.inf,
+                 "land_timeout_s": math.inf}                                       # refnav.launch.py's
 
 
 def _rz(a: float) -> np.ndarray:
@@ -91,7 +91,8 @@ class Stack:
 
 def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at: float | None = None,
            limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow",
-           carry: tuple[float, float, float] | None = None):
+           carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
+           state_gap: tuple[float, float] | None = None):
     prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
     launch = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
@@ -103,7 +104,8 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
     while t < limit_s and m.phase != "done":
         pad = S.on_odom(v, pad, m.phase, *sk.odom())
         m.on_health(t, S.healthy(state, t_state, t))
-        if round(t / DT) % 4 == 0:
+        gap = state_gap is not None and state_gap[0] <= t < state_gap[1]
+        if round(t / DT) % 4 == 0 and not gap:
             state, t_state = sk.state(), t
             S.on_state(v, state, m.phase)
         out = m.step(t, v)
@@ -115,7 +117,8 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
         if tw is not None:
             sk.twist(t, tw)
             sent.append((t, out.phase, tw))
-        if m.phase == "arm" and not sk.armed and t_arm is None and sent and t - sent[-1][0] < 1.0:
+        if (m.phase == "arm" and not sk.armed and t_arm is None and sent and t - sent[-1][0] < 1.0
+                and t - m.t_phase >= pilot_waits_s):
             sk.armed, sk.nav, t_arm = True, 1, t                  # the pilot arms in Altitude...
         if t_arm is not None and sk.nav == 1 and t - t_arm >= 0.5 and t - sk.t_twist < 1.0:
             sk.nav = C.NAV_OFFBOARD                               # ...switches to Position: Offboard, once
@@ -159,6 +162,33 @@ def test_carrying_the_drone_after_arm_moves_the_route_with_it():
     start = np.array([-1.0, 2.0, 0.0])                                         # NED (2, -1) is ENU (-1, 2)
     end = _rz(yaw0).T @ (np.array(sk.odom()[0]) - start)
     assert np.hypot(*(end[:2] - np.array(DOC["route"][-1]))) < 0.2, end
+
+
+def test_the_mission_waits_for_the_pilot_as_long_as_he_takes_through_a_state_gap():
+    m, sk, sent = flight(pilot_waits_s=400.0, state_gap=(200.0, 202.0), limit_s=700.0)
+    assert m.result == "complete", (m.result, m.why)
+    assert not sk.armed and sk.landed
+
+
+def test_offboard_entered_before_the_mission_is_ready_descends_until_px4_disarms():
+    prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
+    m, sk, v, pad, descent = C.Mission(prm), Stack(0.0, 0.0), C.Vehicle(), None, S.Descent()
+    sk.armed, sk.nav = True, C.NAV_OFFBOARD                       # a fresh arm twist, then a requalify to "wait"
+    sk.t_twist = 0.0
+    t, sent = DT, []
+    while t < 30.0 and m.phase != "done":
+        pad = S.on_odom(v, pad, m.phase, *sk.odom())
+        m.on_health(t, S.healthy(sk.state(), t, t))
+        S.on_state(v, sk.state(), m.phase)
+        out = m.step(t, v)
+        tw = descent.twist(t, v, sk.state()) if out.phase == "land" else S.twist(out, v, pad, 45.0, 0.0)
+        if tw is not None:
+            sk.twist(t, tw)
+            sent.append(tw)
+        sk.step(t)
+        t += DT
+    assert m.result.startswith("landed: armed in Offboard"), m.result
+    assert not sk.armed and sent and all(tw[:2] == (0.0, 0.0) and tw[2] < 0 for tw in sent)
 
 
 def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_holds():
