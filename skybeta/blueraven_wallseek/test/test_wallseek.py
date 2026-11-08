@@ -206,6 +206,22 @@ def test_cuvslam_variance_spike_lands_straight_down_before_any_jump():
     assert math.dist(land[0][2][:2], land[-1][2][:2]) < 0.10
 
 
+def test_high_variance_on_the_ground_and_climb_does_not_ground_the_mission():
+    # T4 run 3: variance 0.024 on the pad (normal near the floor) landed the mission at the first airborne tick
+    s = Sim()
+    s.var_fn = lambda: 0.05 if (s.pos[2] < 0.3 or s.m.phase in ("ready", "climb")) else 0.004
+    s.run()
+    assert not any("variance" in x for x in s.m.log), s.m.log
+    assert any("past the wall's end" in x for x in s.m.log), s.m.log
+
+
+def test_variance_check_waits_for_one_metre_forward():
+    s = Sim()
+    s.var_fn = lambda: 0.05 if s.m.phase == "approach" and s.pos[0] < 0.9 else 0.004
+    s.run()
+    assert not any("variance" in x for x in s.m.log), s.m.log         # high only before the 1 m mark: ignored
+
+
 def test_slide_immediately_variant_skips_the_stop():
     s = Sim(p=W.Params(slide_immediately=True)).run()
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]

@@ -27,7 +27,7 @@ MISSION_ARGS = [
     ('height_m', '0.40'), ('standoff_m', '0.44'), ('approach_mps', '0.15'), ('translate_mps', '0.10'),
     ('past_end_m', '0.35'), ('max_forward_m', '1.30'), ('max_right_m', '2.0'), ('lag_s', '0.55'),
     ('camera_forward_m', '0.1053'), ('camera_left_m', '0.0376'), ('camera_up_m', '0.0304'),
-    ('takeoff_kick_mps', '0.06'),
+    ('takeoff_kick_mps', '0.06'), ('var_check_after_m', '1.0'),
 ]
 
 

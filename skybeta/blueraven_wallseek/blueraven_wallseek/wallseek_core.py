@@ -82,8 +82,11 @@ class Params:
     home_tol_m: float = 0.05        # start the approach only back over the launch point (both axes within this) ...
     home_wait_s: float = 6.0        # ... or after this long at height anyway
     depth_median_n: int = 5         # depth: median of the last N frames (one wild frame can't move it)
-    vio_var_m2: float = 0.02        # cuVSLAM's own pose variance (x or y) above this (~14 cm sigma; normal ~2e-3) ...
-    vio_var_count: int = 2          # ... on this many samples in a row: land straight down (T4 run 2 gave 0.8 s warning)
+    vio_var_m2: float = 0.03        # cuVSLAM's own pose variance (x or y) above this (normal in flight ~3e-3-9e-3) ...
+    vio_var_count: int = 2          # ... on this many samples in a row: land straight down (T4 run 2: 0.8 s warning)
+    var_check_after_m: float = 1.0  # ... checked only after lift-off AND once this far forward (Darion): near the floor
+                                    # the variance is naturally 0.01-0.05 (it grounded T4 run 3 on the pad). The T4's
+                                    # spawn is 0.2 m further north, so the same spot there is 0.8 m.
     slide_immediately: bool = False # variant: no hover stop at the wall, start translating as soon as it is at the standoff
 
 
@@ -148,6 +151,7 @@ class WallSeek:
     t_var: float = -1e9
     var_count: int = 0
     t_slow: dict = field(default_factory=dict)   # per integral: since when the drone has been slow on that axis
+    var_armed: bool = False         # the cuVSLAM-variance check is live (after lift-off and var_check_after_m forward)
     dt: float = 0.0
     i_n: float = 0.0                # integral share, north (standoff loop and north holds)
     i_e: float = 0.0                # integral share, east (east holds)
@@ -274,9 +278,12 @@ class WallSeek:
         jump = self._jumped(i)
         self._filter_depth(i)
         self._track_range(i)
+        if (not self.var_armed and self.t_liftoff is not None and i.pos is not None
+                and i.pos[0] >= p.var_check_after_m):
+            self.var_armed = True                     # latched: stays on once past the mark
         if i.t_odom != self.t_var:                    # cuVSLAM's own uncertainty, counted per odometry sample
             self.t_var = i.t_odom
-            bad = i.vio_var is not None and i.vio_var > p.vio_var_m2
+            bad = self.var_armed and i.vio_var is not None and i.vio_var > p.vio_var_m2
             self.var_count = self.var_count + 1 if bad else 0
         st = i.state or {}
         armed, offboard, nav = st.get("armed"), st.get("offboard_active"), st.get("nav_state")
