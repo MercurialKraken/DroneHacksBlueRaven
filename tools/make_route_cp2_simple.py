@@ -34,10 +34,11 @@ from nav.frames import load_launch  # noqa: E402
 
 NAME = "route_v7_cp2_simple"
 COPY_TO = ROOT / "courses" / "start-2026-11-07-tape" / "routes"   # hinson/real-drone's per-course layout (same bytes)
-HEIGHT_M, SPEED_MPS = 0.7, 0.2   # fixed 0.7 m; 0.2 m/s, a compromise from two T4 runs (refnav, 2026-11-07): at 0.3 the
-                                  # legs drifted 0.15 m left (less since refnav's nose fix 2b9a76e: 0.08 m at 0.15);
-                                  # at 0.15 the 90 deg corner became a yaw in place and cuVSLAM diverged (no parallax;
-                                  # worse on skybeta-09, whose cuVSLAM has no IMU: Darion). On the arc this is ~16 deg/s
+HEIGHT_M, SPEED_MPS = 0.7, 0.15  # fixed 0.7 m; 0.15 m/s (Chelsea, 2026-11-07: every route at 0.15). T4 (refnav): at 0.3
+                                  # the legs drifted 0.15 m left (0.08 m at 0.15 since refnav's nose fix 2b9a76e); at 0.15
+                                  # the old 90 deg CORNER became a yaw in place and cuVSLAM diverged (no parallax; skybeta-09's
+                                  # cuVSLAM has no IMU either). The arc fixes that by geometry, not speed: ~1.1 cm flown per
+                                  # degree turned at any speed; ~14 deg/s at 0.15 m/s
 YAW_RATE_DPS = 30.0               # refnav's yaw-rate cap for this route (default 45): Darion's ask for the visual-only VIO.
                                   # NOTE flight.yaml's yaw_rate_dps (45) is a ROS parameter and WINS over this; FILLET_M
                                   # keeps the turn under ~20 deg/s whichever cap applies

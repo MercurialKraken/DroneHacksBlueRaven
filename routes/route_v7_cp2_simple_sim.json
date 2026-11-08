@@ -8,5 +8,5 @@
   [1.039, -0.700],
   [1.039, -1.976]
  ],
- "params": {"height_m": 0.7, "speed_mps": 0.2, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4, "yaw_rate_dps": 30.0, "fillet_m": 0.7}
+ "params": {"height_m": 0.7, "speed_mps": 0.15, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4, "yaw_rate_dps": 30.0, "fillet_m": 0.7}
 }
