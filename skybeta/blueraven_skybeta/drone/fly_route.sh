@@ -29,7 +29,8 @@ TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybe
 /skybeta/setpoint/twist /blueraven/mission/status /refnav/status /fmu/in/vehicle_visual_odometry \
 /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude \
 /fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static \
-/blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory"   # absent topics are harmless (MPPI off)
+/blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory \
+/fmu/in/trajectory_setpoint /fmu/in/offboard_control_mode /fmu/out/vehicle_local_position_setpoint /fmu/out/vehicle_attitude_setpoint"   # absent topics are harmless (MPPI off)
 DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera depth (~15 MB/s)
 (( DEPTH_BAG )) && TOPICS="$TOPICS /oak/stereo/image_raw /oak/stereo/camera_info"
 MIN_FREE_GB=${MIN_FREE_GB:-5}                     # free space the bag disk must have (depth fills ~1 GB a minute)
