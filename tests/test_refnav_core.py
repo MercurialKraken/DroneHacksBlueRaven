@@ -625,3 +625,40 @@ def test_devsim_flies_the_aircraft_params() -> None:
     prm = load_params(root / "route.json")
     assert (prm.height_m, prm.hover_s, prm.depth_border_px) == (HEIGHT_M, HOVER_S, DEPTH_BORDER_PX)
     assert prm.yaw_rate_dps == flight_params(root)["yaw_rate_dps"]
+
+
+def test_blind_arms_and_completes_with_no_depth_messages_at_all() -> None:
+    m, px4, log = fly(C.Params(route=ROUTE, depth_mode="blind"), depth_on=lambda t: False)
+    assert m.result == "complete", (m.result, m.why)
+    assert m.follower.points_passed == 2 and m.counts["depth_frames"] == 0 and not px4.armed
+
+
+def test_blind_never_stops_on_an_obstacle() -> None:
+    wall = [(0, 4.5, -5.0, 5.0)]
+    m, px4, log = fly(C.Params(route=[(8.0, 0.0)], depth_mode="blind"), walls=wall)
+    assert m.counts["obstacle_stops"] == 0
+    assert not (m.result or "").startswith("landed: route blocked")
+    assert px4.pos[0] > 4.5 - 0.6                         # flew where assisted mode stopped
+
+
+def test_blind_uses_no_map_align_correction() -> None:
+    m = C.Mission(C.Params(route=ROUTE, depth_mode="blind"))
+    m.on_correction(1.0, 0.5, 0.5, 0.2)
+    assert (m.corr.x, m.corr.y, m.corr.yaw) == (0.0, 0.0, 0.0) and m.corr_t is None
+    a = C.Mission(C.Params(route=ROUTE))
+    a.on_correction(1.0, 0.5, 0.5, 0.2)
+    assert a.corr.x == 0.5 and a.corr_t == 1.0
+
+
+def test_assisted_is_the_default_and_depth_mode_is_validated() -> None:
+    assert C.Params().depth_mode == "assisted"
+    assert C.params_from_doc({"route": ROUTE}, {"depth_mode": "blind"})[0].depth_mode == "blind"
+    with pytest.raises(ValueError, match="depth_mode must be one of"):
+        C.params_from_doc({"route": ROUTE}, {"depth_mode": "sonar"})
+
+
+def test_flight_yaml_documents_both_modes_and_the_depth_topic() -> None:
+    from refnav.launch import flight_params
+    fp = flight_params(Path(__file__).resolve().parents[1])
+    assert fp["depth_mode"] == "assisted" and fp["depth_topic"] == "/camera/depth/image_raw"
+    assert C.params_from_doc({"route": ROUTE}, fp)[0].depth_mode == "assisted"

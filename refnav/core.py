@@ -53,6 +53,9 @@ AIRBORNE = ("climb", "hover", "follow")
 HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 1.0   # a plan holds while the aircraft sits within this of where it was made
 
 
+DEPTH_MODES = ("blind", "assisted")
+
+
 @dataclass
 class Params:
     route: list[tuple[float, float]] = field(default_factory=list)   # [(forward_m, left_m)] from the takeoff point and heading
@@ -68,6 +71,7 @@ class Params:
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
+    depth_mode: str = "assisted"               # blind: waypoints and map only, no depth gates or checks, no map_align correction
     depth_stale_s: float = 0.5
     depth_lost_land_s: float = 3.0
     stop_m: float = 0.9
@@ -109,6 +113,8 @@ class Params:
 
     def validate(self) -> None:
         """Raise ValueError for a route or a pair of limits the mission cannot fly."""
+        if self.depth_mode not in DEPTH_MODES:
+            raise ValueError(f"depth_mode must be one of {', '.join(DEPTH_MODES)}, not {self.depth_mode!r}")
         prev = (0.0, 0.0)
         for i, q in enumerate(self.route):
             if math.dist(prev, q) < 0.01:
@@ -264,7 +270,8 @@ class Mission:
     # ------------------------------------------------------------------ inputs
     def on_correction(self, t: float, x: float, y: float, yaw: float) -> None:
         """A drift correction of PX4's estimate in its local NED frame. The latest one holds until replaced."""
-        self.corr, self.corr_t = F.SE2(x, y, yaw), t
+        if self.p.depth_mode == "assisted":
+            self.corr, self.corr_t = F.SE2(x, y, yaw), t
 
     def _corrected(self, v: Vehicle) -> Vehicle:
         n, e = self.corr.point(v.pos[0], v.pos[1])
@@ -368,6 +375,7 @@ class Mission:
                 self._requalify(now, out, "waiting for an explicit disarmed PX4 report")
 
         # ---- airborne supervision, before anything else may command -------------------
+        blind = p.depth_mode == "blind"
         if self.phase in AIRBORNE or (self.phase == "land" and not self.land_auto_seen):
             # only the mission's OWN landing may put PX4 in AUTO_LAND; anywhere else that is PX4 (a
             # failsafe) or a pilot taking over, and streaming on would blank PX4's land detector
@@ -394,7 +402,7 @@ class Mission:
                 self._land(now, out, f"estimator unhealthy or silent for {bad:.1f} s")
             elif not v.pos_ok or v.pos is None or v.heading is None:
                 self._land(now, out, "PX4 position or heading invalid")
-            elif self.depth_t is None or now - self.depth_t > p.depth_lost_land_s:
+            elif not blind and (self.depth_t is None or now - self.depth_t > p.depth_lost_land_s):
                 self._land(now, out, f"depth silent for more than {p.depth_lost_land_s:.0f} s")
 
         ph = self.phase
@@ -408,12 +416,12 @@ class Mission:
                 self.why = "waiting for PX4 position and heading"
             elif not ok:
                 self.why = why
-            elif not self.depth_fresh(now):
+            elif not blind and not self.depth_fresh(now):
                 self.why = "waiting for live depth: " + (
                     f"the latest frame was refused: {self.depth_reject[1]}" if self.depth_reject else
                     "no depth frame has arrived" if self.depth_t is None else
                     f"the latest usable frame is {now - self.depth_t:.1f} s old")
-            elif not self.depth_ready_for_arm(now):
+            elif not blind and not self.depth_ready_for_arm(now):
                 self.why = f"waiting for {p.health_quiet_s:g} s of continuously usable depth"
             elif self._moved_since_plan(v):
                 # heading is settled only once the estimator has been healthy: plan now, then let readiness see
@@ -431,7 +439,7 @@ class Mission:
                     self._requalify(now, out, f"{why}; requalifying before any control request")
                 else:
                     self._end(now, out, f"refused: {why} before arming")
-            elif self.t_cmd is None and not self.depth_ready_for_arm(now):
+            elif not blind and self.t_cmd is None and not self.depth_ready_for_arm(now):
                 if v.armed is False:
                     self._requalify(now, out, "depth not continuously usable; requalifying before any control request")
                 else:
@@ -554,7 +562,9 @@ class Mission:
     def _follow(self, now: float, dt: float, out: Output, raw: Vehicle) -> None:
         """The path lives in the corrected frame; what goes to PX4 is mapped back into its own estimate's frame."""
         p, fol, v, back = self.p, self.follower, self._corrected(raw), self.corr.inverse()
-        if not self.depth_fresh(now):
+        if p.depth_mode == "blind":
+            self.s_limit = math.inf                          # nothing observes the path: the speed profile alone paces it
+        elif not self.depth_fresh(now):
             self.s_limit = fol.s_ref                         # no live evidence: the reference waits
         elif self._judge_depth(v):
             self.counts["obstacle_stops"] += 1

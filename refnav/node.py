@@ -177,8 +177,9 @@ class RefNav(Node):
         if correction:
             from geometry_msgs.msg import PoseStamped
             self.create_subscription(PoseStamped, correction, self._on_correction, 10)
-        self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
-        self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
+        if prm.depth_mode == "assisted":
+            self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
+            self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
         if control:
             # transient-local: a request made a moment before this node subscribed still arrives
             ctl_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -192,7 +193,8 @@ class RefNav(Node):
         self._wait_log_t: float | None = None
         self.create_timer(0.05, self._tick)            # node clock: pauses with a paused simulator
         self.create_timer(0.5, self._publish_status)
-        self.get_logger().info(f"route {len(prm.route)} points; depth {self.depth_topic}; health {self.health_topic}; "
+        self.get_logger().info(f"route {len(prm.route)} points; depth {prm.depth_mode} "
+                               f"{self.depth_topic if prm.depth_mode == 'assisted' else ''}; health {self.health_topic}; "
                                f"sim time {self.get_parameter('use_sim_time').value}")
 
     # ------------------------------------------------------------------ inputs
