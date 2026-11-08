@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 NAV_OFFBOARD = 14
-AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg")
+AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap", "turn", "pause", "leg", "rise")
 
 
 @dataclass
@@ -42,7 +42,8 @@ class Params:
     # height, then hold it. The tube's free space is centred ~0.95 m above the floor (course SDF: 0.71 m clearance
     # at z 0.9-1.0, only 0.36 m at 0.4), and height is from the pad (centre ~0.07 m higher). Over the 0.30 m CP2 cone
     # (~60% along the leg) the drone is at ~0.67 m (T4 v3 run at 0.4 m: its centre dipped to 0.33 m there).
-    leg_climb_to_m: float = 0.55    # Darion: 0.55 (0.85 = the tube's centre was too high for him); 0 disables
+    leg_climb_to_m: float = 0.0     # gradual climb during the gap leg: OFF (Darion: climb at P1 instead)
+    p1_climb_to_m: float = 0.50     # Darion: at P1, climb straight up to this before turning (clears the CP2 cone)
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn
     pause_s: float = 1.5            # stop at each waypoint before turning
@@ -516,6 +517,18 @@ class WallSeek:
                 return Output(self.phase, self.why,
                               (self._hold(hn, n, vn_m, "i_n"), self._hold(he, e, ve_m), self._vz(i), wz))
 
+        if self.phase == "rise":
+            hn, he = self.hold_pt
+            if abs(u - self.h_target) < p.climb_tol_m:
+                self.t_at_height = self.t_at_height if self.t_at_height is not None else i.now
+                if i.now - self.t_at_height >= p.climb_hold_s:
+                    self._next_step(i, n, e)
+            else:
+                self.t_at_height = None
+            if self.phase == "rise":
+                return Output(self.phase, self.why,
+                              (self._hold(hn, n, vn_m, "i_n"), self._hold(he, e, ve_m), self._vz(i), 0.0))
+
         if self.phase == "pause":
             hn, he = self.hold_pt
             if i.now - self.t_phase >= p.pause_s:
@@ -607,7 +620,8 @@ class WallSeek:
         p2, p4 = self._route_points(n, e)
         self.route_pts = [(n, e), p2, p4]
         self.heading = 0.0                                   # pad heading, deg clockwise from north (nose on the pad)
-        self.plan = [("face", p2), ("leg", p2), ("pause", None), ("face", p4), ("leg", p4)]
+        self.plan = ([("rise", self.p.p1_climb_to_m)] if self.p.p1_climb_to_m > 0 else []) + \
+            [("face", p2), ("leg", p2), ("pause", None), ("face", p4), ("leg", p4)]
         self.log.append(f"{i.now:.2f} route: P1 ({n:.2f}, {e:.2f}) -> P2 ({p2[0]:.2f}, {p2[1]:.2f}) -> "
                         f"P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
         self._next_step(i, n, e)
@@ -617,6 +631,10 @@ class WallSeek:
             self._land(i, "route complete")
             return
         kind, arg = self.plan.pop(0)
+        if kind == "rise":                                   # Darion: at P1 climb straight up (in place) first
+            self.h_target, self.hold_pt, self.t_at_height = arg, (n, e), None
+            self._set("rise", i.now, f"climbing in place to {arg:.2f} m at P1")
+            return
         if kind == "face":                                   # turn in place to point the nose at `arg`, from here
             bearing = math.degrees(math.atan2(arg[1] - e, arg[0] - n))      # clockwise from north
             delta = (bearing - self.heading + 180.0) % 360.0 - 180.0       # + = clockwise = right

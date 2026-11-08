@@ -191,7 +191,7 @@ def test_route_v3_face_the_gap_straight_through_then_p4(plant):
     s = Sim(p, **kw).run(160)
     assert s.m.phase == "done", s.m.log
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
-    assert seq[:10] == ["ready", "climb", "approach", "settle", "turn", "leg", "pause", "turn", "leg", "land"], seq
+    assert seq[:11] == ["ready", "climb", "approach", "settle", "rise", "turn", "leg", "pause", "turn", "leg", "land"], seq
     turns, stray = _turn_angles(s)
     assert len(turns) == 2 and abs(turns[0] + 76) <= 3 and abs(turns[1] + 14) <= 3, turns   # ~76 then ~14 deg right
     assert not stray                                                  # no yaw at all outside the in-place turns
@@ -203,15 +203,15 @@ def test_route_v3_face_the_gap_straight_through_then_p4(plant):
     assert leg2
 
 
-def test_climbs_on_the_gap_leg_not_at_take_off():
+def test_climbs_to_050_in_place_at_p1_not_at_take_off():
     s = Sim(W.Params(route_mode=True)).run(160)
-    first_leg = next(k for k, r in enumerate(s.trace) if r[1] == "leg")
-    climb_top = max(r[2][2] for r in s.trace[:first_leg])             # take-off, approach, stop, first turn
+    first_leg = next(k for k, r in enumerate(s.trace) if r[1] == "rise")
+    climb_top = max(r[2][2] for r in s.trace[:first_leg])             # take-off, approach, stop: ~0.40
     assert climb_top < 0.47, climb_top                                  # take-off and P1 stay at ~0.40
     over_cone = [r[2][2] for r in s.trace if r[1] == "leg" and math.dist(r[2][:2], CONE) < 0.45]
     assert over_cone and min(over_cone) > 0.44, min(over_cone or [0])   # above the 0.30 m cone
     leg2 = [r[2][2] for r in s.trace if r[1] == "leg" and r[2][1] > 2.2]
-    assert leg2 and abs(sum(leg2) / len(leg2) - 0.55) < 0.05            # 0.55 m on the way to P4
+    assert leg2 and abs(sum(leg2) / len(leg2) - 0.50) < 0.05            # 0.50 m on the way to P4
 
 
 def test_noisy_vision_velocity_at_the_stop_still_ends_the_stop_and_turns():
