@@ -37,7 +37,7 @@ FI_PROC="lib/skybeta_flight_interface/flight_interface"
 MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
 LAUNCH_PROC="ros2 launch blueraven_skybeta"
-BAG_PROC="ros2 bag record"
+BAG_PROC='ros2 bag record -s mcap -o [A-Za-z0-9_]+_[0-9]{6} '   # OUR recorder only (its -o is <ROUTE>_HHMMSS)
 OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC"
 
 in_c() { docker exec "$C" bash -ic "$1" 2>/dev/null; }      # inside the stack container, ROS sourced
@@ -55,6 +55,9 @@ poll() {                                          # poll <timeout s> <what> <com
 # processes in the container matching an ERE, not counting shells/tmux that merely mention it (exactly one number)
 procs() { docker exec "$C" pgrep -af "$1" 2>/dev/null | grep -vE '^[0-9]+ (([^ ]*/)?(ba)?sh|tmux|pgrep) ' | grep -c . ; }
 state() { in_c "timeout 3 ros2 topic echo --once /skybeta/state" | tr -d '\r'; }
+# the monitor, with the team workspace sourced too (px4_msgs); stderr kept, bash's no-tty job-control notes dropped
+monitor() { docker exec "$C" bash -ic "source $WS/install/setup.bash >/dev/null 2>&1; $1 python3 $MON $2" 2>&1 \
+              | tr -d '\r' | grep -vE '^bash: (cannot set terminal process group|no job control)'; }
 
 put_monitor() {                                   # the status monitor: rclpy, small topics only (no images)
   docker exec -i "$C" bash -c "cat > $MON" <<'PY'
@@ -151,8 +154,9 @@ def main():
             f = st["flags"]
             fused = "fusion ?" if f is None else ("fused " + "+".join(k for k, v in zip(("pos", "yaw"), f) if v)
                                                    if any(f) else "NOT FUSED")
+            ev = f"EV {ev_hz:4.1f} Hz{age} {fused}" if VehicleOdometry is not None else "EV n/a (no px4_msgs)"
             line = (f"[{time.strftime('%H:%M:%S')}] phase {st['rphase'] or st['mphase'] or '-'} | odom {hz:4.1f} Hz | "
-                    f"EV {ev_hz:4.1f} Hz{age} {fused} | PX4 link {yn(s.get('px4_link'))} armed {yn(armed)} "
+                    f"{ev} | PX4 link {yn(s.get('px4_link'))} armed {yn(armed)} "
                     f"landed {yn(s.get('landed'))} | procs interface {n['interface']} mission {n['mission']} "
                     f"example {n['example']} recorder {n['recorder']}")
             print(line, flush=True)
@@ -169,7 +173,10 @@ def main():
             steady = rates[1:] or rates            # the first second includes discovery
             print(f"SUMMARY odom_hz={statistics.median(steady) if steady else 0:.1f}", flush=True)
         node.destroy_node()
-        rclpy.try_shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 main()
@@ -206,11 +213,14 @@ check() {
     die "PROGRAM must be refnav or shell"
   fi
   [ -n "$RF" ] && in_c "test -f $RF" || die "no route file $REPO/courses/$COURSE/routes/$ROUTE.json"
-  local info
-  info=$(in_c "python3 -c \"import json,hashlib; b=open('$RF','rb').read(); d=json.loads(b); p=d.get('params',{}); print('speed', p.get('speed_mps'), 'm/s, fillet', p.get('fillet_m'), 'm, points', d['route'], 'sha1', hashlib.sha1(b).hexdigest()[:7])\"" | tr -d '\r' | tail -1)
+  local info speed
+  info=$(in_c "python3 -c \"import json,hashlib; b=open('$RF','rb').read(); d=json.loads(b); p=d.get('params',{}); print(p.get('speed_mps'), 'm/s, fillet_m', p.get('fillet_m'), ', points', d['route'], ', sha1sum', hashlib.sha1(b).hexdigest()[:7])\"" | tr -d '\r' | tail -1)
   [ -n "$info" ] || die "route file $RF doesn't parse"
   say "route: $RF"
-  say "route: $info"
+  say "route: speed $info"
+  speed=${info%% *}
+  awk -v s="$speed" -v m="$MAX_SPEED" 'BEGIN { exit !(s + 0 > 0 && s + 0 <= m + 1e-9) }' \
+    || die "the route's speed_mps is $speed, over MAX_SPEED=$MAX_SPEED (team rule: 0.15 m/s; MAX_SPEED=$speed to accept it)"
   local s; s=$(state)
   echo "$s" | grep -q '"px4_link": true' || die "/skybeta/state: no PX4 link (FC plugged? replugged after a stack restart?): $s"
   echo "$s" | grep -q '"armed": false' || die "PX4 is ARMED already"
@@ -225,7 +235,8 @@ check() {
   [ "$n" = 0 ] || die "a flight_interface is already running ($n; two must never run): ./fly_route.sh stop, or find who started it"
   put_monitor || die "couldn't copy the status monitor into $C"
   local sum hz
-  sum=$(in_c "DURATION=4 python3 $MON --summary" | tr -d '\r')
+  sum=$(monitor DURATION=4 --summary)
+  echo "$sum" | grep -q '^SUMMARY' || die "the status monitor failed: $(echo "$sum" | tail -3)"
   echo "$sum" | grep -v SUMMARY | tail -1
   hz=$(echo "$sum" | grep -o 'odom_hz=[0-9.]*' | cut -d= -f2)
   awk -v h="${hz:-0}" 'BEGIN { exit !(h >= 20) }' || die "odometry ${hz:-none} Hz over 4 s (need ~30: cuVSLAM)"
@@ -260,10 +271,10 @@ build() {                                         # after copying new code to th
 
 status() {                                        # one line per second: phase, odometry, EV fusion, PX4, processes
   put_monitor || die "couldn't copy the status monitor into $C"
-  if [ -t 0 ] && [ -t 1 ]; then
-    docker exec -it "$C" bash -ic "python3 $MON" 2>/dev/null   # Ctrl-C reaches the monitor through the tty
+  if [ -t 0 ] && [ -t 1 ]; then                  # Ctrl-C reaches the monitor through the tty
+    docker exec -it "$C" bash -ic "source $WS/install/setup.bash >/dev/null 2>&1; python3 $MON"
   else
-    in_c "DURATION=${DURATION:-10} python3 $MON"
+    monitor "DURATION=${DURATION:-10}" ""
   fi
 }
 
@@ -307,7 +318,19 @@ go() {
   say "GO. Team approves, then the PILOT: arm with the mode switch on ALTITUDE, throttle low, then switch to POSITION within a few seconds."
   say "Abort: the pilot takes over (Position/Altitude). If it then sits ARMED on the ground, Ctrl-C here (the interface stops publishing), then disarm."
   # 4. follow it to the disarm: one status line per second (the same as 'status')
-  in_c "python3 $MON --until-disarmed" | tr -d '\r'
+  local log; log=$(mktemp)
+  monitor "" --until-disarmed | tee "$log"
+  if ! grep -q '^DISARMED' "$log"; then           # the monitor ended early: never stop the program before a flight
+    say "the status monitor ended before a disarm: following PX4's armed state directly"
+    local last="" s
+    while :; do
+      s=$(state)
+      echo "$s" | grep -q '"armed": true' && [ "$last" != armed ] && { say "armed"; last=armed; }
+      [ "$last" = armed ] && echo "$s" | grep -q '"armed": false' && break
+      sleep 0.5
+    done
+  fi
+  rm -f "$log"
   poll 30 "PX4 disarming" bash -c "docker exec $C bash -ic 'timeout 3 ros2 topic echo --once /skybeta/state' 2>/dev/null | grep -q '\"armed\": false'"
   say "disarmed"
   trap - EXIT
