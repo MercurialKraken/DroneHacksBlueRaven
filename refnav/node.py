@@ -71,6 +71,9 @@ def load_route(node: Node) -> dict[str, Any] | list:
 class RefNav(Node):
     def _map_builder(self, prm: C.Params):
         """With the course map: the route as an elastic band kept clear of the map. Without: plain arcs."""
+        if prm.path_source == "waypoints":
+            self.get_logger().info(f"waypoints: the route's corners as arcs within {prm.corner_cut_m:g} m, no map")
+            return None
         root = Path(__file__).resolve().parents[1]
         path = self.declare_parameter("course_map", str(root / "maps" / "course_sdf.npz")).value
         course = self.declare_parameter("course_yaml", str(root / "maps" / "course.yaml")).value

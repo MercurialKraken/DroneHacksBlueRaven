@@ -17,16 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skybeta" / "blueraven_skybeta"))
 from blueraven_skybeta import refnav_skybeta as S  # noqa: E402
 
-from nav.course_map import CourseMap  # noqa: E402
-from nav.frames import load_launch  # noqa: E402
 from refnav import core as C  # noqa: E402
 from refnav import depth as D  # noqa: E402
-from refnav import map_route as M  # noqa: E402
+from refnav import follow as F  # noqa: E402
 
 DT = 0.05                                     # refnav's 20 Hz tick
-DOC = json.loads((ROOT / "route.json").read_text())
+DOC = json.loads((ROOT / "routes" / "route_v6_start2.json").read_text())        # Chelsea's file, unchanged
 LAUNCH_PARAMS = {"depth_mode": "blind", "pilot_arms": True, "wait_s": math.inf, "arm_wait_s": math.inf,
-                 "land_timeout_s": math.inf}                                       # refnav.launch.py's
+                 "land_timeout_s": math.inf, "height_m": 0.7, "path_source": "waypoints",
+                 "corner_cut_m": 0.05}                                             # refnav.launch.py's
 
 
 def _rz(a: float) -> np.ndarray:
@@ -94,9 +93,7 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
            carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
            state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None):
     prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
-    launch = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
-    cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
-    m = C.Mission(prm, M.builder(cm, launch, prm.height_m + launch["z"], M.DRONE_RADIUS_M + 0.20, 0.3))
+    m = C.Mission(prm)
     sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps), C.Vehicle(), None, S.Descent()
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
@@ -154,6 +151,36 @@ def test_the_full_route_is_flown_and_landed_whatever_the_frames(offset_deg, star
     assert max(abs(tw[3]) for _, _, tw in sent) <= math.radians(45.0) + 1e-9
     assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= 1.5
     assert all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for _, ph, tw in sent if ph == "land")   # detected at 0.35
+
+
+def _from_polyline(path: F.Path, corners: np.ndarray) -> np.ndarray:
+    a, b = corners[:-1], corners[1:]
+    pts = np.stack([path.x, path.y], 1)[:, None, :]
+    u = np.clip(((pts - a) * (b - a)).sum(2) / ((b - a) ** 2).sum(1), 0.0, 1.0)[..., None]
+    return np.linalg.norm(pts - (a + u * (b - a)), axis=2).min(1)
+
+
+def test_waypoints_fly_within_the_corner_cut_and_turn_only_while_moving():
+    m, _, sent = flight()
+    corners = np.array([(0.0, 0.0)] + [(f, -l) for f, l in DOC["route"]])
+    assert _from_polyline(m.path, corners).max() <= LAUNCH_PARAMS["corner_cut_m"] + 1e-3
+    follow = [tw for _, ph, tw in sent if ph == "follow"]
+    assert not [tw for tw in follow if abs(tw[3]) > math.radians(10.0) and math.hypot(tw[0], tw[1]) < 0.05]
+
+
+@pytest.mark.parametrize("name", ["route_v6_start2", "route_v6_start2_sim", "route_v6_start2_stage1",
+                                  "route_v6_start2_stage1_sim"])
+def test_chelseas_route_files_load_unchanged(name):
+    prm, unknown = C.params_from_doc(json.loads((ROOT / "routes" / f"{name}.json").read_text()), LAUNCH_PARAMS)
+    assert prm.speed_mps == 0.3 and not unknown
+
+
+@pytest.mark.parametrize("route, why", [([(1.0, 0.0), (0.0, 0.0)], "turn in place"),       # a reversal
+                                        ([(0.0, 1.0), (1.0, 1.0)], "off the nose"),         # first leg 90 deg left
+                                        ([(9.0, 0.0)], "legs up to")])
+def test_waypoints_that_would_turn_in_place_or_are_typos_are_refused(route, why):
+    with pytest.raises(ValueError, match=why):
+        C.params_from_doc({"route": route}, LAUNCH_PARAMS)
 
 
 def test_carrying_the_drone_after_arm_moves_the_route_with_it():
@@ -291,3 +318,8 @@ def test_no_px4_publisher_exists_in_the_drone_program():
     node = ast.parse((ROOT / "skybeta" / "blueraven_skybeta" / "blueraven_skybeta" / "refnav_node.py").read_text())
     cls = next(c for c in node.body if isinstance(c, ast.ClassDef) and c.name == "SkybetaRefNav")
     assert {"_io", "_send"} <= {f.name for f in cls.body if isinstance(f, ast.FunctionDef)}
+
+
+def test_the_launch_file_sets_what_these_tests_fly():
+    text = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
+    assert all(f"'{k}'" in text for k in LAUNCH_PARAMS) and "default_value='route_v6_start2'" in text

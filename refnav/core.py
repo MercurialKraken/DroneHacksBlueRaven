@@ -54,6 +54,8 @@ HOME_MOVED_M, HOME_TURNED_DEG = 0.05, 1.0   # a plan holds while the aircraft si
 
 
 DEPTH_MODES = ("blind", "assisted")
+PATH_SOURCES = ("map", "waypoints")
+LEG_MAX_M, REACH_MAX_M = 8.0, 10.0              # the course is ~6 m across: longer is a typo (Chelsea's load_route)
 
 
 @dataclass
@@ -98,7 +100,9 @@ class Params:
     touchdown_after_s: float = 2.0              # never sooner than this after the landing began
     touchdown_tilt_deg: float = 35.0            # a dead estimate on the pad tips and skids the airframe 25 deg+
     stall_s: float = 45.0                       # no progress along the path this long: land
+    path_source: str = "map"                    # waypoints: the route's own corners, no map read
     fillet_m: float = 0.3                       # largest corner arc; less where the legs are short
+    corner_cut_m: float = math.inf              # an arc passes at most this far inside its corner (and arrive_m)
     a_lat_mps2: float = 0.25                    # sideways acceleration in turns: PX4 lags tighter ones and cuts the corner
     tight_m: float = 0.40                       # where the mapped path passes this close to a surface it crawls...
     roomy_m: float = 0.60                       # ...rising to full speed by this clearance
@@ -122,10 +126,35 @@ class Params:
                 near = "the take-off point" if i == 0 else f"point {i}"
                 raise ValueError(f"route point {i + 1} {tuple(q)} is within 1 cm of {near}")
             prev = q
+        if self.path_source not in PATH_SOURCES:
+            raise ValueError(f"path_source must be one of {', '.join(PATH_SOURCES)}, not {self.path_source!r}")
+        if self.path_source == "waypoints":
+            self._check_waypoints()
         for lo, hi in (("tight_m", "roomy_m"), ("xtrack_slow_m", "xtrack_stop_m"), ("face_tol_deg", "yaw_slow_deg"),
                        ("eph_ok_m", "eph_stop_m")):
             if not getattr(self, lo) < getattr(self, hi):
                 raise ValueError(f"{lo} ({getattr(self, lo):g}) must be less than {hi} ({getattr(self, hi):g})")
+
+
+    def _check_waypoints(self) -> None:
+        """The route as flown without a map: sane numbers, and every turn made while moving."""
+        prev = (0.0, 0.0)
+        for i, q in enumerate(self.route):
+            if not all(math.isfinite(c) for c in q) or math.dist(prev, q) > LEG_MAX_M or math.hypot(*q) > REACH_MAX_M:
+                raise ValueError(f"route point {i + 1} {tuple(q)}: legs up to {LEG_MAX_M:g} m, within {REACH_MAX_M:g} m")
+            prev = q
+        if not self.route:
+            return
+        off = abs(math.degrees(math.atan2(self.route[0][1], self.route[0][0])))
+        if off >= self.yaw_slow_deg:
+            raise ValueError(f"the first leg is {off:.0f} deg off the nose: it would turn in place (yaw_slow_deg)")
+        path = F.fillet_path([(0.0, 0.0)] + [(f, -l) for f, l in self.route], self.fillet_m,
+                             min(self.arrive_m, self.corner_cut_m))
+        r_min = F.MIN_SPEED / math.radians(self.yaw_rate_dps)    # tighter, the turn outruns the yaw rate at a creep
+        i = int(np.argmax(np.abs(path.k)))
+        if abs(path.k[i]) > 1.0 / r_min:
+            raise ValueError(f"the corner near ({path.x[i]:.2f}, {-path.y[i]:.2f}) (forward, left) turns on a "
+                             f"{1.0 / abs(path.k[i]):.3f} m arc, under {r_min:.3f} m: it would turn in place")
 
 
 def params_from_doc(doc: dict[str, Any] | list, overrides: dict[str, Any] | None = None) -> tuple[Params, list[str]]:
@@ -216,7 +245,8 @@ class Health:
 class Mission:
     def __init__(self, params: Params, path_builder: Callable[[list[tuple[float, float]]], F.Path] | None = None) -> None:
         self.p: Params = params
-        self.path_builder = path_builder or (lambda points: F.fillet_path(points, params.fillet_m, params.arrive_m))
+        self.path_builder = path_builder or (lambda points: F.fillet_path(points, params.fillet_m,
+                                                                          min(params.arrive_m, params.corner_cut_m)))
         self.health: Health = Health(params.health_quiet_s, params.health_stale_s)
         self.phase: str = "wait"
         self.why: str = ""
