@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from nav.frames import quaternion_z, yaw_from_quaternion  # noqa: E402  (pure maths, no map)
 
-ROUTES_DIR = ROOT / "skybeta" / "blueraven_skybeta" / "routes"    # the route files (mission "route")
+ROUTES_DIR = ROOT / "routes"           # the team's route files (mission "route"), shared with refnav
 
 
 class SkybetaMissionNode(Node):

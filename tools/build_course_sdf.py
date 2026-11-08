@@ -149,9 +149,18 @@ def signed_distance(occ: np.ndarray, grid: Grid) -> np.ndarray:
 
 
 # --------------------------------------------------------------------- build
-def build(build_cfg: dict[str, Any], mesh_path: str | Path, log=print) -> CourseMap:
+def build(build_cfg: dict[str, Any], mesh_path: str | Path | list, log=print) -> CourseMap:
+    """mesh_path: one OBJ, or a list of them (the published course plus a small file of later changes:
+    their group names must not collide)."""
     t0 = time.perf_counter()
-    groups = parse_obj_groups(mesh_path)
+    mesh_paths = [Path(p) for p in (mesh_path if isinstance(mesh_path, (list, tuple)) else [mesh_path])]
+    groups: dict[str, np.ndarray] = {}
+    for mp in mesh_paths:
+        more = parse_obj_groups(mp)
+        clash = sorted(set(more) & set(groups))
+        if clash:
+            raise ValueError(f"{mp.name}: group names already used by an earlier mesh: {clash}")
+        groups.update(more)
     log(f"mesh: {len(groups)} groups, {sum(len(t) for t in groups.values())} triangles")
     b = build_cfg["bounds"]
     grid = Grid(b["min"], b["max"], build_cfg["cell"], build_cfg.get("oversample", 3))
@@ -182,11 +191,13 @@ def build(build_cfg: dict[str, Any], mesh_path: str | Path, log=print) -> Course
             f"distance {fields[name].min():+.3f}..{fields[name].max():+.3f} m")
         del occ
 
-    mesh_path = Path(mesh_path)
+    names = [mp.name for mp in mesh_paths]
+    shas = [hashlib.sha256(mp.read_bytes()).hexdigest() for mp in mesh_paths]
     meta = {
         "builder": "tools/build_course_sdf.py", "builder_version": BUILDER_VERSION,
         "built_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mesh": mesh_path.name, "mesh_sha256": hashlib.sha256(mesh_path.read_bytes()).hexdigest(),
+        "mesh": names[0] if len(names) == 1 else names,
+        "mesh_sha256": shas[0] if len(shas) == 1 else shas,
         "cell": grid.cell, "oversample": grid.k, "bounds": {"min": grid.lo.tolist(), "max": b["max"]},
         "fields": {name: {"pieces": sel, **build_cfg["fields"][name]} for name, sel in selection.items()},
         "sign": "positive free, negative inside, ~0 on a surface; metres",
@@ -215,7 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg_path = Path(args.config).resolve()
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     here = cfg_path.parent
-    mesh = here / cfg["course"]["mesh"]
+    m = cfg["course"]["mesh"]
+    mesh = [here / p for p in m] if isinstance(m, list) else here / m
     out = here / cfg["build"]["output"]
 
     cmap = build(cfg["build"], mesh)

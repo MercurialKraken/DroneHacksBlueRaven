@@ -8,9 +8,16 @@
 # (20 x 20 ft; map metres = feet * 0.3048 - 3.048 on both axes, north up). `confirmed: false`
 # marks values still derived only from the OBJ's geometry.
 
+# 2026-11-07 evening: the organizers REBUILT THE START (no exact dimensions, by design). Maze dividers
+# M1, M2, M3 are gone; a back wall (Wall A) and a diagonal (Wall B) are new, with a cone in the CP2 gap.
+# They come from Darion's marked-up drawing (approx +-0.1 m; Wall A "fairly accurate"), added as a small
+# extra mesh. CP1 is removed; CP2 is the gap between Wall A and Wall B. The rest is unchanged.
+# NOT FOR FLIGHT AT RUNTIME (Arnav's directive): this map is for sims, offline checks and waypoints.
 course:
-  name: dronehacks-2026-v3
-  mesh: course/dronehacks-course-v3.obj        # relative to this file; provenance in course/SOURCE.md
+  name: dronehacks-2026-v3-start2
+  mesh:                                         # relative to this file; provenance in course/SOURCE.md
+    - course/dronehacks-course-v3.obj           # the published course
+    - course/start-2026-11-07.obj               # the rebuilt start, from Darion's drawing
 
 launch:
   x: -2.515                                     # centre of the "Launch mark" piece
@@ -37,21 +44,13 @@ limits:
 # Checkpoints in course order. A `line` is a floor segment [[x, y], [x, y]] the WHOLE drone must cross
 # (its centre at least drone_radius past the line), moving along `direction`.
 checkpoints:
-  - id: CP1
-    name: end of the first corridor, where the floor line turns east
-    line: [[-3.048, 2.585], [-1.930, 2.585]]    # across the west corridor at the floor line's turn (diagram)
-    direction: [0.0, 1.0]
-    points: 4
-    confirmed: true
-    # Whole drone across means its centre at y >= 2.585 + drone_radius = 2.865, which leaves
-    # 0.18 m to the north net: less than the radius. As drawn, CP1 can't be fully crossed without
-    # touching the net, so ask the organizers how it is judged.
+  # CP1 was REMOVED with the rebuilt start (2026-11-07; the organizers haven't said otherwise).
   - id: CP2
-    name: Gate A, leaving the maze where the floor line ends
-    line: [[0.305, 2.121], [0.305, 3.048]]      # from maze divider M3's north end to the north net
-    direction: [1.0, 0.0]
-    points: 7
-    confirmed: true
+    name: the gap between Wall A's east end and Wall B's north-east end (rebuilt start)
+    line: [[-1.16, 2.70], [-0.68, 1.89]]        # wall end to wall end, ~0.94 m (Darion's drawing, rough)
+    direction: [0.860, 0.510]                   # the gap's normal, about 30 deg north of east
+    confirmed: false
+    # The 0.30 m cone ("Boulder 6") stands inside the gap; flying at 0.7 m passes 0.4 m over it.
   - id: CP3
     name: tunnel south exit
     line: [[1.581, -0.305], [3.042, -0.305]]    # the tube's open south end, inner width
@@ -93,19 +92,19 @@ build:
   fields:
     planning:                                   # everything solid, including the floor and the net
       include: ["*"]
-      exclude: ["Landing pad*", "Launch mark", "Guideline*", "Approach ring*"]   # floor markings, <= 3 mm
+      exclude: ["Landing pad*", "Launch mark", "Guideline*", "Approach ring*",   # floor markings, <= 3 mm
+                "M1 maze divider", "M2 maze divider", "M3 maze divider"]        # removed 2026-11-07
     localization:                               # solid vertical surfaces a depth camera sees reliably.
       include: ["*wall*", "Barrier*", "*divider*", "Tube*", "Boulder*"]          # No floor, no net
-      exclude: []                                                                # (cameras see through it)
+      exclude: ["M1 maze divider", "M2 maze divider", "M3 maze divider"]       # (cameras see through it)
   plot_heights: [0.3, 0.76, 1.0, 1.5]           # 0.76 m is the window's centre height
 
 # Places where flights run closest to the map's surfaces (from the team's FlyX and T4 runs and the
 # perturbed-course suite). tools/audit_sdf.py reports the map's error against exact geometry here.
 audit_spots:
-  - {name: "M1 north tip",            at: [-1.930, 2.121], radius: 0.5}
-  - {name: "M2 south tip",            at: [-0.813, 1.435], radius: 0.5}
-  - {name: "M3 north tip",            at: [0.305, 2.121],  radius: 0.5}
-  - {name: "first maze turn exit",    at: [-1.94, 2.42],   radius: 0.4}
+  - {name: "Wall A east end",         at: [-1.16, 2.70],   radius: 0.5}
+  - {name: "Wall B north-east end",   at: [-0.68, 1.89],   radius: 0.5}
+  - {name: "CP2 gap",                 at: [-0.92, 2.30],   radius: 0.4}
   - {name: "Gate B approach",         at: [0.53, -0.95],   radius: 0.4}
   - {name: "wall end near point 8",   at: [0.57, 2.77],    radius: 0.4}
 
@@ -118,14 +117,18 @@ sanity:
   - {name: "launch near the floor (loc)",   at: [-2.515, 0.914, 0.15],   field: localization, min: 0.38, max: 0.43}
   - {name: "first corridor centre",         at: [-2.515, 1.6, 1.0],      min: 0.50, max: 0.55}  # 1.07 m wide
   - {name: "next to the net",               at: [-2.95, 1.6, 1.0],       min: 0.08, max: 0.12}
-  - {name: "next to the net (loc)",         at: [-2.95, 1.6, 1.0],       field: localization, min: 0.93, max: 1.0}
-  - {name: "maze corridor M1-M2",           at: [-1.372, 2.0, 1.0],      min: 0.47, max: 0.52}  # 1.02 m wide
-  - {name: "Gate A opening",                at: [0.305, 2.6, 1.0],       min: 0.42}
+  - {name: "next to the net (loc)",         at: [-2.95, 1.6, 1.0],       field: localization, min: 0.93}   # no wall near: M1 removed
+  - {name: "CP2 gap centre",                at: [-0.92, 2.30, 1.0],      min: 0.40, max: 0.48}  # ~0.9 m gap
+  - {name: "CP2 gap at flight height",      at: [-0.92, 2.30, 0.7],      min: 0.40}             # over the cone
+  - {name: "old Gate A strip, now open",    at: [0.305, 2.0, 1.0],       min: 0.6}              # M3 removed
   - {name: "tunnel centre",                 at: [2.3115, 0.457, 0.94],   min: 0.68, max: 0.75}  # 1.46 m inner width
   - {name: "Gate B opening",                at: [0.157, -0.07, 1.0],     min: 0.42}   # 0.95 m wide
   - {name: "gap between A1 and C2b",        at: [-0.408, -0.576, 1.0],   min: 0.45}
   - {name: "window centre",                 at: [-0.471, -2.272, 0.762], min: 0.42, max: 0.47}  # 0.914 m square
-  - {name: "inside maze divider M1",        at: [-1.9305, 1.3, 1.0],     max: 0.0}
+  - {name: "M1 gone",                       at: [-1.9305, 1.3, 1.0],     min: 0.3}
+  - {name: "inside start wall A",           at: [-2.0, 2.70, 1.0],       max: 0.0}
+  - {name: "inside start wall B",           at: [-1.215, 1.325, 1.0],    max: 0.0}
+  - {name: "inside the CP2 cone",           at: [-1.25, 2.393, 0.15],    max: 0.0}
   - {name: "inside barrier 2",              at: [-0.6, 0.457, 1.0],      max: 0.0}
   - {name: "inside boulder 1",              at: [2.0115, -2.4685, 0.27], max: -0.1}
   - {name: "inside wall C2a, below window", at: [-0.471, -2.272, 0.15],  max: 0.01}  # diagonal 10 cm wall

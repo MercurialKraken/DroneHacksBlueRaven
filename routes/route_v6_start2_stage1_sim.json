@@ -1,0 +1,11 @@
+{
+ "from": "STAGE 1 (Arnav's ask d): the first 3 corners of route_v6_start2_sim.json: take off, through the CP2 gap, land about 0.5 m past it. nav.route_planner on maps/course.yaml dronehacks-2026-v3-start2 (rebuilt start from Darion's drawing, approx +-0.1 m), launch_key launch_sim, 0.7 m, CP4 gate_b, keep_centre_m 0.02, digest 836134570a34. Checkpoint crossings (centre past the line, m): CP2 1.148, CP3 1.338, CP4 Gate B 2.207, CP5 0.011",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch_sim",
+ "labels": ["CP2 approach", "CP2", ""],
+ "route": [
+  [1.036, -1.365],
+  [1.336, -1.865],
+  [1.336, -2.365]
+ ],
+ "params": {"height_m": 0.7, "speed_mps": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
+}

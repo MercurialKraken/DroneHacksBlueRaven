@@ -47,11 +47,11 @@ def test_window_route_crosses_every_checkpoint_and_ends_on_the_pad() -> None:
     plan = plan_from_files(SDF, YAML, "launch_sim", HEIGHT, "window")
     assert gate_problems(plan) == []
     got = {c["checkpoint"]: c for c in plan.crossings}
-    assert got["CP1"]["past_m"] > 0.0                       # CP1 as drawn: only partly (see course.yaml)
+    assert "CP1" not in got                                 # removed with the rebuilt start (2026-11-07)
     for cp in ("CP2", "CP3", "CP4 window"):
         assert got[cp]["whole_drone_across"], got[cp]
     assert got["CP5"]["end_from_centre_m"] < 0.05
-    assert [w for w in plan.warnings if not w.startswith("CP1")] == []
+    assert plan.warnings == []
 
 
 def test_the_route_keeps_its_clearance_on_the_map() -> None:
@@ -68,7 +68,8 @@ def test_the_route_keeps_its_clearance_on_the_map() -> None:
 def test_gate_b_route_never_flies_through_the_window() -> None:
     import yaml
     cfg = yaml.safe_load(YAML.read_text(encoding="utf-8"))
-    window = next(o for o in cfg["checkpoints"][3]["options"] if o["name"] == "window")["line"]
+    cp4 = next(c for c in cfg["checkpoints"] if c["id"] == "CP4")
+    window = next(o for o in cp4["options"] if o["name"] == "window")["line"]
     plan = plan_from_files(SDF, YAML, "launch_sim", HEIGHT, "Gate B")
     assert gate_problems(plan) == []
     assert {c["checkpoint"]: c for c in plan.crossings}["CP4 Gate B"]["whole_drone_across"]

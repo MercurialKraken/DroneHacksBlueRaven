@@ -578,7 +578,7 @@ def test_an_odometry_stall_shorter_than_odom_stale_s_does_not_abort_a_hover():
 # ---------------------------------------------------------- mission "route": route files, the take-off frame
 from blueraven_skybeta.mission_core import load_route  # noqa: E402
 
-ROUTES = ROOT / "skybeta" / "blueraven_skybeta" / "routes"
+ROUTES = ROOT / "routes"                                  # the team's route files, shared with refnav
 
 
 def write_route(tmp_path, data, name="r.json"):
