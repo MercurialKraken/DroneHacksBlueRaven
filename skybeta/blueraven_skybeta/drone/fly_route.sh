@@ -81,8 +81,8 @@ check() {
   if (( $(count /competitor_example) > 0 )); then   # the stack starts the organizers' example (a 5 m square on arm)
     say "stopping the organizers' example (Ctrl-C in its tmux window)"
     docker exec "$C" tmux send-keys -t skybeta:competitor C-c
-    poll 20 "the organizers' example (/competitor_example) exiting" \
-      bash -c "[ \$(docker exec $C bash -ic 'ros2 node list' 2>/dev/null | tr -d '\r' | grep -cx /competitor_example) = 0 ]"
+    poll 20 "the organizers' example AND its own flight_interface exiting" \
+      bash -c "[ \$(docker exec $C bash -ic 'ros2 node list' 2>/dev/null | tr -d '\r' | grep -cxE '/competitor_example|/flight_interface') = 0 ] && ! docker exec $C pgrep -f '$FI_PROC' >/dev/null"
   fi
   (( $(count /flight_interface) == 0 && $(procs "$FI_PROC") == 0 )) \
     || die "a flight_interface is already running (two must never run): ./fly_route.sh stop, or find who started it"
