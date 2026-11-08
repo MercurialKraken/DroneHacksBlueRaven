@@ -24,7 +24,7 @@ MPPI_SPEED=${MPPI_SPEED:-0.10}                    # NAV=mppi: MPPI's cruise spee
 ROUTE=${ROUTE:-route_v7_cp2_simple}               # a route file name, without .json
 COURSE=${COURSE:-start-2026-11-07-tape}           # the course folder (courses/<COURSE>/routes/)
 if [ "$PROGRAM" = wallseek ]; then HEIGHT=${HEIGHT:-0.40}; else HEIGHT=${HEIGHT:-0.7}; fi
-MAX_SPEED=${MAX_SPEED:-0.15}                      # the route file's speed_mps may not exceed this (team rule)
+MAX_SPEED=${MAX_SPEED:-10}                        # sanity bound only (Arnav, 2026-11-08: no team speed cap); command any speed
 BAGS=/root/team_ws/bags                           # = ~/team_ws/bags on the drone host
 WS=/root/team_ws
 MON=/tmp/fly_status.py                            # the status monitor, copied into the container on use
@@ -322,7 +322,7 @@ go() {
     [ -n "$info" ] || fail "$RF doesn't parse as a route (needs params and route): fix the JSON"
     read -r speed fillet npts sha points <<<"$info"
     awk -v s="$speed" -v m="$MAX_SPEED" 'BEGIN { exit !(s + 0 > 0 && s + 0 <= m + 1e-9) }' \
-      || fail "speed_mps is $speed, over MAX_SPEED=$MAX_SPEED (team rule; MAX_SPEED=$speed to accept it)"
+      || fail "speed_mps is $speed, over MAX_SPEED=$MAX_SPEED (MAX_SPEED=$speed to accept it)"
     pass "speed $speed m/s, fillet $fillet m, $npts points, sha1 $sha"
     echo "      $RF"
     echo "      points: $points"
