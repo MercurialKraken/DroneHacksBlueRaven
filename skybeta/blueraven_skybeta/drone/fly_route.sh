@@ -42,7 +42,7 @@ MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
 LAUNCH_PROC="ros2 launch blueraven_skybeta"
 MPPI_PROC='lib/blueraven_skybeta/mppi_node( |$)'
-BAG_PROC='ros2 bag record -s mcap -o [A-Za-z0-9_]+_[0-9]{6} '   # OUR recorder only (its -o is <ROUTE>_HHMMSS)
+BAG_PROC='ros2 bag record -s mcap -o [A-Za-z0-9_-]+_[0-9]{6} '   # OUR recorder only (its -o is <ROUTE>_HHMMSS)
 OURS_PROC="$LAUNCH_PROC|$BAG_PROC|$FI_PROC|$MISSION_PROC|$MPPI_PROC"
 
 usage() {
