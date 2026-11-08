@@ -39,6 +39,7 @@ DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera dep
                                                   # (Hinson); the per-second status shows odometry Hz if it starves
 (( DEPTH_BAG )) && TOPICS="$TOPICS /oak/stereo/image_raw /oak/stereo/camera_info"
 MIN_FREE_GB=${MIN_FREE_GB:-5}                     # free space the bag disk must have (depth fills ~1 GB a minute)
+ODOM_MIN_GO=${ODOM_MIN_GO:-28}                    # odometry Hz needed AFTER the recorder starts, before GO (Darion)
 FI_PROC="lib/skybeta_flight_interface/flight_interface"
 MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
@@ -323,6 +324,13 @@ go() {
   nfi=$(procs "$FI_PROC"); nm=$(procs "$MISSION_PROC"); nex=$(procs "$EXAMPLE_PROC")
   [ "$nfi" = 1 ] && [ "$nm" = 1 ] && [ "$nex" = 0 ] \
     || die "process count: flight_interface $nfi, mission $nm, competitor_example $nex (need 1, 1, 0)"
+  # Darion's rule: with the recorder (and depth) running, cuVSLAM must still keep its rate before anyone arms
+  local sum hz
+  sum=$(monitor DURATION=4 --summary)
+  echo "$sum" | grep -v SUMMARY | tail -1
+  hz=$(echo "$sum" | grep -o 'odom_hz=[0-9.]*' | cut -d= -f2)
+  awk -v h="${hz:-0}" -v m="$ODOM_MIN_GO" 'BEGIN { exit !(h >= m) }' \
+    || die "odometry ${hz:-none} Hz with the recording running (need >= $ODOM_MIN_GO; hover baseline 29.6): run go again with DEPTH_BAG=0"
   echo
   say "GO. Team approves, then the PILOT: arm with the mode switch on ALTITUDE, throttle low, then switch to POSITION within a few seconds."
   say "Abort: the pilot takes over (Position/Altitude). If it then sits ARMED on the ground, Ctrl-C here (the interface stops publishing), then disarm."
