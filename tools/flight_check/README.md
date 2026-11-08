@@ -29,6 +29,8 @@ It reads one `.mcap` file or a ros2 bag folder and writes `flight_03_report.txt`
 | Pose tracking | distance from each odometry sample to the pose setpoint in force then (horizontal and vertical; median, p95, max). **Assumes setpoint and odometry are in the same frame**; it warns when their frame ids differ |
 | Twist tracking | commanded vs flown horizontal speed and vertical speed. Speed *magnitudes* do not depend on whether the twist is in a body or world frame, so no frame assumption is needed |
 | Data age | how old each message already was: recording time minus header stamp, and for PX4 `VehicleOdometry` topics (e.g. the vision input) PX4's own `timestamp - timestamp_sample`. Reports median/p90/max, the fraction older than `--latency-s` (0.2 s, the organizers' `EKF2_DELAY_MAX`: older vision is not fused), and the first 1 s window whose median is over it. This is the Jetson-overload signature seen on the 2026-11-07 field bag (75 ms, then 200–400 ms) |
+| Holds | every stretch where the pose setpoint stayed put for `--hold-min-s` (3 s), e.g. a hover: how far the centre of the drone's motion sits from the setpoint, the radius (median, p95), and, only if it really circles (at least one full turn, and at least 80 % of its turning in one direction on a 0.5 s smoothed track), the period and direction (`ccw`/`cw` seen from above in the odometry frame). Height mean, spread and error. Jitter or slow wander is reported as `orbiting: false`, not as an orbit |
+| Mission phases | `/blueraven/mission/status` (`--mission`), if recorded: when the phase changed. JSON status strings change only when their `phase`/`state`/`mode` field changes |
 | State changes | `/skybeta/state` transitions, if it is a `std_msgs/String`; otherwise only its rate |
 
 Topics default to the skybeta interface (`/visual_slam/tracking/odometry`, `/skybeta/setpoint/pose`,
@@ -37,7 +39,7 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 
 ## How it was checked
 
-- `python3 -m pytest -q tests/test_flight_check.py`: 21 tests with hand-encoded CDR messages in a
+- `python3 -m pytest -q tests/test_flight_check.py`: 26 tests with hand-encoded CDR messages in a
   minimal MCAP file (decoders, dropouts, jumps, freezes, tracking maths, missing topics,
   read-only source check).
 - Cross-checked once against an **independent** writer (the `mcap` + `mcap-ros2-support` packages,
@@ -50,6 +52,9 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 - The real message types of `/skybeta/setpoint/*` and `/skybeta/state` are **assumed**
   (`PoseStamped`, `TwistStamped`, `String`). The report prints each topic's actual schema name;
   anything it cannot decode is counted but not analysed. Check the first real recording.
+- The hold/orbit numbers were checked on two independent-writer hovers with 5 mm sensor noise: a
+  0.1 m clockwise orbit every 8 s (reported 0.10 m, 7.97 s, cw) and a still hover (reported not
+  orbiting). In 600 random jitter/wander hovers no false orbit, in 300 noisy orbits none missed.
 - Not yet run on a real recording.
 
 Needs only numpy (matplotlib optional; zstandard/lz4 for compressed bags, laptop only). It uses

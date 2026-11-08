@@ -9,6 +9,7 @@ Read-only by construction: nothing here talks to ROS, PX4 or the drone.
 
 from __future__ import annotations
 
+import json
 import struct
 from dataclasses import dataclass
 
@@ -118,6 +119,7 @@ class Thresholds:
     jump_speed_mps: float = 3.0  # implied speed above this = a jump (twists are capped at 1.5)
     freeze_s: float = 0.5  # identical position for at least this long while messages arrive
     hold_s: float = 1.0  # a setpoint older than this is not compared against
+    hold_min_s: float = 3.0  # a pose setpoint unchanged this long counts as a hold (hover)
     latency_s: float = 0.2  # older data than this is not fused by PX4 (organizers' EKF2_DELAY_MAX)
 
 
@@ -288,14 +290,98 @@ def twist_tracking(odo_t, odo_p, sp_t, sp_lin, hold_s: float = 0.5) -> dict:
     }
 
 
+def _state_key(text: str) -> tuple[str, str]:
+    """A status string -> (what decides a change, what to show). JSON status messages with a
+    'phase' (or 'state'/'mode') field change only when that field changes, not on every
+    counter or timestamp inside them."""
+    try:
+        d = json.loads(text)
+    except (ValueError, TypeError):
+        return text, text
+    if isinstance(d, dict):
+        for k in ("phase", "state", "mode"):
+            if k in d:
+                why = d.get("why") or d.get("reason")
+                shown = f"{d[k]}" + (f" ({why})" if why else "")
+                return str(d[k]), shown
+    return text, text
+
+
 def state_changes(times, texts) -> list[dict]:
-    """String state messages -> only the moments the text changed."""
+    """String state messages -> only the moments the state changed."""
     out, last = [], None
     for t, s in zip(times, texts):
-        if s != last:
-            out.append({"t": round(float(t), 3), "state": s})
-            last = s
+        key, shown = _state_key(s)
+        if key != last:
+            out.append({"t": round(float(t), 3), "state": shown})
+            last = key
     return out
+
+
+def hold_segments(sp_t, sp_p, min_s: float = 3.0, tol_m: float = 0.005) -> list[dict]:
+    """Pose setpoints -> the stretches where the commanded position stayed put (within tol_m)
+    for at least min_s: hovers and holds."""
+    sp_t = np.asarray(sp_t, float)
+    sp_p = np.asarray(sp_p, float).reshape(-1, 3)
+    out, i = [], 0
+    while i < len(sp_t):
+        j = i
+        while j + 1 < len(sp_t) and np.linalg.norm(sp_p[j + 1] - sp_p[i]) <= tol_m:
+            j += 1
+        if sp_t[j] - sp_t[i] >= min_s:
+            out.append({"t0": float(sp_t[i]), "t1": float(sp_t[j]), "setpoint": sp_p[i].copy()})
+        i = j + 1
+    return out
+
+
+def orbit(t, p, setpoint) -> dict:
+    """Odometry during a hold -> how the drone moved around it: offset of its mean from the
+    setpoint, orbit radius (median distance from that mean), period and direction from the
+    unwrapped angle (counter-clockwise = positive turn seen from above in the odometry frame,
+    which is ENU), and height spread. Period is reported only after at least one full turn."""
+    t = np.asarray(t, float)
+    p = np.asarray(p, float).reshape(-1, 3)
+    ok = np.isfinite(p).all(axis=1)
+    t, p = t[ok], p[ok]
+    if t.size < 10:
+        return {"n": int(t.size)}
+    c = p[:, :2].mean(axis=0)
+    # turn counting on a ~0.5 s moving average, so sensor noise does not look like turning
+    k = max(1, int(round(0.5 / max(float(np.median(np.diff(t))), 1e-3))))
+    ker = np.ones(k) / k
+    sm = np.c_[np.convolve(p[:, 0], ker, "valid"), np.convolve(p[:, 1], ker, "valid")]
+    ang = np.unwrap(np.arctan2(sm[:, 1] - c[1], sm[:, 0] - c[0]))
+    turns = float((ang[-1] - ang[0]) / (2 * np.pi)) if len(ang) > 1 else 0.0
+    inc = np.diff(ang)
+    tot = float(np.abs(inc).sum())
+    # share of the angular motion that went the same way as the net turn: ~1 for an orbit,
+    # ~0.5 for a drone just jittering around the point
+    consistency = float(np.abs(inc[np.sign(inc) == np.sign(turns)]).sum() / tot) if tot else 0.0
+    orbiting = abs(turns) >= 1 and consistency >= 0.8
+    if orbiting:  # a real orbit: fit its circle, the mean is biased by part-turns
+        A = np.c_[2 * p[:, 0], 2 * p[:, 1], np.ones(len(p))]
+        sol, *_ = np.linalg.lstsq(A, p[:, 0] ** 2 + p[:, 1] ** 2, rcond=None)
+        c = sol[:2]
+    d = p[:, :2] - c
+    r = np.hypot(d[:, 0], d[:, 1])
+    dur = float(t[-1] - t[0])
+    dur_sm = float(t[len(sm) + k - 2] - t[k - 1]) if len(sm) > 1 else dur  # smoothed span
+    period = round(dur_sm / abs(turns), 2) if abs(turns) >= 1 else None
+    return {
+        "n": int(t.size),
+        "duration_s": round(dur, 2),
+        "centre_offset_from_setpoint_m": round(float(np.hypot(*(c - setpoint[:2]))), 3),
+        "radius_median_m": round(float(np.median(r)), 3),
+        "radius_p95_m": round(float(np.percentile(r, 95)), 3),
+        "turns": round(turns, 2),
+        "turn_consistency": round(consistency, 2),
+        "orbiting": orbiting,
+        "period_s": period if orbiting else None,
+        "direction": ("ccw" if turns > 0 else "cw") if orbiting else None,
+        "height_mean_m": round(float(p[:, 2].mean()), 3),
+        "height_std_m": round(float(p[:, 2].std()), 3),
+        "height_error_m": round(float(p[:, 2].mean() - setpoint[2]), 3),
+    }
 
 
 def latency(t: np.ndarray, age_s: np.ndarray, limit_s: float = 0.2) -> dict:

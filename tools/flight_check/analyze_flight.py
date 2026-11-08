@@ -36,6 +36,7 @@ DEFAULTS = {
     "pose_sp": "/skybeta/setpoint/pose",
     "twist_sp": "/skybeta/setpoint/twist",
     "state": "/skybeta/state",
+    "mission": "/blueraven/mission/status",
 }
 
 
@@ -87,7 +88,7 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
     for name, e in sorted(topics.items()):
         rep["topics"][name] = {"schema": e["schema"], **F.topic_stats(e["t"] - t0, th.gap_s)}
     for key, name in names.items():
-        if name not in topics:
+        if name not in topics and key != "mission":  # mission status: only with the adapter
             rep["notes"].append(f"{key}: topic {name} was not recorded")
 
     # data age: how stale each message already was when recorded (header topics), or when PX4
@@ -141,6 +142,18 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
             pt = F.pose_tracking(ot, op, st, spos, th.hold_s)
             rep["_series"].update(sp_p=spos, pose=pt.pop("series", None))
             rep["pose_tracking"] = pt
+            holds = []
+            for h in F.hold_segments(st, spos, th.hold_min_s):
+                m = (ot >= h["t0"]) & (ot <= h["t1"])
+                holds.append(
+                    {
+                        "t0": round(h["t0"], 3),
+                        "t1": round(h["t1"], 3),
+                        "setpoint": [round(float(x), 3) for x in h["setpoint"]],
+                        **F.orbit(ot[m], op[m], h["setpoint"]),
+                    }
+                )
+            rep["holds"] = holds
     tw = topics.get(names["twist_sp"])
     if tw:
         ms = [(t, m) for t, m in zip(_times(tw, True) - tz, tw["msgs"]) if m and "lin" in m]
@@ -158,12 +171,14 @@ def analyze(topics: dict[str, dict], names: dict, th: F.Thresholds) -> dict:
             "error assumes they are the same frame; check before trusting it"
         )
 
-    stt = topics.get(names["state"])
-    if stt:
+    for key, out in (("state", "state_changes"), ("mission", "mission_changes")):
+        stt = topics.get(names[key])
+        if not stt:
+            continue
         if all(m and "data" in m for m in stt["msgs"]):
-            rep["state_changes"] = F.state_changes(stt["t"] - t0, [m["data"] for m in stt["msgs"]])
+            rep[out] = F.state_changes(stt["t"] - t0, [m["data"] for m in stt["msgs"]])
         else:
-            rep["notes"].append(f"{names['state']} is {stt['schema']}: only its rate is reported")
+            rep["notes"].append(f"{names[key]} is {stt['schema']}: only its rate is reported")
     return rep
 
 
@@ -256,11 +271,23 @@ def text(rep: dict, tz: str = "America/Los_Angeles") -> str:
     for key in ("pose_tracking", "twist_tracking"):
         if key in rep:
             L += ["", f"{key}: {json.dumps(rep[key])}"]
-    if rep.get("state_changes"):
-        L += ["", "State changes:"] + [
-            f"  t={s['t']:8.3f} [{clock(rep, s['t'], tz)}]  {s['state']}"
-            for s in rep["state_changes"]
+    for key, title in (("state_changes", "State changes"), ("mission_changes", "Mission phases")):
+        if rep.get(key):
+            L += ["", f"{title}:"] + [
+                f"  t={s['t']:8.3f} [{clock(rep, s['t'], tz)}]  {s['state']}" for s in rep[key]
+            ]
+    if rep.get("holds"):
+        L += [
+            "",
+            "Holds (pose setpoint unchanged for >= %.0f s): how the drone moved around it"
+            % rep["thresholds"]["hold_min_s"],
         ]
+        for h in rep["holds"]:
+            L.append(
+                f"  t={h['t0']:8.3f}-{h['t1']:.3f} [{clock(rep, h['t0'], tz)}-"
+                f"{clock(rep, h['t1'], tz)}] setpoint {h['setpoint']}  "
+                + json.dumps({k: v for k, v in h.items() if k not in ("t0", "t1", "setpoint")})
+            )
     if rep.get("marks"):
         L += [
             "",

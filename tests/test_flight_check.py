@@ -401,3 +401,97 @@ def test_wall_clock_and_marks(tmp_path):
 def test_missing_bag_is_a_clear_message(tmp_path):
     with pytest.raises(SystemExit, match="not found"):
         A.load(tmp_path / "walk3")
+
+
+def test_orbit_radius_period_direction():
+    t = np.arange(0, 24, 1 / 30)
+    w = 2 * np.pi / 8.0  # one turn every 8 s, counter-clockwise
+    sp = np.array([1.0, 2.0, 0.7])
+    p = np.c_[1.03 + 0.1 * np.cos(w * t), 2.0 + 0.1 * np.sin(w * t), np.full_like(t, 0.68)]
+    o = F.orbit(t, p, sp)
+    assert o["radius_median_m"] == pytest.approx(0.1, abs=0.002)
+    assert o["period_s"] == pytest.approx(8.0, abs=0.1) and o["direction"] == "ccw"
+    assert o["turns"] == pytest.approx(3.0, abs=0.1)  # counted on the 0.5 s smoothed track
+    assert o["centre_offset_from_setpoint_m"] == pytest.approx(0.03, abs=0.005)
+    assert o["height_error_m"] == pytest.approx(-0.02, abs=1e-6)
+    cw = F.orbit(t, np.c_[p[:, 0], 4.0 - p[:, 1], p[:, 2]], sp)
+    assert cw["direction"] == "cw"
+    still = F.orbit(t[:60], p[:60], sp)  # under one turn: no period claimed
+    assert still["period_s"] is None and still["direction"] is None
+
+
+def test_hold_segments_find_the_hover():
+    t = np.arange(0, 20, 0.1)
+    z = np.clip(t * 0.3, 0, 0.7)  # ramp, then hold from about 2.3 s
+    sp = np.c_[np.zeros_like(t), np.zeros_like(t), z]
+    sp[t >= 15, 0] = 0.2 * (t[t >= 15] - 14.9)  # then moves on
+    segs = F.hold_segments(t, sp, min_s=3.0)
+    assert len(segs) == 1
+    assert segs[0]["t0"] == pytest.approx(2.4, abs=0.15)
+    assert segs[0]["t1"] == pytest.approx(14.9, abs=0.15)
+
+
+def test_json_mission_status_changes_on_phase_only():
+    msgs = [
+        '{"phase": "INIT", "t": 1}',
+        '{"phase": "INIT", "t": 2}',
+        '{"phase": "HOVER", "why": "climbed", "t": 3}',
+        '{"phase": "HOVER", "t": 4}',
+        "plain text",
+        "plain text",
+    ]
+    out = F.state_changes(range(6), msgs)
+    assert [o["state"] for o in out] == ["INIT", "HOVER (climbed)", "plain text"]
+
+
+def test_end_to_end_hover_orbit_and_mission(tmp_path):
+    t = np.arange(0, 20, 1 / 30)
+    w = 2 * np.pi / 8.0
+    p = np.c_[0.1 * np.cos(w * t), 0.1 * np.sin(w * t), np.full_like(t, 0.7)]
+    path = tmp_path / "h.mcap"
+    mcap(
+        path,
+        [
+            (
+                A.DEFAULTS["odom"],
+                "nav_msgs/msg/Odometry",
+                [(100 + a, odom(100 + a - 0.06, b)) for a, b in zip(t, p)],
+            ),
+            (
+                A.DEFAULTS["pose_sp"],
+                "geometry_msgs/msg/PoseStamped",
+                [(100 + a, pose(100 + a - 0.01, (0.0, 0.0, 0.7))) for a in t[::3]],
+            ),
+            (
+                A.DEFAULTS["mission"],
+                "std_msgs/msg/String",
+                [
+                    (
+                        100 + a,
+                        string('{"phase": "%s", "t": %f}' % ("HOVER" if a < 18 else "DESCEND", a)),
+                    )
+                    for a in t[::15]
+                ],
+            ),
+        ],
+    )
+    out = tmp_path / "h"
+    assert A.main([str(path), "--out", str(out)]) == 0
+    rep = json.loads(Path(f"{out}_report.json").read_text())
+    (h,) = rep["holds"]
+    assert h["radius_median_m"] == pytest.approx(0.1, abs=0.002)
+    assert h["centre_offset_from_setpoint_m"] < 0.005
+    assert h["period_s"] == pytest.approx(8.0, abs=0.2) and h["direction"] == "ccw"
+    assert [m["state"] for m in rep["mission_changes"]] == ["HOVER", "DESCEND"]
+    txt = Path(f"{out}_report.txt").read_text()
+    assert "Holds" in txt and "Mission phases" in txt
+
+
+def test_jitter_and_slow_wander_are_not_an_orbit():
+    t = np.arange(0, 30, 1 / 30)
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        p = np.c_[rng.normal(0, 0.01, (t.size, 2)), np.full(t.size, 0.7)]
+        p[:, :2] += np.cumsum(rng.normal(0, 0.001, (t.size, 2)), axis=0)
+        o = F.orbit(t, p, np.array([0.0, 0.0, 0.7]))
+        assert not o["orbiting"] and o["period_s"] is None and o["direction"] is None
