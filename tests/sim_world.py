@@ -18,6 +18,8 @@ class World:
     y_range: tuple[float, float]
     boxes: list[tuple[float, float, float, float, float]] = field(default_factory=list)   # x0, x1, y0, y1, height
     polys: list[tuple[np.ndarray, float]] = field(default_factory=list)                    # convex polygon, height
+    nets: list[tuple[float, float, float, float]] = field(default_factory=list)            # x0, x1, y0, y1: solid to
+                                                                                           # the drone, invisible to depth
 
     def __post_init__(self) -> None:
         self.xs = np.arange(self.x_range[0], self.x_range[1] + 1e-9, CELL)
@@ -31,8 +33,9 @@ class World:
             for a, b in zip(P, np.roll(P, -1, axis=0)):
                 inside &= (b[0] - a[0]) * (Y - a[1]) - (b[1] - a[1]) * (X - a[0]) >= 0.0
             self.h[inside] = np.maximum(self.h[inside], hgt)
-        occ = self.h > 0
-        self._occ_xy = np.c_[X[occ], Y[occ]]
+        self.net = np.zeros(X.shape, bool)
+        for x0, x1, y0, y1 in self.nets:
+            self.net[(X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)] = True
 
     def height_at(self, P: np.ndarray) -> np.ndarray:
         i = np.rint((P[:, 0] - self.xs[0]) / CELL).astype(int)
@@ -43,9 +46,9 @@ class World:
         return h
 
     def clearance(self, xy: np.ndarray, min_height: float = 0.0) -> np.ndarray:
-        """True 2D distance from points to obstacles taller than min_height."""
+        """True 2D distance from points to obstacles taller than min_height (nets included)."""
         xy = np.atleast_2d(xy)
-        occ = self.h > min_height
+        occ = (self.h > min_height) | self.net
         X, Y = np.meshgrid(self.xs, self.ys, indexing="ij")
         Q = np.c_[X[occ], Y[occ]]
         d = np.empty(len(xy))
@@ -55,8 +58,12 @@ class World:
         return d - 0.5 * CELL
 
     def depth_points(self, cam: np.ndarray, yaw: float, hfov_deg: float = 72.0, vfov_deg: float = 55.0,
-                     n_h: int = 200, n_v: int = 9, max_range: float = 5.0) -> np.ndarray:
-        """Returns of a forward camera at cam (x, y, z) facing yaw: (N, 3) points (floor and obstacle hits)."""
+                     n_h: int = 200, n_v: int = 9, max_range: float = 5.0, noise_k: float = 0.0,
+                     dropout: float = 0.0, outliers: float = 0.0, rng: np.random.Generator | None = None) -> np.ndarray:
+        """Returns of a forward camera at cam (x, y, z) facing yaw: (N, 3) points (floor and obstacle hits).
+
+        Stereo-like errors if asked: range noise with std noise_k * r^2 along the ray, a fraction `dropout` of returns
+        missing, and a fraction `outliers` replaced by a random range along their ray. Nets are invisible."""
         az = yaw + np.radians(np.linspace(-hfov_deg / 2, hfov_deg / 2, n_h))
         el = np.radians(np.linspace(-vfov_deg / 2, vfov_deg / 2, n_v))
         A, E = np.meshgrid(az, el, indexing="ij")
@@ -67,7 +74,16 @@ class World:
         hit = (P[..., 2] <= h) | (P[..., 2] <= 0.0)
         any_hit = hit.any(axis=1)
         k = np.argmax(hit, axis=1)
-        return P[np.nonzero(any_hit)[0], k[any_hit]]
+        rays = np.nonzero(any_hit)[0]
+        rr = r[k[any_hit]]
+        if noise_k or dropout or outliers:
+            g = rng if rng is not None else np.random.default_rng(0)
+            rr = rr + g.normal(0.0, 1.0, len(rr)) * noise_k * rr ** 2
+            out = g.random(len(rr)) < outliers
+            rr = np.where(out, g.uniform(0.2, max_range, len(rr)), rr)
+            keep = (g.random(len(rr)) >= dropout) & (rr > 0.1)
+            rays, rr = rays[keep], rr[keep]
+        return cam[None, :] + rr[:, None] * d[rays]
 
 
 @dataclass

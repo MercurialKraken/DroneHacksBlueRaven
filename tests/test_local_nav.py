@@ -35,8 +35,8 @@ def test_a_wall_ahead_is_occupied_and_the_space_before_it_free():
     assert float(m.clearance(np.array([[2.0, 0.0]]))[0]) == pytest.approx(1.0, abs=0.06)
 
 
-def test_floor_is_not_an_obstacle_but_a_boulder_is():
-    w = World((-1, 6), (-5, 5), boxes=[(1.5, 1.95, -0.2, 0.25, 0.40)])   # an 18 in boulder, 0.4 m tall
+def test_floor_is_not_an_obstacle_but_a_tall_rock_is():
+    w = World((-1, 6), (-5, 5), boxes=[(1.5, 1.95, -0.2, 0.25, 0.46)])   # an 18 in boulder, 0.46 m tall
     g = LocalGrid()
     cam = np.array([0.0, 0.0, 0.7])
     for _ in range(3):
@@ -50,10 +50,19 @@ def test_floor_is_not_an_obstacle_but_a_boulder_is():
 
 
 def test_low_returns_far_away_are_ignored():
-    w = World((-1, 8), (-5, 5), boxes=[(3.5, 3.95, -0.2, 0.25, 0.40)])   # boulder 3.5 m out: beyond low_range_m
+    w = World((-1, 8), (-5, 5), boxes=[(3.5, 3.95, -0.2, 0.25, 0.42)])   # rock top 3.5 m out: beyond low_range_m
     g = LocalGrid()
     cam = np.array([0.0, 0.0, 0.7])
     g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
+    assert not g.occupied().any()
+
+
+def test_a_rock_the_drone_flies_over_is_not_an_obstacle():
+    w = World((-1, 6), (-5, 5), boxes=[(1.5, 1.73, -0.115, 0.115, 0.30)])  # the CP2 cone: 0.30 m, 0.4 m under us
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    for _ in range(3):
+        g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
     assert not g.occupied().any()
 
 
@@ -84,7 +93,7 @@ def test_walls_out_of_view_are_remembered_and_phantoms_get_cleared():
 
 
 def test_a_boulder_under_the_camera_is_not_erased_by_rays_passing_over_it():
-    w = World((-1, 6), (-5, 5), boxes=[(1.0, 1.3, -0.15, 0.15, 0.30), (4.0, 4.2, -5, 5, WALL)])
+    w = World((-1, 6), (-5, 5), boxes=[(1.0, 1.3, -0.15, 0.15, 0.46), (4.0, 4.2, -5, 5, WALL)])
     g = LocalGrid()
     for x in (0.0, 0.2):                                                  # far enough to see it: marked
         cam = np.array([x, 0.0, 0.7])
@@ -168,10 +177,10 @@ def test_a_slanted_wall_crossing_the_line_is_slid_along():
     assert w.clearance(traj).min() > nav.mppi.p.r_drone
 
 
-def test_a_boulder_on_the_line_is_flown_round_not_over():
+def test_a_tall_boulder_on_the_line_is_flown_round():
     w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 6.5, 1.0, 1.2, WALL),
                                                (-0.7, 6.5, -1.2, -1.0, WALL), (6.3, 6.5, -1.2, 1.2, WALL),
-                                               (2.8, 3.25, -0.22, 0.23, 0.40)])
+                                               (2.8, 3.25, -0.22, 0.23, 0.46)])
     traj, states, nav = fly(w, [(5.6, 0.0)])
     assert states[-1] == "ARRIVED", states[-5:]
     boulder = np.hypot(np.maximum(np.abs(traj[:, 0] - 3.025) - 0.225, 0), np.maximum(np.abs(traj[:, 1] - 0.005) - 0.225, 0))
@@ -186,3 +195,50 @@ def test_a_moved_wall_jutting_across_the_line():
     traj, states, nav = fly(w, [(5.6, 0.0)])
     assert states[-1] == "ARRIVED", states[-5:]
     assert w.clearance(traj).min() > nav.mppi.p.r_drone
+
+
+def new_start_world() -> World:
+    """Darion's drawing of the rebuilt start (map metres, approx +-0.1 m): wall A, the diagonal wall B, the ~0.94 m CP2
+    gap between their ends, the 0.30 m cone inside it, the barrier, and the nets (which depth can't see)."""
+    a, b = np.array([-1.75, 0.76]), np.array([-0.68, 1.89])
+    n = np.array([-(b - a)[1], (b - a)[0]]) / np.hypot(*(b - a)) * 0.05
+    wall_b = np.array([a - n, b - n, b + n, a + n])
+    return World((-3.3, 1.2), (0.2, 3.3),
+                 boxes=[(-3.048, 1.0, 0.41, 0.51, WALL),                 # the barrier
+                        (-2.743, -1.16, 2.65, 2.75, WALL),               # wall A
+                        (-1.365, -1.135, 2.278, 2.508, 0.30)],           # the cone (as a 0.23 m box), in the gap
+                 polys=[(wall_b, WALL)],
+                 nets=[(-3.3, -3.048, 0.2, 3.3), (-3.3, 1.2, 3.048, 3.3)])
+
+
+@pytest.mark.parametrize("noisy", [False, True])
+def test_new_start_through_the_cp2_gap_over_the_cone(noisy):
+    w = new_start_world()
+    start, yaw0 = (-2.515, 0.914), math.pi / 2                          # the launch mark, facing north
+    wps = [(-2.45, 2.12), (-0.88, 2.32), (-0.30, 2.62)]                 # ~0.05-0.1 m off a human's best guess
+    nav = LocalNav(wps, start, yaw0)
+    drone = Drone(np.array(start, float), yaw0)
+    rng = np.random.default_rng(3)
+    dt = nav.mppi.p.dt
+    traj, states = [drone.x.copy()], []
+    for k in range(int(60.0 / dt)):
+        cam = drone.cam()
+        pts = w.depth_points(cam, drone.yaw, noise_k=0.006 if noisy else 0.0, dropout=0.65 if noisy else 0.0,
+                             outliers=0.01 if noisy else 0.0, rng=rng)
+        nav.add_depth(pts, cam, drone.z, k * dt)
+        cmd = nav.step(drone.x, drone.v, k * dt)
+        states.append(cmd.state)
+        if cmd.state == "ARRIVED":
+            break
+        drone.step((cmd.vx, cmd.vy), cmd.yaw, dt)
+        traj.append(drone.x.copy())
+    traj = np.array(traj)
+    assert states[-1] == "ARRIVED", states[-5:]
+    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # walls and nets; the cone is flown over
+    # it went THROUGH the gap: crossed the segment between wall A's east end and wall B's NE end
+    p, q = np.array([-1.16, 2.70]), np.array([-0.68, 1.89])
+    side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
+    k = int(np.argmax(side != side[0]))
+    assert k > 0
+    t = float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p))
+    assert 0.0 < t < 1.0
