@@ -148,7 +148,8 @@ def test_nav_must_be_refnav_or_mppi():
 # ---------------------------------------------------------------------------------------------- flights
 def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None,
            plant: tuple[float, float] = (0.3, 0.0), jitter_m: float = 0.0, link_s: float = 0.05,
-           mppi_dies_after_s: float = math.inf, odom_jump_after_s: float = math.inf):
+           mppi_dies_after_s: float = math.inf, odom_jump_after_s: float = math.inf,
+           odom_freeze_after_s: float = math.inf):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
     so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone.
     MPPI is mppi_node's side of the link (pad None, cmd_msg as JSON, delivered link_s later); refnav's side is
@@ -164,6 +165,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []
     link, wire, mppi_id, traj_t = M.CmdLink(), [], None, []
+    frozen = None
     rng = np.random.default_rng(7)
     t = DT
     while t < limit_s and m.phase != "done":
@@ -172,6 +174,9 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
         p_est = p                                                           # what cuVSLAM reports (traj stays truth)
         if link.start_id is not None and t - link.t_start >= odom_jump_after_s:
             p_est = (p[0] + 1.6, p[1] - 1.6, p[2])                          # a 2.3 m jump that stays (Darion's T4)
+        if link.start_id is not None and t - link.t_start >= odom_freeze_after_s:   # the estimate freezes
+            frozen = frozen or (p_est, q, vf)
+            p_est, q, vf = frozen
         pad, t_odom = S.on_odom(v, pad, m.phase, p_est, q, vf), t
         mf.on_odom(t, p_est, q, vf)
         m.on_health(t, S.healthy(state, t_state, t))
@@ -361,7 +366,7 @@ def test_a_vio_jump_latches_lost_until_the_next_follow_start():
     link = M.CmdLink()
     link.begin(1.9)
     m["start"] = link.start_id
-    assert link.on_cmd(m) and link.why_land(2.0).startswith("MPPI: odometry jumped")
+    assert link.on_cmd(m) and link.why_land(2.0).startswith("MPPI: VIO lost: odometry jumped")
     assert link.ext(2.0, S.Pad(0.0, 0.0, 0.0, 0.0))["vn"] == 0.0
     mf.start(STAGE1["route"], S.Pad(0.0, 0.0, 0.0, 0.0))
     assert mf.lost is None
@@ -395,3 +400,56 @@ def test_mppi_nodes_depth_callback_only_keeps_the_newest_frame_and_runs_single_t
     assert "_process_depth" in ast.unparse(tick) and "DEPTH_PERIOD_S" in ast.unparse(tick)
     launch = (ROOT / "skybeta" / "blueraven_skybeta" / "launch" / "refnav.launch.py").read_text()
     assert "'OMP_NUM_THREADS': '1'" in launch and launch.count("additional_env=ONE_THREAD") == 2
+
+
+# ---------------------------------------------------------------------------------------------- frozen / heading / stale
+def _odom_q(mf, t, x, yaw_deg=0.0, y=0.0):
+    h = math.radians(yaw_deg) / 2
+    mf.on_odom(t, (x, y, 0.4), (0.0, 0.0, math.sin(h), math.cos(h)), (0.1, 0.0, 0.0))
+
+
+def test_hover_jitter_and_normal_turns_never_trip_the_freeze_or_heading_guards():
+    mf, rng = _started(), np.random.default_rng(3)
+    for k in range(900):                                  # 30 s at 30 Hz: sub-mm jitter, a 30 deg/s turn, a hold
+        yaw = min(30.0 * max(k / 30 - 10, 0), 90.0)
+        _odom_q(mf, k / 30, 0.0005 * rng.standard_normal(), yaw, 0.0005 * rng.standard_normal())
+    assert mf.lost is None
+
+
+def test_a_frozen_estimate_latches_lost_in_half_a_second():
+    mf = _started()
+    for k in range(10):
+        _odom_q(mf, k / 30, 0.01 * k)                     # flying
+    for k in range(10, 40):
+        _odom_q(mf, k / 30, 0.09)                         # cuVSLAM output frozen, stamps still advancing
+        if mf.lost:
+            break
+    assert mf.lost and "frozen" in mf.lost and k / 30 - 9 / 30 <= M.FREEZE_S + 0.05
+
+
+def test_a_heading_jump_latches_lost():
+    mf = _started()
+    _odom_q(mf, 1.0, 0.0, 0.0)
+    _odom_q(mf, 1.033, 0.003, 25.0)                       # +25 deg in one sample
+    assert mf.lost and "heading jumped 25 deg" in mf.lost
+
+
+def test_odometry_that_keeps_arriving_without_new_stamps_latches_lost():
+    mf = _started()
+    _odom_q(mf, 10.0, 0.0)
+    for _ in range(M.REPEAT_MAX - 1):                     # duplicates of the same stamp: tolerated a while
+        _odom_q(mf, 10.0, 0.0)
+    assert mf.lost is None
+    _odom_q(mf, 10.0, 0.0)
+    assert mf.lost and "repeating" in mf.lost
+    mf.ticks = 0
+    mf.tick(10.1, None)
+    assert mf.cmd.state == "LOST"
+
+
+def test_cuvslam_freezing_in_flight_lands_where_the_drone_really_is():
+    m, sk, traj, states, w, mf = flight(odom_freeze_after_s=6.0)
+    assert "VIO lost: odometry frozen" in m.land_reason, (m.land_reason, states[-5:])
+    after = traj[mf.traj_t >= mf.link.t_start + 6.0]                          # truth from the freeze on
+    assert np.linalg.norm(after - after[0], axis=1).max() < 0.25              # not flown blind
+    assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed

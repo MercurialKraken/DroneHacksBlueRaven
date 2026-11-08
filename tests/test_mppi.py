@@ -502,3 +502,23 @@ def test_the_push_is_learnt_during_a_hover_flown_by_someone_else():
     assert np.hypot(*(m.push.d - pw)) < 0.02
     r = m.step(x, v, yaw=0.0, t=8.0)                                        # MPPI's first cycle already leans on it
     np.testing.assert_allclose(r.dist, pw, atol=0.02)
+
+
+# ---------------------------------------------------------------------------------------------- the arena fence (nets)
+def test_the_fence_clearance_is_the_distance_to_its_edge_and_negative_outside():
+    P, vref = straight_path()
+    m = Mppi(corridor_map(width=2.8), P, vref)
+    m.set_fence((0.0, 0.0), 0.0, (-1.0, 3.0), (-1.0, 1.0))
+    d = np.asarray(m.clearance(np.array([[1.0, 0.0], [2.5, 0.0], [3.2, 0.0], [1.0, 0.9]])))
+    assert d[0] == pytest.approx(1.0, abs=1e-9) and d[1] == pytest.approx(0.5, abs=1e-9)
+    assert d[2] == pytest.approx(-0.2, abs=1e-9) and d[3] == pytest.approx(0.1, abs=1e-9)
+
+
+def test_mppi_stops_short_of_an_invisible_net_across_its_path():
+    """A net depth can't see, 3 m along a 6 m path in an open corridor: with the fence MPPI never plans across it."""
+    P, vref = straight_path()
+    m = Mppi(corridor_map(width=2.8), P, vref, MppiParams(seed=1))
+    m.set_fence((0.0, 0.0), 0.0, (-1.0, 3.0), (-1.4, 1.4))
+    traj, res = fly(m, seconds=25.0)
+    assert traj[:, 0].max() <= 3.0 - m.p.r_drone + 0.01, traj[:, 0].max()
+    assert traj[:, 0].max() > 2.0                         # it still flew up to it

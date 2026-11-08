@@ -148,11 +148,15 @@ class NavCommand:
 class LocalNav:
     def __init__(self, waypoints: Sequence[Sequence[float]], start_xy: Any, start_yaw: float,
                  nav: LocalNavParams | None = None, grid: LocalGridParams | None = None,
-                 mppi: MppiParams | None = None, xp: Any = None) -> None:
+                 mppi: MppiParams | None = None, xp: Any = None, fence: dict | None = None) -> None:
+        """fence: {"fwd": [min, max], "left": [min, max]} metres from (start_xy, start_yaw): the arena's nets (depth
+        can't see them); MPPI then never plans across them."""
         self.p = nav or LocalNavParams()
         self.grid = LocalGrid(grid, centre=start_xy)
         self.path, self.v_ref = waypoint_path(start_xy, waypoints, self.p)
         self.mppi = Mppi(self.grid.grid2d(), self.path, self.v_ref, mppi or FLIGHT_MPPI, xp)
+        if fence:
+            self.mppi.set_fence(start_xy, start_yaw, fence["fwd"], fence["left"])
         self.goal = self.path[-1].copy()
         self.yaw_cmd = float(start_yaw)
         self._dirty = False

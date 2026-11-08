@@ -81,7 +81,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -337,6 +337,7 @@ class Mppi:
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
         self._inflight: list[np.ndarray] = []                        # the last commands sent, newest last (<= 6 s)
         self.push = PushEstimator(self.p)                            # the steady body-frame push (step(yaw=...))
+        self.fence: tuple[float, ...] | None = None                  # set_fence(): the arena's nets
         self._bias = np.zeros(2)                                     # its map-frame velocity this cycle
         self._t_cycle: float | None = None                           # cycle clock when the caller passes no time
         self._d_now: float | None = None                             # clearance at the (predicted) start this cycle
@@ -422,8 +423,15 @@ class Mppi:
         self._depth_grid = dd
         self.grid = self.xp.asarray(np.minimum(self._map_grid, dd))
 
+    def set_fence(self, origin: Any, yaw: float, fwd: Sequence[float], left: Sequence[float]) -> None:
+        """A rectangle the drone must stay inside, as (forward, left) ranges from a pose: the arena's NETS, which
+        depth can't see. Its clearance joins the grid's everywhere (costs, crashes, the shield)."""
+        self.fence = (float(origin[0]), float(origin[1]), math.cos(yaw), math.sin(yaw),
+                      float(fwd[0]), float(fwd[1]), float(left[0]), float(left[1]))
+
     def clearance(self, X: Any) -> Any:
-        """Pessimistic clearance (m) at points X (..., 2), bilinear on the 2D grid; outside the map is -1."""
+        """Pessimistic clearance (m) at points X (..., 2), bilinear on the 2D grid; outside the map is -1. With a
+        fence, also no more than the distance to its edge (negative outside it)."""
         xp = self.xp
         X = xp.asarray(X)
         G = self.grid
@@ -438,7 +446,13 @@ class Mppi:
         fu, fv = u - i0, v - j0
         d = (G[i0, j0] * (1 - fu) * (1 - fv) + G[i0 + 1, j0] * fu * (1 - fv)
              + G[i0, j0 + 1] * (1 - fu) * fv + G[i0 + 1, j0 + 1] * fu * fv)
-        return xp.where(inside, d, -1.0)
+        d = xp.where(inside, d, -1.0)
+        if self.fence is not None:
+            ox, oy, c, s, f0, f1, l0, l1 = self.fence
+            dx, dy = X[..., 0] - ox, X[..., 1] - oy
+            f, lft = c * dx + s * dy, -s * dx + c * dy
+            d = xp.minimum(d, xp.minimum(xp.minimum(f - f0, f1 - f), xp.minimum(lft - l0, l1 - lft)))
+        return d
 
     def _clock(self, t: float | None) -> float:
         """This cycle's time: the caller's, else one dt after the last cycle."""

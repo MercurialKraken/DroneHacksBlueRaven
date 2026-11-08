@@ -50,6 +50,13 @@ CMD_FIRST_S = 3.0           # follow started this long ago without one command f
 # watches the odometry: a step of more than JUMP_M + JUMP_MPS x the gap between samples is not flight (cuVSLAM
 # jumped 2.3 m in a T4 hover facing a wall). MPPI then latches LOST (zero velocity) and refnav lands.
 JUMP_M, JUMP_MPS, JUMP_GAP_S = 0.15, 0.6, 1.0
+# Further VIO failure modes MPPI must not fly through (safety, not observed in flight so far): an estimate that
+# FREEZES (MPPI would believe it stands still and keep flying blind), a heading jump, and messages that keep coming
+# without new data. A live estimator never repeats itself to the micron (hover jitter 1.6 mm rms), so:
+FREEZE_S, FREEZE_EPS_M = 0.5, 1e-6          # position AND heading unchanged for 0.5 s of advancing stamps: LOST
+YAW_JUMP_DEG, YAW_JUMP_DPS = 15.0, 60.0     # heading step > 15 deg + 60 deg/s x gap (flight turns <= 30 deg/s): LOST
+REPEAT_MAX = 30                              # this many odometry messages in a row without a newer stamp (~1 s): LOST
+                                             # (counted, not timed: no clock comparison between processes)
 # MPPI's caps in flight (the library's 0.6 m/s is far too fast for 0.10 m/s flying):
 # Sim sweep (route 1, real push, 0.10 m/s, both response models): ground 0.15 touched the west net 6/12 (too little
 # authority to claw back an unlearned push); 0.30/0.45 was 12/12 clean, min clearance 0.337 m (0.6/0.6: 0.315).
@@ -126,7 +133,7 @@ class CmdLink:
         if self.start_id is None:
             return None
         if self.last is not None and self.last.get("state") == "LOST":
-            return f"MPPI: odometry jumped (VIO lost?): {self.last.get('why') or 'see the mppi_node log'}"
+            return f"MPPI: VIO lost: {self.last.get('why') or 'see the mppi_node log'}"
         if self.last is None:
             return (f"MPPI sent no command in {CMD_FIRST_S:g} s of follow (mppi_node down?)"
                     if now - self.t_start > CMD_FIRST_S else None)
@@ -141,7 +148,9 @@ class MppiFollow:
         self.mppi_p = MppiParams(tau=tau_s, dead_time_s=dead_time_s, v_max=v_max, v_lat=min(MppiParams.v_lat, v_max),
                                  u_max=max(U_MAX_MIN, U_MAX_PER_CRUISE * v_cruise))
         self.lost: str | None = None                # why the odometry is no longer trusted (latched until start())
-        self._odom_prev: tuple[float, np.ndarray] | None = None
+        self._odom_prev: tuple[float, np.ndarray, float] | None = None    # (stamp, position, ENU yaw)
+        self._frozen_since: float | None = None
+        self._repeats = 0
         self.poses = PoseBuffer()
         self.nav: LocalNav | None = None
         self.pos: np.ndarray | None = None          # latest odom ENU position, its stamp, and velocity
@@ -155,13 +164,27 @@ class MppiFollow:
     def on_odom(self, stamp: float, p: Any, q_xyzw: Any, v_flu: Any) -> None:
         x, y, z, w = q_xyzw
         pa = np.asarray(p, float)
+        yaw_new = yaw_enu(q_xyzw)
         if self._odom_prev is not None and self.nav is not None and self.lost is None and np.isfinite(pa).all():
             gap = stamp - self._odom_prev[0]
-            step = float(np.linalg.norm(pa - self._odom_prev[1]))
-            if 0.0 < gap <= JUMP_GAP_S and step > JUMP_M + JUMP_MPS * gap:
-                self.lost = f"odometry jumped {step:.2f} m in {gap:.2f} s (limit {JUMP_M + JUMP_MPS * gap:.2f} m)"
+            self._repeats = 0 if gap > 0.0 else self._repeats + 1
+            if self._repeats >= REPEAT_MAX:
+                self.lost = f"odometry repeating: {self._repeats} messages without a newer stamp"
+            if gap > 0.0:                           # a repeated or older stamp is no new information
+                step = float(np.linalg.norm(pa - self._odom_prev[1]))
+                dyaw = abs(math.degrees(math.remainder(yaw_new - self._odom_prev[2], math.tau)))
+                if gap <= JUMP_GAP_S and step > JUMP_M + JUMP_MPS * gap:
+                    self.lost = f"odometry jumped {step:.2f} m in {gap:.2f} s (limit {JUMP_M + JUMP_MPS * gap:.2f} m)"
+                elif gap <= JUMP_GAP_S and dyaw > YAW_JUMP_DEG + YAW_JUMP_DPS * gap:
+                    self.lost = f"odometry heading jumped {dyaw:.0f} deg in {gap:.2f} s"
+                elif step < FREEZE_EPS_M and dyaw < 1e-4:
+                    self._frozen_since = self._odom_prev[0] if self._frozen_since is None else self._frozen_since
+                    if stamp - self._frozen_since >= FREEZE_S:
+                        self.lost = f"odometry frozen: identical pose for {stamp - self._frozen_since:.2f} s"
+                else:
+                    self._frozen_since = None
         if np.isfinite(pa).all():
-            self._odom_prev = (stamp, pa)
+            self._odom_prev = (stamp, pa, yaw_new)
         self.poses.add_position(stamp, p)
         self.poses.add_attitude(stamp, (w, x, y, z))
         self.pos, self.stamp = np.asarray(p, float), stamp
@@ -179,11 +202,12 @@ class MppiFollow:
         self.nav.add_depth(out[0], out[1], float(self.pos[2]), stamp)
         return True
 
-    def start(self, route: Any, pad: Any) -> None:
-        """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it)."""
+    def start(self, route: Any, pad: Any, fence: dict | None = None) -> None:
+        """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it).
+        fence: the route file's params.fence ({"fwd": [..], "left": [..]} from the take-off pose: the arena's nets)."""
         self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
-                            grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p)
-        self.lost = None                            # a new follow: the jump guard starts afresh
+                            grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p, fence=fence)
+        self.lost, self._frozen_since, self._repeats = None, None, 0   # a new follow: the odometry guards start afresh
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:
         """Every 20 Hz tick in follow; steps MPPI on every STEP_EVERY-th. -> the Mission.ext command."""
