@@ -8,5 +8,5 @@
   [1.039, -0.700],
   [1.039, -1.976]
  ],
- "params": {"height_m": 0.4, "speed_mps": 0.1, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4, "yaw_rate_dps": 30.0, "fillet_m": 0.7, "hover_s": 10.0}
+ "params": {"height_m": 0.4, "speed_mps": 0.1, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4, "yaw_rate_dps": 30.0, "fillet_m": 0.7, "hover_s": 10.0, "hover_tol_m": 0.05, "hover_dwell_s": 1.0, "hover_max_s": 40.0, "hover_timeout": "land", "push_tau_s": 3.0, "push_max_mps": 0.15}
 }
