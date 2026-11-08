@@ -83,6 +83,19 @@ v1.16 defaults). At 0.2 m/s the drone sat armed on the floor for 63 s. So descen
 **not** lower the parameter. `LNDMC_Z_VEL_MAX`, `MPC_LAND_CRWL` and `MPC_LAND_SPEED` may be
 **read** on the drone to confirm the threshold, never changed.
 
+Landing must finish **in Offboard** (hinson-claude's T4 run 3, relayed by chelsea-claude): the
+organizers' flight interface 0.3.3 publishes a hold setpoint (current position) at 10 Hz in
+**every** flight mode. If Offboard ends while the interface still runs (pilot takeover or a
+failsafe), PX4's AUTO_LAND and land detector fight that setpoint and never latch "landed"; in the
+T4 the drone sat armed on the ground for over 150 s and disarmed the moment the interface stopped.
+
+1. A normal landing finishes in Offboard: the program keeps commanding descent until PX4 disarms
+   (both refnav and the shell do this). Do not switch to Land mode to "help".
+2. After any takeover or failsafe: the pilot lands. If the drone then sits **armed on the
+   ground**, stop the launch (Ctrl-C in the node window) so the interface stops publishing, then
+   disarm.
+3. Write down the touchdown-to-disarm time in the log sheet (about 9 s on today's real hover).
+
 **Before leaving the drone:** after a stack restart the competitor window runs the organizers'
 example (arm + Position = a 5 m square at 1.5 m). Power down, or set `COMPETITOR_PKG` to the
 team package first.
