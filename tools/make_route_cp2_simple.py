@@ -166,10 +166,14 @@ def main() -> int:
                 f"lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below, at "
                 f"{CHELSEA_SPEED_MPS} m/s and {CHELSEA_HEIGHT_M} m (launch with HEIGHT={CHELSEA_HEIGHT_M}: the launch "
                 "argument overrides this file's height_m). The waypoints are the same as route_v7_cp2_simple's. ")
-        # the hold as a GATE + the position integral: refnav with chelsea/refnav-hold-gate 1a8aca1 uses them; older
-        # refnav ignores them (it logs "route file params not used") and holds hover_s, as before
+        # the hold as a GATE + the PUSH ESTIMATOR (velocity shortfall, push_tau_s): refnav with chelsea/refnav-push-est
+        # 35446dd uses them. The position integral (ki_xy) is NOT used: it orbited on the T4 (t9r5). Refnav without
+        # these params ignores them (it logs "route file params not used") and holds hover_s, as before; refnav with the
+        # gate but WITHOUT push_tau_s (43af5e5/014af28) would gate on the P loop alone and land at hover_max_s under a
+        # push, so this file goes on the drone only together with 35446dd
         chelsea = {**fly, "hover_s": HOVER_S, "speed_mps": CHELSEA_SPEED_MPS, "height_m": CHELSEA_HEIGHT_M,
-                   "hover_tol_m": 0.05, "hover_dwell_s": 1.0, "hover_max_s": 40.0, "hover_timeout": "land", "ki_xy": 0.08}
+                   "hover_tol_m": 0.05, "hover_dwell_s": 1.0, "hover_max_s": 40.0, "hover_timeout": "land",
+                   "push_tau_s": 3.0, "push_max_mps": 0.15}
         for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, chelsea, back)):
             text = ('{\n "from": ' + json.dumps(note + src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
                     'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
