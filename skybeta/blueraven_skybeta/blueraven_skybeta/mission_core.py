@@ -16,10 +16,10 @@ Sequence (the safety pilot arms, then switches to Position; the interface enters
   TAKEOFF        offboard_active: a pose at the take-off point with z ramped up to the flight
                  height. Poses persist, so a stalled node leaves the drone holding.
   HOVER          (mission "hover", the first flights) the same pose for hover_s, then DESCEND over
-                 the take-off point. In TAKEOFF and HOVER, drifting more than hold_max_err_m from
+                 the take-off point. (mission "route": route_hover_s, then FOLLOW.) In TAKEOFF and HOVER, drifting more than hold_max_err_m from
                  the take-off point means PX4 holds somewhere else than we command (the guide's
                  EKF-vs-odom frame offset): DESCEND straight down at once, without steering.
-  FOLLOW         (mission "course") a TWIST every tick: the reference's feed-forward velocity plus a P term towards
+  FOLLOW         (mission "course" or "route") a TWIST every tick: the reference's feed-forward velocity plus a P term towards
                  the reference point, and a yaw rate towards the path heading ahead. Poses are
                  position-only through the interface, so a pose reference would crawl.
   DESCEND        a downward twist (descend_mps), xy held over the end of the route, refreshed every
@@ -36,6 +36,12 @@ Drift: INIT's map <- odom is handed to map_align once (Command.map_from_odom_ini
 on nav.frames.MAP_FROM_ODOM_INIT_TOPIC); map_align starts from it and publishes the corrected
 map <- odom (MAP_FROM_ODOM_TOPIC), which on_map_from_odom takes in place of INIT's. When those stop,
 the last one stays in use: drift since then is uncorrected, but nothing jumps back.
+
+Mission "route" (the hardcoded backup): a fixed list of corners from a route file, as (forward, left)
+metres from the take-off pose (load_route). `map` is then the take-off frame itself (launch =
+TAKEOFF_FRAME): no course map, no planner, no map_align (nothing is handed to it and its corrections,
+in the course frame, are refused). The drone flies on odometry alone, so its heading on the pad sets
+where every corner lands.
 """
 from __future__ import annotations
 
@@ -71,6 +77,7 @@ from nav.wall_centring import CentringParams, WallCentring  # noqa: E402
 class MissionParams:
     mission: str = "hover"              # "hover": take off, hold hover_s over the take-off point, land
                                         # (first flights: no route, no map needed). "course": fly the route.
+                                        # "route": fly a hardcoded route file in the take-off frame (no map)
     hover_s: float = 5.0
     hold_max_err_m: float = 0.40        # TAKEOFF/HOVER: further than this from the take-off point means
                                         # PX4 isn't holding where we think (frame offset?): land straight down
@@ -117,6 +124,10 @@ class MissionParams:
     drone_radius: float = 0.28
     margin: float = 0.10
     max_radius_m: float = 1.0           # largest corner arc; 0 makes every corner a stop-and-turn
+    route_max_radius_m: float = 0.0     # the same for mission "route": stop and turn at every corner, since
+                                        # without the map an arc can't be sized against the real walls
+    route_hover_s: float = 3.0          # mission "route": hover this long over the take-off point before
+                                        # flying (VIO settles, the team sees a stable hover); 0 = go at once
     wall_centring: bool = False         # course: shift the reference toward the REAL corridor centre seen in
                                         # depth (nav.wall_centring); needs on_depth_points. Off until benched
     centring_cap_m: float = 0.15
@@ -141,21 +152,64 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
+MISSIONS = ("hover", "course", "route")
+TAKEOFF_FRAME = {"x": 0.0, "y": 0.0, "yaw_deg": 0.0, "z": 0.0}   # mission "route": map = the take-off pose
+                                                                  # (+x forward, +y left, z up from the pad)
+ROUTE_LEG_MIN_M = 0.05      # shorter legs are duplicates: no heading to fly
+ROUTE_LEG_MAX_M = 8.0       # the course is about 6 m across: a longer leg is a typo
+ROUTE_REACH_MAX_M = 10.0    # no corner further than this from the take-off point
+
+
+def load_route(path: str | Path) -> list[tuple[float, float]]:
+    """The corners of a route file, {"route": [[forward_m, left_m], ...]} (nav.route_planner's --out
+    format; other keys are ignored), as map corners for mission "route": the take-off point (0, 0)
+    first. Raises ValueError, naming the problem, for anything that isn't a sane route."""
+    import json
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"route file {path}: {e}") from e
+    pts = data.get("route") if isinstance(data, dict) else None
+    if not isinstance(pts, list) or not pts:
+        raise ValueError(f"route file {path}: needs a non-empty \"route\": [[forward_m, left_m], ...]")
+    corners = [(0.0, 0.0)]
+    for i, q in enumerate(pts):
+        if (not isinstance(q, (list, tuple)) or len(q) != 2
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in q)
+                or not all(math.isfinite(v) for v in q)):
+            raise ValueError(f"route file {path}: point {i} is {q!r}, not [forward_m, left_m]")
+        f, l = float(q[0]), float(q[1])
+        leg = math.dist(corners[-1], (f, l))
+        if not ROUTE_LEG_MIN_M <= leg <= ROUTE_LEG_MAX_M:
+            raise ValueError(f"route file {path}: the leg to point {i} {q} is {leg:.2f} m "
+                             f"(allowed {ROUTE_LEG_MIN_M}-{ROUTE_LEG_MAX_M} m)")
+        if math.hypot(f, l) > ROUTE_REACH_MAX_M:
+            raise ValueError(f"route file {path}: point {i} {q} is over {ROUTE_REACH_MAX_M} m from take-off")
+        corners.append((f, l))
+    return corners
+
+
 class SkybetaMission:
     def __init__(self, params: MissionParams, launch: dict[str, float], corners_map: Any = None,
                  course_map: Any = None) -> None:
         self.p = params
         self.launch = launch
         self.z_map = launch["z"] + params.height_m
-        if params.mission not in ("hover", "course"):
-            raise ValueError(f"mission must be 'hover' or 'course', not {params.mission!r}")
+        if params.mission not in MISSIONS:
+            raise ValueError(f"mission must be one of {MISSIONS}, not {params.mission!r}")
         self.path = None
-        if params.mission == "course":
+        if params.mission == "route":
+            if launch != TAKEOFF_FRAME or course_map is not None:
+                raise ValueError("mission 'route' flies in the take-off frame: launch TAKEOFF_FRAME, no course map")
+            if corners_map is None or len(corners_map) < 2 or tuple(corners_map[0][:2]) != (0.0, 0.0):
+                raise ValueError("mission 'route' needs corners starting at the take-off point (load_route)")
+        if params.mission in ("course", "route"):
             if corners_map is None or len(corners_map) < 2:
-                raise ValueError("mission 'course' needs a route of at least 2 corners")
+                raise ValueError(f"mission {params.mission!r} needs a route of at least 2 corners")
             C = np.asarray(corners_map, dtype=float)
             self.path = build_path(C[:, :2], course_map, params.drone_radius, params.margin, z=self.z_map,
-                                   max_radius=params.max_radius_m)
+                                   max_radius=(params.route_max_radius_m if params.mission == "route"
+                                               else params.max_radius_m))
         self.centring = (WallCentring(course_map, CentringParams(cap_m=params.centring_cap_m))
                          if (params.wall_centring and params.mission == "course" and course_map is not None) else None)
         self.poses: list[tuple[float, float, float, float, float]] = []   # (stamp, x, y, z, yaw) in odom
@@ -228,6 +282,8 @@ class SkybetaMission:
         from, and if stamped before the latest INIT (computed against an older odom origin).
         map_align gates its own updates; the largest step is reported. Returns why a message
         was ignored, or None if it was taken."""
+        if self.p.mission == "route":
+            return "mission 'route' flies in the take-off frame, not the course frame map_align corrects"
         if self.T_map_odom is None:
             return "before INIT fixed map <- odom"
         if stamp is not None and stamp < self.t_fixed:
@@ -390,7 +446,8 @@ class SkybetaMission:
                 self._set_T(map_from_startup_odom(self.launch, self.odom))
                 self.T_init = self.T_map_odom.copy()
                 self.t_fixed, self.n_init = t, self.n_init + 1
-                out.map_from_odom_init = self.T_init.copy()
+                if p.mission != "route":                    # the take-off frame means nothing to map_align
+                    out.map_from_odom_init = self.T_init.copy()
                 self._set("WAIT_OFFBOARD", "map <- odom fixed; streaming a hold at the current position", out)
             out.phase, out.why = self.phase, self.why
             if self.phase == "INIT":
@@ -463,9 +520,11 @@ class SkybetaMission:
                     at_height = True
             if at_height and self.phase == "TAKEOFF":
                 note = f"; {self.why_height}" if self.why_height else ""
-                if p.mission == "hover":
+                hover_s = p.hover_s if p.mission == "hover" else (p.route_hover_s if p.mission == "route" else 0.0)
+                if p.mission == "hover" or hover_s > 0.0:
                     self.t_hover = t
-                    self._set("HOVER", f"at {p.height_m:.2f} m; hovering {p.hover_s:.0f} s{note}", out)
+                    then = "landing" if p.mission == "hover" else "then flying the route"
+                    self._set("HOVER", f"at {p.height_m:.2f} m; hovering {hover_s:.0f} s, {then}{note}", out)
                     out.phase, out.why = self.phase, self.why
                     return out
                 self.s_ref = self.s_proj = self.path.project(self._to_map(x, y, z)[:2], 0.0, 0.5)
@@ -477,9 +536,13 @@ class SkybetaMission:
 
         if self.phase == "HOVER":
             x0, y0, z_target, _ = self.takeoff
-            if t - self.t_hover >= p.hover_s:
+            hover_s = p.route_hover_s if p.mission == "route" else p.hover_s
+            if t - self.t_hover >= hover_s and p.mission == "route":    # the pre-route hover is over: fly
+                self.s_ref = self.s_proj = self.path.project(self._to_map(x, y, z)[:2], 0.0, 0.5)
+                self._set("FOLLOW", f"hovered {hover_s:.0f} s; following the route", out)
+            elif t - self.t_hover >= hover_s:
                 self.land_xy_odom = (x0, y0)
-                self._set("DESCEND", f"hovered {p.hover_s:.0f} s; descending", out)
+                self._set("DESCEND", f"hovered {hover_s:.0f} s; descending", out)
             else:
                 out.pose = (x0, y0, z_target)
                 out.phase, out.why = self.phase, self.why

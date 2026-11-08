@@ -1,0 +1,8 @@
+{
+ "from": "nav.route_planner launch 0.7 m CP4 gate_b keep_centre_m 0.02, digest 151ac5453fcc, corners 1-2 of 30 (to CP1)",
+ "frame": "metres from the take-off pose: [forward, left]",
+ "route": [
+  [1.386, 0.085],
+  [1.736, 0.085]
+ ]
+}

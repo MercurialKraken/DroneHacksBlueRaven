@@ -6,6 +6,7 @@ Only the competitor node is swapped for ours.
 
     ros2 launch blueraven_skybeta blueraven.launch.py                      # a HOVER (the default)
     ros2 launch blueraven_skybeta blueraven.launch.py mission:=course height_m:=0.7 cruise_mps:=0.3 cp4:=gate_b
+    ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=run1_cp1_real.json   # backup
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -26,8 +27,11 @@ INTERFACE_ARGS = [
     ('odom_to_ned_yaw_offset_rad', '0.0', 'measured constant yaw between vision odom and PX4 (fixes rotation)'),
 ]
 MISSION_ARGS = [
-    ('mission', 'hover', "'hover' (take off, hold hover_s, land: first flights) or 'course'"),
+    ('mission', 'hover', "'hover' (take off, hold hover_s, land: first flights), 'course' or 'route' (hardcoded)"),
     ('hover_s', '5.0', 'hover: seconds to hold at height_m before landing'),
+    ('route_file', '', "route: {\"route\": [[forward_m, left_m], ...]} from take-off; a bare name is in routes/"),
+    ('route_max_radius_m', '0.0', 'route: corner arc radius; 0 = stop and turn at every corner'),
+    ('route_hover_s', '3.0', 'route: seconds to hover over the take-off point before flying'),
     ('launch_key', 'launch', "course.yaml entry: 'launch' (the real mark) or 'launch_sim'"),
     ('height_m', '0.7', 'flight height above the launch point, metres'),
     ('cruise_mps', '0.3', 'cruise speed, m/s'),
@@ -49,8 +53,8 @@ def generate_launch_description():
         package='blueraven_skybeta', executable='mission', name='blueraven_mission',
         output='screen', emulate_tty=True, condition=IfCondition(LaunchConfiguration('competitor')),
         parameters=[{n: LaunchConfiguration(n)
-                     for n in ('mission', 'hover_s', 'launch_key', 'height_m', 'cruise_mps', 'cp4',
-                               'keep_centre_m', 'wall_centring')} | {
+                     for n in ('mission', 'hover_s', 'route_file', 'route_max_radius_m', 'route_hover_s', 'launch_key',
+                               'height_m', 'cruise_mps', 'cp4', 'keep_centre_m', 'wall_centring')} | {
                     'odometry_topic': LaunchConfiguration('odometry_topic'),     # the same odometry as the interface
                     'odom_to_ned_yaw_offset_rad': LaunchConfiguration('odom_to_ned_yaw_offset_rad')}],   # twists too
     )

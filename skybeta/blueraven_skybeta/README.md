@@ -9,6 +9,7 @@ never requests a mode. The safety pilot arms and switches to Position; that is t
 |---|---|---|
 | `hover` (**default**) | take off to `height_m`, hold `hover_s` over the take-off point, descend until landed and disarmed | odometry only: no map, no route |
 | `course` | plan the route from `maps/` at start-up (`nav/route_planner.py`), follow it, land at its end | the course map; optionally depth (`wall_centring:=true`) |
+| `route` | **hardcoded backup**: take off, hover `route_hover_s`, fly a route file's corners (forward, left from take-off), stopping to turn at each, land at the last | odometry and a file in `routes/`; no map, no planner, no map_align |
 
 Everything below is **written from the docs and the unit tests; none of it has run on the drone yet.**
 Check each step's expected output and stop at the first surprise.
@@ -204,7 +205,44 @@ and takes over at **any** unexpected motion.
 Pass (sw-claude's checklist step 1): no VIO jumps; horizontal drift p95 under 0.15 m; lands and disarms
 by itself.
 
-## 6. Course mission (later)
+## 6. Route mission: the hardcoded runs (CP1 first)
+
+```bash
+ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=run1t_cp1_turn_real.json \
+  height_m:=0.7 odom_to_ned_yaw_offset_rad:=<MEASURED>      # NODE, drone on the mark facing course north
+```
+
+Take off, hover `route_hover_s` (3 s) over the take-off point, fly the file's corners at `cruise_mps`, stop and turn
+in place at every corner (`route_max_radius_m` 0), land at the last corner. A bare file name is looked up in
+`routes/` (the one copy: edit it there). A bad file is refused at start-up and nothing is published. **Expect** in
+the log: `mission ROUTE (hardcoded, take-off frame: x forward, y left) from .../routes/<file>: N corners [...]`.
+
+| File (`_real` from the real mark, `_sim` from the sim spawn) | Flies | Ends |
+|---|---|---|
+| `run1_cp1` | 1.39 m forward, then to 1.74 m (to CP1) | 6.5 cm past CP1's line, 0.40 m from the north net |
+| `run1t_cp1_turn` | the same, then turns right and flies 1.05 m east | in the corridor east of CP1 |
+| `run2a_cp2` / `run2b_cp3` / `run2c_full` | the planner's route to CP2 / CP3 / the pad | right after that checkpoint |
+
+All come from one planner run (`routes/make_routes.py` regenerates them; the digest is in each file's `from`).
+
+**Before the first route flight:**
+- **The frame offset must be known.** The route is flown with twists, which the interface does NOT rotate by
+  the frame offset (poses it does). Our node rotates them by `odom_to_ned_yaw_offset_rad`; with the wrong value
+  the drone flies off at that angle (T4: -90 deg). Measure it on the bench (`yaw_offset_probe`, section 4.2)
+  or from the hover bag, and pass it.
+- **Point the drone exactly along course north** on the mark: the route is relative to the take-off heading.
+  3 deg off moves the CP1 end by about 9 cm and the far end of the maze by about 30 cm.
+- **Measure the real course.** The numbers come from the published map. On the net, measure from the mark to
+  CP1's line and to the north net, and edit `routes/run1*_real.json` (nano; relaunch, no rebuild). Keep the end
+  point 0.40 m from the net (radius 0.28 + margin).
+- **CP1 and the whole drone:** `maps/course.yaml` says the whole drone must cross a checkpoint line. On the map
+  the north net is only about 0.47 m past CP1's line, so the drone's centre crosses by 6.5 cm and its body does
+  not. If the real course has the same geometry, ask the organizers how CP1 is scored.
+
+Run order at practice: `run1_cp1`, then `run1t_cp1_turn`, then `run2a`, `run2b`, `run2c`; stop at the first
+that touches a net.
+
+## 7. Course mission (later)
 
 `mission:=course launch_key:=launch cp4:=gate_b` (or `window`). The route is planned at start-up and
 refused (nothing published) if a checkpoint can't be crossed. `keep_centre_m` (0.02) keeps the route
@@ -217,7 +255,10 @@ depth**. With map_align running, the node publishes `/blueraven/map_from_odom_in
 
 | Name | Default | |
 |---|---|---|
-| `mission` | `hover` | `hover` or `course` |
+| `mission` | `hover` | `hover`, `course` or `route` |
+| `route_file` | (none) | route: a `.json` path, or a bare name in `routes/` |
+| `route_hover_s` | 3.0 | route: hover before flying (0 = go at once) |
+| `route_max_radius_m` | 0.0 | route: corner arcs (0 = stop and turn) |
 | `height_m` | 0.70 | flight height above the launch point |
 | `hover_s` | 5.0 | hover: seconds at height |
 | `launch_key` | `launch` | `maps/course.yaml` entry: `launch` (real mark) or `launch_sim` |

@@ -640,3 +640,168 @@ def test_an_odometry_stall_shorter_than_odom_stale_s_does_not_abort_a_hover():
     t, _ = run(m, sim, t, t + 0.6, odom=False)                       # a 0.6 s stall (seen: 0.39 s)
     t, _ = run(m, sim, t, t + 2.0)
     assert m.phase == "HOVER", m.why
+
+
+# ---------------------------------------------------------- mission "route": the hardcoded backup runs
+from types import SimpleNamespace  # noqa: E402
+
+from blueraven_skybeta.mission_core import TAKEOFF_FRAME, load_route  # noqa: E402
+
+ROUTES = ROOT / "skybeta" / "blueraven_skybeta" / "routes"
+ROUTE_FILES = sorted(ROUTES.glob("*.json"))
+CP_ORDER = ["CP1", "CP2", "CP3", "CP4 Gate B", "CP5"]
+CP_OF_FILE = {"run1_cp1": "CP1", "run1t_cp1_turn": "CP1", "run2a_cp2": "CP2", "run2b_cp3": "CP3",
+              "run2c_full": "CP5"}
+
+
+def write_route(tmp_path, data, name="r.json"):
+    import json
+    p = tmp_path / name
+    p.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
+    return p
+
+
+def fly_route(corners, start=(0.0, 0.0, 0.0, 0.0), limit=240.0, sim=None, **kw):
+    """Fly a route mission on the toy drone to DONE/ABORTED. Returns the mission, the sim, the
+    trajectory [(phase, x, y, z)] in odom and the commands."""
+    m = SkybetaMission(MissionParams(mission="route", **kw), TAKEOFF_FRAME, corners)
+    sim = sim or Sim(start_odom=start)
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    track, cmds_all = [], []
+    t_end = t + limit
+    while m.phase not in ("DONE", "ABORTED") and t < t_end:
+        t, cmds = run(m, sim, t, t + 1.0, hook=lambda tt, s: track.append((m.phase, s.x, s.y, s.z)))
+        cmds_all += cmds
+    return m, sim, track, cmds_all
+
+
+def test_route_files_in_the_repo_all_load():
+    assert {f.stem for f in ROUTE_FILES} >= {f"{k}_{s}" for k in CP_OF_FILE for s in ("real", "sim")}
+    for f in ROUTE_FILES:
+        corners = load_route(f)
+        assert corners[0] == (0.0, 0.0) and len(corners) >= 2
+
+
+@pytest.mark.parametrize("data, why", [
+    ("not json", "route file"),
+    ({"points": [[1, 0]]}, "non-empty"),
+    ({"route": []}, "non-empty"),
+    ({"route": [[1.0, 0.0, 0.7]]}, "point 0"),
+    ({"route": [[1.0, "0"]]}, "point 0"),
+    ({"route": [[1.0, True]]}, "point 0"),
+    ('{"route": [[1.0, NaN]]}', "point 0"),
+    ({"route": [[1.0, 0.0], [1.0, 0.01]]}, "leg to point 1"),       # a duplicate corner
+    ({"route": [[0.01, 0.0]]}, "leg to point 0"),                     # no leg at all
+    ({"route": [[9.0, 0.0]]}, "leg to point 0"),                      # a typo: 9 m in one go
+    ({"route": [[6.0, 0.0], [6.0, 6.0], [12.0, 6.0]]}, "over 10.0 m"),
+])
+def test_a_bad_route_file_is_refused_with_the_reason(tmp_path, data, why):
+    with pytest.raises(ValueError, match=why):
+        load_route(write_route(tmp_path, data))
+
+
+def test_a_missing_route_file_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="route file"):
+        load_route(tmp_path / "missing.json")
+
+
+def test_route_mission_needs_the_takeoff_frame_and_no_map():
+    corners = [(0.0, 0.0), (1.5, 0.0)]
+    with pytest.raises(ValueError, match="take-off frame"):
+        SkybetaMission(MissionParams(mission="route"), LAUNCH, corners)               # a course launch
+    with pytest.raises(ValueError, match="take-off frame"):
+        SkybetaMission(MissionParams(mission="route"), TAKEOFF_FRAME, corners, course_map=object())
+    with pytest.raises(ValueError, match="take-off point"):
+        SkybetaMission(MissionParams(mission="route"), TAKEOFF_FRAME, [(1.5, 0.0), (2.0, 0.0)])
+    m = SkybetaMission(MissionParams(mission="route"), TAKEOFF_FRAME, corners)
+    assert m.centring is None and all(c.radius == 0.0 for c in m.path.corners)    # stop-and-turn by default
+
+
+def test_route_hovers_first_then_flies_from_wherever_it_took_off_and_lands_at_the_end(tmp_path):
+    corners = load_route(write_route(tmp_path, {"route": [[1.736, 0.085]]}))
+    start = (0.8, -1.1, 0.0, math.radians(-35.0))                    # the stack started elsewhere, rotated
+    m, sim, track, cmds = fly_route(corners, start=start, route_hover_s=3.0)
+    assert m.phase == "DONE", m.why
+    T = pose_xyz_yaw(*start)                                          # the take-off pose, in odom
+    end = (np.linalg.inv(T) @ [sim.x, sim.y, sim.z, 1])[:2]           # where it landed, from take-off
+    assert np.hypot(*(end - [1.736, 0.085])) < 0.10
+    phases = [c.phase for _, c in cmds]
+    assert [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]] == \
+        ["WAIT_OFFBOARD", "TAKEOFF", "HOVER", "FOLLOW", "DESCEND", "DONE"]   # state is 5 Hz: a few WAIT ticks
+    held = [(tt, c) for tt, c in cmds if c.phase == "HOVER"]
+    assert held[-1][0] - held[0][0] >= 3.0 - DT
+    x0, y0 = m.takeoff[:2]
+    assert all(c.pose is not None and math.hypot(c.pose[0] - x0, c.pose[1] - y0) < 1e-9 for _, c in held)
+    assert max(z for ph, _, _, z in track) == pytest.approx(0.7, abs=0.08)        # height_m above the pad
+
+
+def test_route_hover_zero_goes_straight_to_follow():
+    m, sim, _, cmds = fly_route([(0.0, 0.0), (1.0, 0.0)], route_hover_s=0.0)
+    assert m.phase == "DONE" and "HOVER" not in {c.phase for _, c in cmds}
+
+
+def test_route_drifting_in_the_pre_route_hover_lands_instead_of_flying():
+    m, sim, _, cmds = fly_route([(0.0, 0.0), (1.5, 0.0)], sim=OffsetSim(), route_hover_s=10.0)
+    assert m.phase == "DONE", m.why
+    assert "FOLLOW" not in {c.phase for _, c in cmds}               # never set off on the route
+
+
+def test_route_never_talks_to_map_align():
+    m, sim = SkybetaMission(MissionParams(mission="route"), TAKEOFF_FRAME, [(0.0, 0.0), (1.0, 0.0)]), Sim()
+    _, cmds = run(m, sim, 0.0, 4.0)
+    assert m.phase == "WAIT_OFFBOARD"
+    assert all(c.map_from_odom_init is None for _, c in cmds)        # nothing handed over at INIT
+    T = m.T_map_odom.copy()
+    assert m.on_map_from_odom(4.0, pose_xyz_yaw(1.0, 2.0, 0.0, 0.5)) is not None   # course-frame corrections
+    assert np.allclose(m.T_map_odom, T)
+
+
+def test_route_stops_and_turns_in_place_at_cp1_then_carries_on():
+    corners = load_route(ROUTES / "run1t_cp1_turn_real.json")
+    m, sim, track, cmds = fly_route(corners)
+    assert m.phase == "DONE", m.why
+    turns = [c for _, c in cmds if c.phase == "FOLLOW" and c.twist
+             and abs(c.twist[3]) > math.radians(20) and math.hypot(c.twist[0], c.twist[1]) < 0.08]
+    assert turns, "never stopped to turn"
+    assert np.hypot(sim.x - corners[-1][0], sim.y - corners[-1][1]) < 0.15
+
+
+# The offline course check: each committed route file, flown by the toy drone from its launch entry
+# (real mark / sim spawn), must keep the planner's clearance in the course map and cross the
+# checkpoints its name promises. This is the map's word only: the physical course is re-measured on site.
+@pytest.fixture(scope="module")
+def course():
+    import yaml
+    from nav.course_map import CourseMap
+    from nav.frames import load_launch, map_from_startup_odom
+    cfg_path = ROOT / "maps" / "course.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return SimpleNamespace(map=CourseMap.load(ROOT / "maps" / "course_sdf.npz"), cfg=cfg,
+                           T={s: map_from_startup_odom(load_launch(cfg_path, k), (0.0, 0.0, 0.0, 0.0))
+                              for s, k in (("real", "launch"), ("sim", "launch_sim"))})
+
+
+@pytest.mark.parametrize("f", ROUTE_FILES, ids=[f.stem for f in ROUTE_FILES])
+def test_route_file_keeps_clear_of_the_nets_and_crosses_its_checkpoints(course, f):
+    from nav.path_geometry import checkpoint_crossings
+    stem, which = f.stem.rsplit("_", 1)
+    m, sim, track, _ = fly_route(load_route(f))
+    assert m.phase == "DONE", m.why
+    T = course.T[which]
+    xyz = np.array([(T @ [x, y, z, 1])[:3] for _, x, y, z in track])
+    at_height = np.array([ph in ("HOVER", "FOLLOW") for ph, *_ in track])
+    clear = course.map.distance(xyz[at_height], "planning")
+    r = float(course.cfg["limits"]["drone_radius"])
+    print(f"{f.name}: min clearance {np.nanmin(clear):.3f} m")
+    assert np.all(np.isfinite(clear)) and clear.min() >= r + 0.08, f"{f.name}: min clearance {clear.min():.3f}"
+    got = {c["checkpoint"]: c for c in checkpoint_crossings(SimpleNamespace(xyz=xyz), course.cfg["checkpoints"], r)}
+    for cp in CP_ORDER[:CP_ORDER.index(CP_OF_FILE[stem]) + 1]:
+        c = got[cp]
+        print(f"   {c}")
+        if cp == "CP1":                         # the map leaves no room for the whole drone before the north net:
+            assert c["past_m"] > 0.0            # only its centre crosses (re-measure on the real course)
+        elif "past_m" in c:
+            assert c["whole_drone_across"], f"{f.name}: {c}"
+        else:
+            assert c["whole_drone_inside"], f"{f.name}: {c}"

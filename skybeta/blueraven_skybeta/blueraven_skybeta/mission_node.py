@@ -5,12 +5,15 @@ map <- odom for map_align; calls /skybeta/hold on abort. Reads map_align's corre
 
     ros2 launch blueraven_skybeta blueraven.launch.py                       # mission:=hover (default)
     ros2 launch blueraven_skybeta blueraven.launch.py mission:=course launch_key:=launch cp4:=gate_b
+    ros2 launch blueraven_skybeta blueraven.launch.py mission:=route route_file:=/path/run1_cp1_real.json
 
 mission "hover" (the default, for first flights): take off, hold hover_s over the take-off point,
 land; no route and no course map. mission "course": the route is built at start-up from the course
 map by nav.route_planner (Arnav's startup planner), the corners in the map frame (.map_xy). A plan
 with gate problems is refused: the node then never publishes, so the interface never enters
-Offboard. Never arms, never requests a mode.
+Offboard. mission "route" (the hardcoded backup): the corners come from route_file, (forward, left)
+metres from the take-off pose; no map, no planner, no map_align. A bad file is refused the same way.
+Never arms, never requests a mode.
 """
 from __future__ import annotations
 
@@ -29,7 +32,8 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from blueraven_skybeta.frame_offset import twist_for_interface
-from blueraven_skybeta.mission_core import MissionParams, SkybetaMission, _repo_root
+from blueraven_skybeta.mission_core import (MISSIONS, TAKEOFF_FRAME, MissionParams, SkybetaMission, _repo_root,
+                                            load_route)
 
 ROOT = _repo_root()
 if str(ROOT) not in sys.path:
@@ -38,6 +42,7 @@ from nav.course_map import CourseMap  # noqa: E402
 from nav.frames import (MAP_FRAME, MAP_FROM_ODOM_INIT_TOPIC, MAP_FROM_ODOM_TOPIC, load_launch,  # noqa: E402
                         pose_msg_fields, quaternion_z, transform_from_pose_fields, yaw_from_quaternion)
 
+ROUTES_DIR = ROOT / "skybeta" / "blueraven_skybeta" / "routes"    # the hardcoded route files (mission "route")
 LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 ANY_PUBLISHER = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)   # matches reliable or not
 
@@ -60,16 +65,34 @@ class SkybetaMissionNode(Node):
         # the SAME value the flight interface gets: it corrects poses for it, but not twists, so we do
         self.yaw_offset = float(dp("odom_to_ned_yaw_offset_rad", 0.0, loose).value)
         rate = float(dp("rate_hz", 20.0, loose).value)
+        route_file = dp("route_file", "").value                        # mission "route": the hardcoded route
         params = MissionParams(**{k: type(v)(dp(k, v, loose).value) for k, v in vars(MissionParams()).items()})
-        if params.mission not in ("hover", "course"):
-            raise SystemExit(f"mission must be 'hover' or 'course', not {params.mission!r}")
+        if params.mission not in MISSIONS:
+            raise SystemExit(f"mission must be one of {MISSIONS}, not {params.mission!r}")
 
-        launch = load_launch(cfg, launch_key)
+        launch = load_launch(cfg, launch_key) if params.mission != "route" else TAKEOFF_FRAME
         if params.mission == "hover":
             self.mission = SkybetaMission(params, launch)
             self.get_logger().info(f"mission HOVER: take off to {params.height_m:.2f} m, hold "
                                    f"{params.hover_s:.0f} s over the take-off point, land. No route.")
             problems = None
+        elif params.mission == "route":
+            rf = Path(route_file).expanduser()
+            if route_file and not rf.exists() and rf.parent == Path("."):   # a bare name: the repo's routes/
+                rf = ROUTES_DIR / rf.name                                # (the one copy, edited in place)
+            route_file = str(rf.resolve()) if route_file else ""
+            try:
+                corners = load_route(route_file) if route_file else None
+                problems = None if corners else ["mission 'route' needs route_file:=<path to a route .json>"]
+            except ValueError as e:
+                problems = [str(e)]
+            if not problems:
+                self.mission = SkybetaMission(params, TAKEOFF_FRAME, corners)
+                self.get_logger().info(
+                    f"mission ROUTE (hardcoded, take-off frame: x forward, y left) from {route_file}: "
+                    f"{len(corners) - 1} corners {corners[1:]}, path {self.mission.path.length:.2f} m at "
+                    f"{params.height_m:.2f} m, corner arcs {params.route_max_radius_m:.2f} m (0 = stop and turn); "
+                    f"lands at the last corner. No map, no planner, no map_align")
         else:
             course = CourseMap.load(sdf)
             from nav.route_planner import gate_problems, plan_from_files
@@ -95,7 +118,8 @@ class SkybetaMissionNode(Node):
         self.create_subscription(Odometry, dp("odometry_topic", "/visual_slam/tracking/odometry").value,
                                  self._on_odom, 10)
         self.create_subscription(String, "/skybeta/state", self._on_state, 10)
-        self.create_subscription(PoseStamped, MAP_FROM_ODOM_TOPIC, self._on_map_from_odom, ANY_PUBLISHER)
+        if params.mission != "route":                                   # a route ignores map_align (course frame)
+            self.create_subscription(PoseStamped, MAP_FROM_ODOM_TOPIC, self._on_map_from_odom, ANY_PUBLISHER)
         self.create_timer(1.0 / rate, self._tick)
         self.create_timer(0.5, self._status)
         self.last = None
