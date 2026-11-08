@@ -40,6 +40,7 @@ from std_msgs.msg import Bool, String
 
 from . import core as C
 from . import depth as D
+from .launch import route_selection
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -54,9 +55,10 @@ CMD_SET_MODE, CMD_ARM, CMD_LAND = 176, 400, 21
 PX4_MAIN_MODE_OFFBOARD = 6
 
 
-def load_route(node: Node) -> dict[str, Any] | list:
-    """The route file's document, or a bare point list from the route parameter."""
+def load_route(node: Node, selected: Path | None) -> dict[str, Any] | list:
+    """The named route's document, else route_file's, or a bare point list from the route parameter."""
     path = node.declare_parameter("route_file", "").value
+    path = selected or path
     flat = list(node.declare_parameter("route", [0.0]).value)
     if path:
         with open(path) as f:
@@ -120,14 +122,17 @@ class RefNav(Node):
 
     def __init__(self) -> None:
         super().__init__("refnav")
-        doc = load_route(self)
         try:
+            name = self._param("route_name", "")      # full, cp1 or maze: refnav.launch.route_selection
+            key = self._param("launch_key", "launch_sim")
+            chosen = route_selection(Path(__file__).resolve().parents[1], name, key) if name else None
+            doc = load_route(self, chosen[0] if chosen else None)
             # the route file's params are the defaults; this node's parameters (flight.yaml, -p) win
             prm, unknown = C.params_from_doc(doc)
             overrides = {k: self.declare_parameter(k, v).value for k, v in vars(prm).items() if k != "route"}
             prm, _ = C.params_from_doc(doc, overrides)
             # route_source: map (default) plans the route now from the course map; file flies route_file's points
-            source = self._param("route_source", "map")
+            source = chosen[1] if chosen else self._param("route_source", "map")
             if source not in ("map", "file"):
                 raise ValueError(f"route_source must be map or file, not {source!r}")
             if source == "map":
