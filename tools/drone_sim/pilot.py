@@ -115,11 +115,14 @@ def main():
             if not p.armed:
                 p.say('disarmed after the pilot took over')
                 break
-            if now - mark > 60.0:
-                p.say('still armed 60 s after Land: disarming')
+            if now - mark > 60.0 and p.landed:
+                p.say('landed but still armed 60 s after Land: disarming')
                 p.command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0)
                 spin(1.0)
                 break
+            if now - mark > 60.0:
+                p.say('still armed and not landed 60 s after Land: waiting for PX4 to land it')
+                mark = now
     ok = offboard_seen and step == 'watch'
     p.say('RESULT ' + ('self-disarm' if ok else 'pilot took over'))
     sys.exit(0 if ok else 2)
