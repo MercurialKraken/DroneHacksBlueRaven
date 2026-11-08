@@ -20,6 +20,7 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 ROOT = _repo_root()
+ONE_THREAD = {'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}   # MPPI's numpy
 
 
 def generate_launch_description():
@@ -58,6 +59,7 @@ def generate_launch_description():
     # MPPI in shadow: its own process at low priority, publishing only /blueraven/mppi/*; never commands the drone
     shadow = Node(
         package='blueraven_skybeta', executable='mppi_shadow', name='mppi_shadow', output='screen', prefix='nice -n 10',
+        additional_env=ONE_THREAD,
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mppi_shadow'), "' == 'true' and '",
                                                 LaunchConfiguration('nav'), "' != 'mppi'"])),
         parameters=[{**mppi, 'route_file': route_file,
@@ -69,6 +71,7 @@ def generate_launch_description():
     # nav:=mppi: MPPI in ITS OWN PROCESS (never refnav's control thread); refnav forwards its /blueraven/mppi/cmd
     mppi_node = Node(
         package='blueraven_skybeta', executable='mppi_node', name='mppi_node', output='screen', prefix='nice -n 5',
+        additional_env=ONE_THREAD,                     # no BLAS/OpenMP thread pools competing with cuVSLAM
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('nav'), "' == 'mppi'"])),
         parameters=[{**mppi, 'route_file': route_file,
                      'debug': PythonExpression(["'", LaunchConfiguration('mppi_debug'), "' == 'true'"]),
