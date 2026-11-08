@@ -3,3 +3,5 @@
 maps/course/** -text
 courses/*/course/** -text
 *.npz binary
+# Shell scripts run on Linux (the drone, the T4): LF endings everywhere, or bash chokes on the carriage returns.
+*.sh text eol=lf
