@@ -45,7 +45,8 @@ class MppiFollow:
         self.mppi_p = MppiParams(tau=tau_s, dead_time_s=dead_time_s)
         self.poses = PoseBuffer()
         self.nav: LocalNav | None = None
-        self.pos: np.ndarray | None = None          # latest odom ENU position and velocity
+        self.pos: np.ndarray | None = None          # latest odom ENU position, its stamp, and velocity
+        self.stamp = 0.0
         self.vel = np.zeros(2)
         self.ticks = 0
         self.ext: dict[str, Any] | None = None
@@ -55,7 +56,7 @@ class MppiFollow:
         x, y, z, w = q_xyzw
         self.poses.add_position(stamp, p)
         self.poses.add_attitude(stamp, (w, x, y, z))
-        self.pos = np.asarray(p, float)
+        self.pos, self.stamp = np.asarray(p, float), stamp
         self.vel = (D.quat_to_mat(w, x, y, z) @ np.asarray(v_flu, float))[:2]
 
     def on_depth(self, stamp: float, depth_m: np.ndarray, K: Any, T_base_cam: np.ndarray,
@@ -79,7 +80,7 @@ class MppiFollow:
         self.ticks += 1
         if self.nav is None or self.pos is None or (self.ticks - 1) % STEP_EVERY:
             return self.ext
-        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now)
+        c = self.cmd = self.nav.step(self.pos[:2], self.vel, now, pose_stamp=self.stamp)
         vn, ve = pad.vector(c.vx, c.vy)
         r = c.mppi
         self.ext = {"vn": vn, "ve": ve, "yaw": math.remainder(pad.yaw0 - c.yaw, math.tau), "state": c.state,

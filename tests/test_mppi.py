@@ -319,10 +319,13 @@ def test_dead_time_plans_from_the_predicted_state():
     P, vref = straight_path()
     m = Mppi(corridor_map(), P, vref, MppiParams(dead_time_s=0.3))
     r1 = m.step((1.0, 0.0), (0.3, 0.0))
-    assert len(m._inflight) == 1                                          # this cycle's command is now in flight
+    assert len(m._inflight) == 1                                          # this cycle's command is now remembered
     for _ in range(4):
         m.step((1.0, 0.0), (0.3, 0.0))
-    assert len(m._inflight) == 3                                          # 0.3 s / 0.1 s
+    assert len(m._inflight) == 5
     assert r1.plan[0, 0] > 1.0 + 0.3 * 0.1                                # the plan starts ahead of the drone
+    r_old = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=0.3)                # a 0.3 s old pose: predicted further on
+    r_new = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=0.0)
+    assert r_old.plan[0, 0] > r_new.plan[0, 0]
     m.reset()
     assert m._inflight == []

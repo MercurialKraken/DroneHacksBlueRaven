@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skybeta" / "blueraven_skybeta"))
@@ -18,14 +19,31 @@ from blueraven_skybeta import refnav_skybeta as S  # noqa: E402
 from nav.depth_points import R_FLU_OPTICAL  # noqa: E402
 from refnav import core as C  # noqa: E402
 from sim_world import WALL, World, start_world  # noqa: E402
-from test_local_nav import TAPE, crossed, tape_course  # noqa: E402
 from test_refnav_skybeta import DT, LAUNCH_PARAMS, Stack, _rz  # noqa: E402
 
+TAPE = ROOT / "courses" / "start-2026-11-07-tape"
 STAGE1 = json.loads((TAPE / "routes" / "route_v6_start2_stage1_sim.json").read_text())
 W, H = 80, 50                                           # the drone's 640x400 at 1/8: K scaled, every pixel used
 K = np.array([[50.2, 0.0, 39.2], [0.0, 50.2, 24.2], [0.0, 0.0, 1.0]])
 T_BASE_CAM = np.eye(4)
 T_BASE_CAM[:3, :3], T_BASE_CAM[:3, 3] = R_FLU_OPTICAL, (0.105, 0.038, 0.031)
+
+
+def tape_course():
+    """The tape course (CP2 gap 1.0 m), its sim spawn, Chelsea's stage-1 route in map coordinates, and CP2's line."""
+    y = yaml.safe_load((TAPE / "course.yaml").read_text())
+    L, cp2 = y["launch_sim"], y["checkpoints"][0]["line"]
+    yaw = math.radians(L["yaw_deg"])
+    wps = M.route_to_odom(STAGE1["route"], (L["x"], L["y"]), yaw)
+    return start_world(TAPE / "course.yaml"), (L["x"], L["y"]), yaw, wps, np.array(cp2)
+
+
+def crossed(traj: np.ndarray, line: np.ndarray) -> bool:
+    """The trajectory crossed the segment between the line's ends."""
+    p, q = line
+    side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
+    k = int(np.argmax(side != side[0]))
+    return k > 0 and 0.0 < float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p)) < 1.0
 
 
 @pytest.mark.parametrize("p0, yaw0", [((0.0, 0.0, 0.0), 0.0), ((1.2, -0.7, 0.1), 2.3), ((-3.0, 2.0, 0.0), -1.0)])
@@ -190,8 +208,6 @@ def test_depth_lost_in_flight_slows_then_lands_3_s_later():
     assert "SLOW" in states and not sk.armed
 
 
-@pytest.mark.xfail(strict=True, reason="c29d114 mem_tau_s 12: lingering at the shut gap, wall B fades unseen and MPPI "
-                                        "flies through it (passes with 91ba60c's 60 s); Arnav's call")
 def test_a_wall_across_the_gap_blocks_or_sticks_and_lands_without_contact():
     w = start_world(TAPE / "course.yaml")
     shut = World(w.x_range, w.y_range, boxes=[*w.boxes, (-1.45, -0.80, 1.90, 2.40, WALL)], polys=w.polys, nets=w.nets)
