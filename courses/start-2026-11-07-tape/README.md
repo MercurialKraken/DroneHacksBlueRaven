@@ -14,5 +14,8 @@ checks, route v6 via `tools/make_route_v6.py`, clearance via `tools/check_route.
 |---|---|---|
 | `routes/route_v6_start2.json` (`_sim`) | full course, real mark (sim spawn) | 0.398 m |
 | `routes/route_v6_start2_stage1.json` (`_sim`) | lead-in, through the CP2 gap, land | 0.414 m |
+| `routes/route_v7_cp2_simple.json` (`_sim`) | Darion's method: forward, 90 deg right through the CP2 gap, land | 0.414 m |
+
+`route_v7_cp2_simple*.json` are written here directly by `tools/make_route_cp2_simple.py` (byte-identical to `routes/`).
 
 For waypoints, sims and offline checks. Add `route.json -> routes/route_v6_start2_sim.json` as in the other folders.

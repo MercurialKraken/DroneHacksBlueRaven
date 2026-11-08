@@ -1,0 +1,10 @@
+{
+ "from": "tools/make_route_cp2_simple.py on maps/course.yaml dronehacks-2026-v3-start2, launch_key launch, 0.7 m. Darion's method to CP2: take off, straight forward 1.239 m, turn 90 deg right, straight 1.965 m through the CP2 gap, land 0.480 m past its line (whole drone across + 0.20 m). Turn at map (-2.515, 2.153), land at (-0.550, 2.153). Clearance (exact) Wall A 0.438 m, Wall B 0.438 m, turn shift +0.000 m from the best; map min 0.414 m. The rightward leg passes 0.133 m from the cone's centre (0.018 m outside its 0.23 m base), 0.47 m above it.",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch",
+ "labels": ["turn 90 deg right", "past CP2: land"],
+ "route": [
+  [1.239, 0.000],
+  [1.239, -1.965]
+ ],
+ "params": {"height_m": 0.7, "speed_mps": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
+}

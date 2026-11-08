@@ -4,7 +4,8 @@ measurement becomes a map and routes in one command:
 
     python tools/make_start_obj.py          # maps/course/start-2026-11-07.obj + CP2's line/direction in course.yaml
     python tools/make_start_obj.py --all    # ...then the SDF (tools/build_course_sdf.py), its checks of the start,
-                                            # route v6 (tools/make_route_v6.py) and its clearance (tools/check_route.py)
+                                            # routes v6 and v7 (tools/make_route_v6.py, tools/make_route_cp2_simple.py)
+                                            # and their clearance (tools/check_route.py)
 
 Points are course coordinates (frame: course) or [forward, left] metres from the launch mark's centre (frame: mark),
 whichever is easier to tape. Wall ends are the faces AT the CP2 gap, so the gap's free width is the distance between
@@ -133,7 +134,7 @@ def run(cmd: list[str]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--all", action="store_true", help="also rebuild the SDF, check it, regenerate and check route v6")
+    ap.add_argument("--all", action="store_true", help="also rebuild the SDF, check it, regenerate and check routes v6, v7")
     a = ap.parse_args(argv)
     text = COURSE.read_text(encoding="utf-8")
     g = start_geometry(yaml.safe_load(text))
@@ -145,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
           f", free width {g['gap_width']:.3f} m, normal {g['gap_normal'].round(3).tolist()}"
           + ("" if new == text else "; course.yaml CP2 updated"))
     if not a.all:
-        print("next: python tools/make_start_obj.py --all  (SDF, checks, route v6, clearance)")
+        print("next: python tools/make_start_obj.py --all  (SDF, checks, routes v6 and v7, clearance)")
         return 0
     print(run(["tools/build_course_sdf.py", str(COURSE)]).strip().splitlines()[-1])
     results = check_sdf(g)
@@ -154,8 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     if not all(ok for ok, _ in results):
         return 1
     print(run(["tools/make_route_v6.py"]).strip())
+    print(run(["tools/make_route_cp2_simple.py"]).strip())
     for f, key in (("route_v6_start2.json", "launch"), ("route_v6_start2_stage1.json", "launch"),
-                   ("route_v6_start2_sim.json", "launch_sim")):
+                   ("route_v6_start2_sim.json", "launch_sim"), ("route_v7_cp2_simple.json", "launch"),
+                   ("route_v7_cp2_simple_sim.json", "launch_sim")):
         out = run(["tools/check_route.py", f"routes/{f}", key]).splitlines()
         print(f"{f}: " + next(l.strip() for l in out if "straight segments" in l))
     return 0
