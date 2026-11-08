@@ -145,7 +145,7 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             carry = None
         tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, offset,
                              tau if lag_s is None else lag_s, prm.speed_mps, integ, prm.ki_xy, push, prm.push_tau_s,
-                             prm.push_max_mps)
+                             prm.push_max_mps, (prm.push_ff_fwd_mps, prm.push_ff_right_mps))
         if land:
             m.request_land(land)
         if tw is not None:
@@ -628,3 +628,73 @@ def test_leaning_against_the_push_is_not_counted_as_a_jam_by_the_stuck_guard():
 def test_with_no_push_the_estimator_never_stops_a_clean_route():
     m, start, off, hold = _push_flight(push=(0.0, 0.0), climb=(0.0, 0.0), hover_tol_m=0.0)
     assert m.result == "complete"            # (real jams: test_a_jammed_drone_stops_pushing_and_lands_where_it_is)
+
+
+# ---- the constant push feed-forward (push_ff_fwd_mps, push_ff_right_mps): 160449's push, cancelled from lift-off --------
+FF = {"push_ff_fwd_mps": 0.056, "push_ff_right_mps": 0.100}
+FF_FLIGHT = {"height_m": 0.4, "speed_mps": 0.15, "hover_s": 0.0}
+
+
+def _ff_twist(phase: str, heading: float, ff: tuple[float, float]) -> np.ndarray:
+    v = C.Vehicle(pos=(0.0, 0.0, -0.4), heading=heading)
+    out = C.Output(phase, setpoint=(0.1, -0.2, -0.4, heading), velocity=(0.1, 0.05), stream=True)
+    return np.array(S.twist(out, v, S.Pad(0, 0, 0, 0), 30.0, 0.0, push_ff=ff))
+
+
+@pytest.mark.parametrize("heading, want_ne", [(0.0, (0.056, 0.100)), (math.pi / 2, (-0.100, 0.056))])
+@pytest.mark.parametrize("phase", ["climb", "hover", "follow"])
+def test_the_push_ff_adds_the_body_vector_turned_to_pad_ned_in_the_air(phase, heading, want_ne):
+    d = _ff_twist(phase, heading, (0.056, 0.100)) - _ff_twist(phase, heading, (0.0, 0.0))
+    assert (d[0], -d[1]) == pytest.approx(want_ne) and d[2:] == pytest.approx((0.0, 0.0))   # pad yaw 0: east = -odom y
+
+
+def test_the_push_ff_is_off_by_default_and_on_the_ground():
+    assert C.Params().push_ff_fwd_mps == 0.0 and C.Params().push_ff_right_mps == 0.0
+    v = C.Vehicle(pos=(0.0, 0.0, 0.0), heading=0.0)
+    out = C.Output("arm", setpoint=(0.0, 0.0, 0.0, 0.0), stream=True)
+    assert S.twist(out, v, S.Pad(0, 0, 0, 0), 30.0, 0.0, push_ff=(0.1, 0.1)) == S.twist(out, v, S.Pad(0, 0, 0, 0), 30.0, 0.0)
+
+
+@pytest.mark.parametrize("bad", [{"push_ff_fwd_mps": 0.25}, {"push_ff_right_mps": -0.21}])
+def test_a_push_ff_over_0_2_mps_is_refused(bad):
+    with pytest.raises(ValueError):
+        C.params_from_doc(R1_DOC, {**LAUNCH_PARAMS, **bad})
+
+
+def _ff_flight(ff: dict, offset: float = 0.0, yaw0: float = 0.0):
+    trail: list = []
+    m, sk, sent = flight(offset=offset, start_yaw_enu=yaw0, doc=R1_DOC, prm_over={**FF_FLIGHT, **ff}, tau=0.55,
+                         lag_s=0.55, push_body=REAL_PUSH, trail=trail, limit_s=200.0)
+    climb_end = next(p for t, ph, p in trail if ph not in ("wait", "arm", "climb"))
+    path = np.c_[m.path.x, m.path.y]
+    off = [float(np.min(np.hypot(path[:, 0] - p[0], path[:, 1] - p[1]))) for t, ph, p in trail if ph == "follow"]
+    return m, math.hypot(*climb_end[:2]), float(np.percentile(off, 95))
+
+
+@pytest.mark.parametrize("offset,yaw0", [(0.0, 0.0), (-math.pi / 2, math.pi / 2)])
+def test_the_push_ff_cancels_160449s_push_from_lift_off(offset, yaw0):
+    m, drift, xtrack = _ff_flight(FF, offset, yaw0)
+    assert m.result == "complete" and drift < 0.05 and xtrack < 0.05, (m.result, drift, xtrack)
+    m0, drift0, xtrack0 = _ff_flight({}, offset, yaw0)
+    assert xtrack0 > 0.2, xtrack0                                        # P only: 160449's steady offset
+
+
+def _ff_command(phase: str, mppi: bool, track: S.Track | None = None, t: float = 0.0):
+    v = C.Vehicle(pos=(0.0, 0.0, -0.4), heading=0.0)
+    out = C.Output(phase, setpoint=(0.0, 0.0, -0.4, 0.0), velocity=(0.0, 0.0), stream=True)
+    state = {"px4_link": True, "armed": True, "offboard_active": True}
+    return S.command(out, v, S.Pad(0, 0, 0, 0), S.Descent(), track or S.Track(), state, t, t, t, 30.0, 0.0,
+                     push_ff=(0.2, 0.2), mppi=mppi)
+
+
+def test_leaning_on_the_push_ff_is_not_counted_as_a_jam_by_the_stuck_guard():
+    track = S.Track()                    # the reference waits over a drone held still by its push
+    for k in range(100):
+        tw, why = _ff_command("follow", False, track, k * DT)
+        assert why is None and math.hypot(tw[0], tw[1]) == pytest.approx(math.hypot(0.2, 0.2))
+
+
+@pytest.mark.parametrize("phase, on", [("climb", True), ("hover", True), ("follow", False)])
+def test_under_mppi_the_push_ff_leans_in_the_climb_and_hold_but_not_in_follow(phase, on):
+    tw, _ = _ff_command(phase, True)
+    assert math.hypot(tw[0], tw[1]) == pytest.approx(math.hypot(0.2, 0.2) if on else 0.0)

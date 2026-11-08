@@ -60,6 +60,7 @@ EXT_BLOCKED_LAND_S = 2.0                        # MPPI BLOCKED (every rollout cr
 # hold doesn't drift with the drone's push; bounded here whatever MPPI sends. ARRIVED/STUCK/other: zero, then land.
 EXT_HOLD_STATES, EXT_HOLD_MAX_MPS = ("WAIT", "HOLD", "BLOCKED"), 0.15
 PATH_SOURCES = ("map", "waypoints")
+PUSH_FF_MAX_MPS = 0.2
 LEG_MAX_M, REACH_MAX_M = 8.0, 10.0              # the course is ~6 m across: longer is a typo (Chelsea's load_route)
 
 
@@ -86,6 +87,8 @@ class Params:
                                                 # NOTE: orbits on slow responses (T4 t9r5); prefer push_tau_s
     push_tau_s: float = 0.0                     # > 0: learn a steady push from the VELOCITY shortfall over this long and
     push_max_mps: float = 0.15                  # cancel it, up to this, in the hold and in follow (skybeta adapter)
+    push_ff_fwd_mps: float = 0.0                # a constant body-frame (forward, right) velocity added in the air (climb,
+    push_ff_right_mps: float = 0.0              # hold, follow) to cancel a known steady push (skybeta adapter)
     health_quiet_s: float = 3.0                 # healthy this long before arming
     health_stale_s: float = 1.0
     health_bad_land_s: float = 1.0
@@ -151,6 +154,8 @@ class Params:
             raise ValueError(f"hover_max_s ({self.hover_max_s:g}) must be at least hover_s ({self.hover_s:g})")
         if self.ki_xy < 0 or self.hover_tol_m < 0 or self.hover_dwell_s < 0 or self.push_tau_s < 0 or self.push_max_mps < 0:
             raise ValueError("ki_xy, hover_tol_m, hover_dwell_s, push_tau_s and push_max_mps cannot be negative")
+        if max(abs(self.push_ff_fwd_mps), abs(self.push_ff_right_mps)) > PUSH_FF_MAX_MPS:
+            raise ValueError(f"push_ff_fwd_mps and push_ff_right_mps must be within +-{PUSH_FF_MAX_MPS:g} m/s")
         if self.path_source not in PATH_SOURCES:
             raise ValueError(f"path_source must be one of {', '.join(PATH_SOURCES)}, not {self.path_source!r}")
         if self.path_source == "waypoints":

@@ -247,11 +247,12 @@ class Descent:
 def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset_rad: float,
           lag_s: float = VEL_LAG_S, speed_mps: float = 0.0, integ: XYIntegral | None = None, ki: float = 0.0,
           now: float = 0.0, push: PushEstimator | None = None, push_tau_s: float = 0.0,
-          push_max_mps: float = 0.15) -> tuple[float, float, float, float] | None:
+          push_max_mps: float = 0.15, push_ff: tuple[float, float] = (0.0, 0.0)
+          ) -> tuple[float, float, float, float] | None:
     """The twist (ENU vx, vy, vz, yaw rate) for a streaming mission output: feed-forward velocity, plus lag_s of the
     path's acceleration (PX4's velocity loop lags that long; the interface has no acceleration input), plus PX4's
     position loop, plus (ki > 0) the position integral in the hold and in follow, minus (push_tau_s > 0) the
-    learned push in the hold and in follow, bounded."""
+    learned push in the hold and in follow, plus in the air the constant body (forward, right) push_ff, bounded."""
     if not out.stream or out.setpoint is None or v.pos is None or v.heading is None:
         return None
     n, e, d, yaw = out.setpoint
@@ -268,7 +269,12 @@ def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset
     learning = push is not None and push_tau_s > 0 and out.phase in ("hover", "follow") and v.vel is not None
     if learning:
         b_n, b_e = push.step(now, v.vel, v.heading, lag_s, push_tau_s, push_max_mps)
-    vn, ve = _clamp(fn + lag_s * an + cn + i_n - b_n, fe + lag_s * ae + ce + i_e - b_e, max(speed_mps, XY_MAX_MPS))
+    k_n = k_e = 0.0
+    if push_ff != (0.0, 0.0) and out.phase in C.AIRBORNE:
+        c, s = math.cos(v.heading), math.sin(v.heading)
+        k_n, k_e = c * push_ff[0] - s * push_ff[1], s * push_ff[0] + c * push_ff[1]
+    vn, ve = _clamp(fn + lag_s * an + cn + i_n - b_n + k_n, fe + lag_s * ae + ce + i_e - b_e + k_e,
+                    max(speed_mps, XY_MAX_MPS))
     if learning:
         push.sent = (vn, ve)
     vx, vy = _to_interface(pad, vn, ve, yaw_offset_rad)
@@ -281,8 +287,8 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
             state: dict[str, Any] | None, t_odom: float, t_state: float, now: float, yaw_rate_dps: float,
             yaw_offset_rad: float, lag_s: float = VEL_LAG_S, speed_mps: float = 0.0,
             integ: XYIntegral | None = None, ki: float = 0.0, push: PushEstimator | None = None,
-            push_tau_s: float = 0.0, push_max_mps: float = 0.15
-            ) -> tuple[tuple[float, float, float, float] | None, str | None]:
+            push_tau_s: float = 0.0, push_max_mps: float = 0.15, push_ff: tuple[float, float] = (0.0, 0.0),
+            mppi: bool = False) -> tuple[tuple[float, float, float, float] | None, str | None]:
     """-> (the twist to publish this tick or None, why to land now). In the air a silence over HOLD_S holds still,
     over the STALE limits it lands; on the ground nothing is sent, so the interface never enters Offboard on it."""
     if integ is not None and out.phase not in ("hover", "follow"):
@@ -306,13 +312,15 @@ def command(out: C.Output, v: C.Vehicle, pad: Pad | None, descent: Descent, trac
         return (0.0, 0.0, 0.0, 0.0), stale
     if hold or pad is None:
         return None, None
+    if mppi and out.phase == "follow":         # MPPI learns and leans against the push itself in follow
+        push_ff = (0.0, 0.0)
     tw = twist(out, v, pad, yaw_rate_dps, yaw_offset_rad, lag_s, speed_mps, integ, ki, now, push, push_tau_s,
-               push_max_mps)
+               push_max_mps, push_ff)
     if out.phase != "follow" or tw is None:
         track.hist, track.t_far = [], None
         return tw, None
-    # the stuck guard counts the motion ASKED for: leaning against a learned push is not asking to move
-    lean = math.hypot(push.f, push.r) if push is not None and push_tau_s > 0 else 0.0
+    # the stuck guard counts the motion ASKED for: leaning against a learned or known push is not asking to move
+    lean = (math.hypot(push.f, push.r) if push is not None and push_tau_s > 0 else 0.0) + math.hypot(*push_ff)
     why = track.check(now, out.setpoint, v.pos, max(0.0, math.hypot(tw[0], tw[1]) - lean))
     if why:
         descent.target = v.pos[:2]
