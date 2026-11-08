@@ -33,6 +33,15 @@ def route_to_odom(route_fl: Sequence[Sequence[float]], takeoff_xy: Any, takeoff_
     return np.asarray(takeoff_xy, dtype=float)[:2] + F @ R.T
 
 
+def body_to_odom(v_body: Any, q_wxyz: Any) -> np.ndarray:
+    """Velocity from a nav_msgs/Odometry twist (expressed in child_frame_id, base_link FLU) -> the odom frame, which is
+    what LocalNav.step wants: v_odom = R(q) v_body, q = the same message's pose orientation (w, x, y, z).
+    (Passing twist.linear straight in is only right at yaw 0: at a 90 deg turn the pose prediction and the shield
+    would roll the wrong velocity. Hinson's review.)"""
+    from nav.pose_buffer import quat_wxyz_to_mat
+    return quat_wxyz_to_mat(*np.asarray(q_wxyz, dtype=float)) @ np.asarray(v_body, dtype=float)[:3]
+
+
 def status_dict(cmd: Any) -> dict[str, Any]:
     """The per-cycle status as plain JSON-able numbers."""
     r = cmd.mppi
@@ -42,7 +51,8 @@ def status_dict(cmd: Any) -> dict[str, Any]:
     if r is not None:
         out.update(s=round(r.s, 3), e_lat=round(r.e_lat, 3), ess=round(r.ess, 1), lam=r.lam if math.isfinite(r.lam) else None,
                    crash_frac=round(r.crash_frac, 3), side=r.side, blocked=r.blocked, min_d_plan=round(r.min_d_plan, 3),
-                   best_cost=round(r.best_cost, 2), ms=round(r.ms, 1))
+                   best_cost=round(r.best_cost, 2), ms=round(r.ms, 1), shielded=r.shielded,
+                   pose_age=round(r.pose_age, 3), pose_age_clamped=r.pose_age_clamped)
     return out
 
 

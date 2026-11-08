@@ -344,3 +344,32 @@ def test_pose_age_is_capped_and_never_negative():
     assert plan_start(5.0) == pytest.approx(plan_start(0.5))
     assert plan_start(-1.0) == pytest.approx(plan_start(0.0))
     assert plan_start(0.5) > plan_start(0.0)
+
+
+
+def test_pose_age_is_reported_raw_with_a_clamp_flag():
+    P, vref = straight_path()
+    m = Mppi(corridor_map(), P, vref)
+    r = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=2.0)                    # e.g. a stamp on the wrong clock
+    assert r.pose_age == 2.0 and r.pose_age_clamped
+    r = m.step((1.0, 0.0), (0.3, 0.0), pose_age_s=0.04)
+    assert r.pose_age == 0.04 and not r.pose_age_clamped
+
+
+
+def test_inside_the_crash_radius_it_escapes_instead_of_freezing():
+    """Hinson: pushed inside r_drone + r_buffer, every rollout used to crash at step 0 (BLOCKED, no recovery)."""
+    P, vref = straight_path()
+    m = Mppi(corridor_map(width=1.2), P, vref)                             # walls at y = +-0.6
+    y0 = 0.6 - (m.p.r_drone + m.p.r_buffer) + 0.02                         # 2 cm inside the crash radius of y = +0.6
+    r = m.step((2.0, y0), (0.0, 0.0))
+    assert not r.blocked
+    x, v = np.array([2.0, y0]), np.zeros(2)
+    a = math.exp(-m.p.dt / m.p.tau)
+    b = m.p.tau * (1 - a)
+    for _ in range(30):
+        r = m.step(x, v)
+        u = np.array(r.u)
+        x = x + u * m.p.dt + (v - u) * b
+        v = u + (v - u) * a
+    assert x[1] < y0 - 0.02                                               # it moved away from the wall

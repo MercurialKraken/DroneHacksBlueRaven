@@ -27,8 +27,8 @@ class MppiShadow(Node):
         prm = lambda k, v: self.declare_parameter(k, v).value  # noqa: E731
         with open(prm("route_file", "")) as f:
             self.route = json.load(f)["route"]
-        self.mppi = MppiFollow(float(prm("mppi_v_cruise_mps", 0.15)), float(prm("mppi_tau_s", 0.55)),
-                               float(prm("mppi_dead_time_s", 0.0)))
+        self.mppi = MppiFollow(float(prm("mppi_v_cruise_mps", 0.15)), float(prm("mppi_tau_s", 0.9)),
+                               float(prm("mppi_dead_time_s", 0.6)))
         self.pub = MppiPublisher(self, z=float(prm("height_m", 0.7)), debug=True, debug_hz=2.0)
         self.base_frame = prm("base_frame", "base_link")
         self.phase, self.pad, self.t_odom, self.K, self.T, self.flying = "wait", None, -1e9, None, None, False

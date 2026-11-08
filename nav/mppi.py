@@ -161,6 +161,8 @@ class MppiResult:
     ms: float                              # compute time (ms)
     plan: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 2)))   # predicted positions (H x 2)
     shielded: bool = False                 # the safety shield overrode the plan with a brake
+    pose_age: float = 0.0                  # the pose age passed in (s, raw, before the clamp)
+    pose_age_clamped: bool = False         # pose_age was outside [0, max_pose_age_s]: check the caller's stamp clock
     # debug only (Mppi.debug_samples > 0): a subset of the rollouts and their weights, and the reference
     samples: np.ndarray = field(repr=False, default_factory=lambda: np.zeros((0, 0, 2)))
     sample_w: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
@@ -183,6 +185,7 @@ class Mppi:
         self._side, self._side_age = 0, 0
         self.v_cap = math.inf                                        # extra speed cap (set_speed_cap), e.g. no depth
         self._inflight: list[np.ndarray] = []                        # the last commands sent, newest last (<= 6 s)
+        self._d_now: float | None = None                             # clearance at the (predicted) start this cycle
         self._vr_now = self.xp.full((self.p.horizon, 2), 1.0)       # the reference velocities this cycle
         self.debug_samples = 0                                       # >0: return that many rollouts (debug/vis only)
         self.rng = self.xp.random.default_rng(self.p.seed)
@@ -283,6 +286,17 @@ class Mppi:
              + G[i0, j0 + 1] * (1 - fu) * fv + G[i0 + 1, j0 + 1] * fu * fv)
         return xp.where(inside, d, -1.0)
 
+    def note_sent(self, u: Any, replace_last: bool) -> None:
+        """Record the command actually SENT this cycle (the pose prediction replays these): replace this cycle's
+        planned command (the caller overrode it, e.g. zero on ARRIVED/BLOCKED) or append one (a cycle without a plan,
+        e.g. WAIT)."""
+        u = np.asarray(_to_np(u), float)[:2].copy()
+        if replace_last and self._inflight:
+            self._inflight[-1] = u
+        else:
+            self._inflight = (self._inflight + [u])[-60:]
+        self.u_last = u
+
     def reset(self, s_hint: float | None = None) -> None:
         """Forget the plan, the last command and the detour side (e.g. after a pilot takeover)."""
         self.U[:] = 0.0
@@ -381,7 +395,10 @@ class Mppi:
         xp, p = self.xp, self.p
         seq = xp.concatenate([xp.asarray(u, dtype=float)[None], self.brake_seq(u, p.horizon)], axis=0)
         X, _ = self.rollout(x0, v0, seq[None])
-        return bool(xp.min(self.clearance(X[0])) >= p.r_drone + p.shield_margin)
+        need = p.r_drone + p.shield_margin
+        if self._d_now is not None and self._d_now < need:          # already closer: just don't get closer still
+            need = max(self._d_now, 0.0)
+        return bool(xp.min(self.clearance(X[0])) >= need)
 
     def rollout(self, x0: Any, v0: Any, V: Any) -> tuple[Any, Any]:
         """Exact first-order-lag rollout of command sequences V (K, H, 2): positions and velocities after each step."""
@@ -411,7 +428,12 @@ class Mppi:
         d = self.clearance(X)
         dV = xp.diff(xp.concatenate([xp.broadcast_to(xp.asarray(u_last), (K, 1, 2)), V], axis=1), axis=1)
         r_crash = p.r_drone + p.r_buffer
-        obs = p.w_obs * xp.exp(xp.minimum(-(d - r_crash) / p.obs_len, 50.0))
+        if self._d_now is not None and self._d_now < r_crash:
+            # already inside the crash radius (wind, jitter): only getting CLOSER than now is a crash, so moving away
+            # stays possible instead of every rollout crashing at step 0 (BLOCKED with no recovery)
+            r_crash = max(self._d_now, 0.0)                          # no slack: re-applied every cycle, a 1 cm
+                                                                     # allowance let it creep into a dead-end wall
+        obs = p.w_obs * xp.exp(xp.minimum(-(d - (p.r_drone + p.r_buffer)) / p.obs_len, 50.0))
         step = (p.q_lat * e_lat ** 2 + p.q_lon * e_lon ** 2
                 + p.q_vel * xp.sum((Vel - vr[None]) ** 2, axis=-1)
                 + obs + p.w_du * xp.sum(dV ** 2, axis=-1) / (p.dt * p.dt))
@@ -501,6 +523,7 @@ class Mppi:
         targets = xp.stack(targets)
         n_noisy = max(1, K - int(targets.shape[0]))
         V = self.sample(u_last, targets, tg, nm, n_noisy)
+        self._d_now = float(self.clearance(xp.asarray(x0)[None])[0])
         X, Vel = self.rollout(x0, v0, V)
         c = self.costs(X, Vel, V, u_last, (pr, vr, tg, nm))
         S, crashed = c["S"], c["crashed"]
@@ -535,9 +558,10 @@ class Mppi:
                    "reference": _to_np(pr)}
         u = (float(U_new[0, 0]), float(U_new[0, 1]))
         self.u_last = np.array(u)
-        self._inflight = (self._inflight + [self.u_last.copy()])[-60:]
+        self._inflight = (self._inflight + [self.u_last.copy()])[-60:]   # replaced by note_sent() if overridden
         self.U = xp.concatenate([U_new[1:], U_new[-1:]], axis=0)    # warm start: shift by one step
         return MppiResult(u=u, s=self.s_now, e_lat=e_now, lam=lam, ess=float(ess),
                           best_cost=float(xp.min(S)), crash_frac=float(xp.mean(crashed.astype(float))),
-                          side=side, blocked=blocked, shielded=shielded, min_d_plan=float(xp.min(self.clearance(Xp[0]))),
+                          side=side, blocked=blocked, shielded=shielded,
+                          pose_age=float(pose_age_s), pose_age_clamped=bool(age != float(pose_age_s)), min_d_plan=float(xp.min(self.clearance(Xp[0]))),
                           ms=(time.perf_counter() - t0) * 1e3, plan=_to_np(Xp[0]), **dbg)
