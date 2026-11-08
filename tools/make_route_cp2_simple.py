@@ -58,6 +58,10 @@ HOVER_S = 10.0                  # refnav's hover_s. After the climb it holds thi
                                 # 160449 is the take-off drift carried along. The hold also tests it: back on the point =
                                 # supported; settling ~0.2 m to one side = a persistent push instead. Time-based, not
                                 # converge-based (no code change); 10 s ~ 4-5 time constants of refnav's position loop
+CHELSEA_SPEED_MPS = 0.10        # route1-chelsea only (Chelsea, 2026-11-07 night): slower; arc turn ~9 deg/s
+CHELSEA_HEIGHT_M = 0.40         # route1-chelsea only: low, a shorter climb so less take-off drift. NOTE refnav.launch.py's
+                                # height_m launch argument OVERRIDES this, so launch with HEIGHT=0.4. 0.4 m: the flight
+                                # interface's floor is 0.30 m; the drone's underside passes ~0.10 m over the 0.30 m cone
 
 
 def samples(p: np.ndarray, q: np.ndarray) -> np.ndarray:
@@ -159,8 +163,11 @@ def main() -> int:
                f"turn shift {TURN_SHIFT_M:+.3f} m from the best; map min {min(on_map):.3f} m. {cone[0].upper()}{cone[1:]}.")
         pts = ",\n".join(f"  [{fw:.3f}, {lf:.3f}]" for fw, lf in route)
         back = (f"{NAME_CHELSEA}: after the climb, HOLD {HOVER_S:.0f} s over the take-off point remembered before "
-                "lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below. ")
-        for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, {**fly, "hover_s": HOVER_S}, back)):
+                f"lift-off (refnav hover_s), so the take-off drift is flown back out, THEN the route below, at "
+                f"{CHELSEA_SPEED_MPS} m/s and {CHELSEA_HEIGHT_M} m (launch with HEIGHT={CHELSEA_HEIGHT_M}: the launch "
+                "argument overrides this file's height_m). The waypoints are the same as route_v7_cp2_simple's. ")
+        chelsea = {**fly, "hover_s": HOVER_S, "speed_mps": CHELSEA_SPEED_MPS, "height_m": CHELSEA_HEIGHT_M}
+        for name, prm, note in ((NAME, fly, ""), (NAME_CHELSEA, chelsea, back)):
             text = ('{\n "from": ' + json.dumps(note + src) + ',\n "frame": "metres from the take-off pose: [forward, left]; '
                     'launch_key ' + key + '",\n "labels": ' + json.dumps(["arc start (turn right)", "arc middle (45 deg)", "arc end (heading through CP2)", "past CP2: land"]) +
                     ',\n "route": [\n' + pts + '\n ],\n "params": ' + json.dumps(prm) + '\n}\n')
