@@ -113,7 +113,8 @@ class Params:
     home_tol_m: float = 0.05        # start the approach only back over the launch point (both axes within this) ...
     home_wait_s: float = 6.0        # ... or after this long at height anyway
     depth_median_n: int = 5         # depth: median of the last N frames (one wild frame can't move it)
-    vio_var_m2: float = 0.03        # cuVSLAM's own pose variance (x or y) above this (normal in flight ~3e-3-9e-3) ...
+    vio_var_m2: float = 0.10        # cuVSLAM's own pose variance (x or y) above this (normal in flight ~3e-3-9e-3; Darion: 0.10,
+                                    # 0.03 landed two good T4 runs on 0.033 / 0.044; T4 run 2's real failure still trips it 0.25 s early) ...
     vio_var_count: int = 2          # ... on this many samples in a row: land straight down (T4 run 2: 0.8 s warning)
     var_check_after_m: float = 1.0  # ... checked only after lift-off AND once this far forward (Darion): near the floor
                                     # the variance is naturally 0.01-0.05 (it grounded T4 run 3 on the pad). The T4's
