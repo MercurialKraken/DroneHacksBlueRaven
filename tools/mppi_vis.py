@@ -4,7 +4,7 @@
 
 Per frame: true walls (grey) and nets (blue, invisible to depth), the low cone (orange, flown over), the depth grid's
 obstacle cells (black), the waypoint lines (dashed), the re-anchored reference (green), sampled rollouts coloured by
-their weight (bright = heavy; crashed ones red), the chosen plan (magenta), the drone (circle = 0.28 m radius, line =
+their weight (bright = heavy; crashed ones red), the chosen plan (magenta), the drone (circle = its 0.29 m radius, line =
 heading = camera direction) and its track.
 """
 from __future__ import annotations

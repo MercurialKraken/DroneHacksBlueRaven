@@ -164,7 +164,9 @@ class LocalNav:
         k = int(np.clip(np.searchsorted(ps, s, side="right"), 1, len(ps) - 1))
         return math.atan2(self.mppi.py[k] - self.mppi.py[k - 1], self.mppi.px[k] - self.mppi.px[k - 1])
 
-    def step(self, pos: Any, vel: Any, t: float) -> NavCommand:
+    def step(self, pos: Any, vel: Any, t: float, pose_stamp: float | None = None) -> NavCommand:
+        """One 10 Hz cycle. pos/vel: odometry (odom frame); t: now; pose_stamp: the odometry's capture stamp (same
+        clock as t). MPPI predicts through the pose's age, so stale poses (delivery gaps) don't steer it wrong."""
         depth_age = math.inf if self.t_depth is None else max(t - self.t_depth, 0.0)
         if self.depth_frames < self.p.min_depth_frames:
             self.t_last = t
@@ -180,7 +182,8 @@ class LocalNav:
             self.mppi.set_speed_profile(self.v_ref * scale)
             self.mppi.set_speed_cap(self.p.v_no_depth if stale else None)
             self._scale = scale
-        r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2])
+        age = 0.0 if pose_stamp is None else max(t - pose_stamp, 0.0)
+        r = self.mppi.step(np.asarray(pos, float)[:2], np.asarray(vel, float)[:2], pose_age_s=age)
         dt = self.mppi.p.dt if self.t_last is None else max(t - self.t_last, 0.0)
         self.t_last = t
         if self._prog[0] is None or r.s >= self._prog[1] + self.p.stuck_m:

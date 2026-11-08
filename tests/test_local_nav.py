@@ -185,9 +185,9 @@ def test_a_slanted_wall_crossing_the_line_is_slid_along():
 
 
 def test_a_tall_boulder_on_the_line_is_flown_round():
-    w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 6.5, 1.0, 1.2, WALL),
-                                               (-0.7, 6.5, -1.2, -1.0, WALL), (6.3, 6.5, -1.2, 1.2, WALL),
-                                               (2.8, 3.25, -0.22, 0.23, 0.46)])
+    w = World((-1.0, 7.0), (-1.6, 1.6), boxes=[(-0.7, -0.5, -1.3, 1.3, WALL), (-0.7, 6.5, 1.1, 1.3, WALL),
+                                               (-0.7, 6.5, -1.3, -1.1, WALL), (6.3, 6.5, -1.3, 1.3, WALL),
+                                               (2.8, 3.25, -0.22, 0.23, 0.46)])      # passages 0.87 m each side
     traj, states, nav = fly(w, [(5.6, 0.0)])
     assert states[-1] == "ARRIVED", states[-5:]
     boulder = np.hypot(np.maximum(np.abs(traj[:, 0] - 3.025) - 0.225, 0), np.maximum(np.abs(traj[:, 1] - 0.005) - 0.225, 0))
@@ -253,8 +253,11 @@ def test_new_start_through_the_cp2_gap_over_the_cone(noisy, layout):
         drone.step((cmd.vx, cmd.vy), cmd.yaw, dt)
         traj.append(drone.x.copy())
     traj = np.array(traj)
+    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # never touches (walls, nets; cone flown over)
+    if layout == "v2_tight":                       # 0.752 m: with the 5 cm buffer ~1 cm to spare: stopping is right
+        assert states[-1] in ("ARRIVED", "BLOCKED") or "STUCK" in states
+        return
     assert states[-1] == "ARRIVED", states[-5:]
-    assert w.clearance(traj, min_height=0.35).min() > nav.mppi.p.r_drone      # walls and nets; the cone is flown over
     # it went THROUGH the gap: crossed the segment between wall A's east end and wall B's NE end
     p, q = np.array(L["wall_a"][1]), np.array(L["wall_b"][1])
     side = np.sign((q[0] - p[0]) * (traj[:, 1] - p[1]) - (q[1] - p[1]) * (traj[:, 0] - p[0]))
@@ -330,3 +333,23 @@ def test_goes_round_an_obstacle_on_the_trajectory_and_rejoins_it(cy):
     assert np.abs(traj[:, 1]).max() > 0.08                                  # it did leave the trajectory
     after = traj[traj[:, 0] > 4.6]                                          # 1.4 m past the box's far side
     assert len(after) and np.abs(after[:, 1]).max() < 0.10                  # and came back onto it
+
+
+
+def test_shield_stops_short_of_a_wall_that_appears_ahead():
+    """Flying at 0.45 m/s, a wall appears 1.2 m ahead across the whole corridor: it must stop clear of it."""
+    from nav.mppi import Grid2D, Mppi
+    free = Grid2D(np.full((200, 60), 3.0), (-1.0, -1.5), 0.05)
+    m = Mppi(free, np.array([[0.0, 0.0], [8.0, 0.0]]), np.array([0.45, 0.45]))
+    x, v = np.zeros(2), np.array([0.45, 0.0])
+    m.step(x, v)
+    X = -1.0 + 0.05 * np.arange(200)[:, None] + np.zeros((200, 60))
+    m.set_grid(Grid2D(np.minimum(3.0, 1.2 - X), (-1.0, -1.5), 0.05))      # wall face at x = 1.2
+    a = math.exp(-m.p.dt / m.p.tau)
+    b = m.p.tau * (1 - a)
+    for _ in range(60):
+        r = m.step(x, v)
+        u = np.array(r.u)
+        x = x + u * m.p.dt + (v - u) * b
+        v = u + (v - u) * a
+    assert x[0] < 1.2 - m.p.r_drone

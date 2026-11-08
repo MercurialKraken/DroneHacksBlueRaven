@@ -44,8 +44,9 @@ class Errors:
     """What the real drone gets wrong, between the true world and the controller.
 
     Sources (2026-11-07, skybeta-09 unless noted):
-      odometry  /visual_slam/tracking/odometry at 29 Hz; arrival gaps p99 67 ms, max 167 ms on the course1 walk and up
-                to 390 ms under load (bench load tests); one 3.6 cm jump in course1; vision delay at PX4 52-58 ms.
+      odometry  /visual_slam/tracking/odometry 29.5 Hz. IN FLIGHT (hover_160526, Darion): delivery bunching, arrival gaps
+                p99 306 ms, max 0.351 s, ~10 gaps >= 0.3 s in 43 s -> realistic: a 0.25-0.35 s gap every ~4 s. EV age at
+                PX4 p50 58 ms, p90 259 ms. course1 walk: one 3.6 cm jump. Hover drift from take-off 0.12 m mean, 0.22 max.
       drift     not measurable from today's bags (no ground truth; course1 had the tilted-start frame). Calibrated on
                 Hinson's T4 cuVSLAM runs (est vs truth p95 3-6 cm over the course): realistic ~2-3x that (1 % of
                 distance + 0.03 m per radian of yaw, slip direction redrawn every 0.5 rad of turning), harsh ~10x (3 %
@@ -79,12 +80,12 @@ class Errors:
 PRESETS = {
     "perfect": Errors(),
     "old_noise": Errors(depth_k=0.006, depth_dropout=0.65, depth_outliers=0.01),
-    "realistic": Errors(odom_delay_s=0.08, gap_per_s=1 / 20, drift_frac=0.01, yaw_drift_dpm=1.0,
+    "realistic": Errors(odom_delay_s=0.08, gap_per_s=1 / 4, gap_s=(0.25, 0.35), drift_frac=0.01, yaw_drift_dpm=1.0,
                         yaw_slip_m_per_rad=0.03, jump_per_s=1 / 30, jump_m=0.04, depth_k=0.015, depth_dropout=0.65,
                         depth_outliers=0.02, depth_delay_s=0.06, tau_true=0.65, act_delay_s=0.05, acc_max=3.0,
                         vel_noise=0.02),
     # realistic, with the PX4 response Hinson fitted on the T4 through the real flight_interface: tau 0.9 s + 0.6 s dead time
-    "t4plant": Errors(odom_delay_s=0.08, gap_per_s=1 / 20, drift_frac=0.01, yaw_drift_dpm=1.0,
+    "t4plant": Errors(odom_delay_s=0.08, gap_per_s=1 / 4, gap_s=(0.25, 0.35), drift_frac=0.01, yaw_drift_dpm=1.0,
                       yaw_slip_m_per_rad=0.03, jump_per_s=1 / 30, jump_m=0.04, depth_k=0.015, depth_dropout=0.65,
                       depth_outliers=0.02, depth_delay_s=0.06, tau_true=0.9, act_delay_s=0.6, acc_max=3.0,
                       vel_noise=0.02),
@@ -169,7 +170,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
     wps = route_to_odom(route["route"], launch, yaw0)            # the odom frame starts at take-off = map here
     from nav.local_nav import LocalNavParams
     from nav.mppi import MppiParams
-    mp = MppiParams(tau=err.tau_true, dead_time_s=err.act_delay_s + err.odom_delay_s) if matched else None
+    mp = MppiParams(tau=err.tau_true, dead_time_s=err.act_delay_s) if matched else None
     nav = LocalNav(wps, launch, yaw0, nav=LocalNavParams(v_cruise=speed) if speed else None, mppi=mp)
     nav.mppi.debug_samples = 120 if keep_frames else 0
     p = nav.mppi.p
@@ -220,7 +221,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
         if t >= t_gap_end:
             hist.append((t, to_b(x[None])[0], _rot(eyaw) @ v))
         avail = [h for h in hist if h[0] <= t - err.odom_delay_s + 1e-9]
-        pos_b, vel_b = (avail[-1][1], avail[-1][2]) if avail else (launch.copy(), np.zeros(2))
+        pos_b, vel_b, stamp_b = (avail[-1][1], avail[-1][2], avail[-1][0]) if avail else (launch.copy(), np.zeros(2), t)
         max_err = max(max_err, float(np.hypot(*(to_b(x[None])[0] - x))))
         cmd = None
         if phase == "TAKEOFF":
@@ -231,7 +232,7 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
             if t - t_phase >= 2.0:
                 phase, t_phase = "FOLLOW", t
         elif phase == "FOLLOW":
-            cmd = nav.step(pos_b, vel_b, t)
+            cmd = nav.step(pos_b, vel_b, t, pose_stamp=stamp_b if matched else None)
             act_q.append((t + err.act_delay_s, _rot(-eyaw) @ np.array([cmd.vx, cmd.vy])))   # flown in the true frame
             dy = (cmd.yaw - eyaw - yaw + math.pi) % (2 * math.pi) - math.pi
             dyaw = float(np.clip(dy, -math.radians(90) * dt, math.radians(90) * dt))
