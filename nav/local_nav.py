@@ -129,7 +129,9 @@ class LocalNav:
         if self.depth_frames < self.p.min_depth_frames:
             self.t_last = t
             return NavCommand(0.0, 0.0, self.yaw_cmd, "WAIT", None, depth_age)
-        if self._dirty:
+        origin = self.grid.origin.copy()
+        self.grid.follow(np.asarray(pos, float)[:2])                  # the window follows the drone even without depth
+        if self._dirty or not np.array_equal(origin, self.grid.origin):
             self.mppi.set_grid(self.grid.grid2d())
             self._dirty = False
         stale = depth_age > self.p.depth_stale_s
