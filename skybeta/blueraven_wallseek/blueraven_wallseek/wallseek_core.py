@@ -42,7 +42,7 @@ class Params:
     # height, then hold it. The tube's free space is centred ~0.95 m above the floor (course SDF: 0.71 m clearance
     # at z 0.9-1.0, only 0.36 m at 0.4), and height is from the pad (centre ~0.07 m higher). Over the 0.30 m CP2 cone
     # (~60% along the leg) the drone is at ~0.67 m (T4 v3 run at 0.4 m: its centre dipped to 0.33 m there).
-    leg_climb_to_m: float = 0.85    # 0 disables (stay at height_m)
+    leg_climb_to_m: float = 0.55    # Darion: 0.55 (0.85 = the tube's centre was too high for him); 0 disables
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn
     pause_s: float = 1.5            # stop at each waypoint before turning

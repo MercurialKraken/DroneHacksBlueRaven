@@ -209,9 +209,9 @@ def test_climbs_on_the_gap_leg_not_at_take_off():
     climb_top = max(r[2][2] for r in s.trace[:first_leg])             # take-off, approach, stop, first turn
     assert climb_top < 0.47, climb_top                                  # take-off and P1 stay at ~0.40
     over_cone = [r[2][2] for r in s.trace if r[1] == "leg" and math.dist(r[2][:2], CONE) < 0.45]
-    assert over_cone and min(over_cone) > 0.55, min(over_cone or [0])   # well above the 0.30 m cone
+    assert over_cone and min(over_cone) > 0.44, min(over_cone or [0])   # above the 0.30 m cone
     leg2 = [r[2][2] for r in s.trace if r[1] == "leg" and r[2][1] > 2.2]
-    assert leg2 and abs(sum(leg2) / len(leg2) - 0.85) < 0.06            # tunnel height on the way to P4
+    assert leg2 and abs(sum(leg2) / len(leg2) - 0.55) < 0.05            # 0.55 m on the way to P4
 
 
 def test_noisy_vision_velocity_at_the_stop_still_ends_the_stop_and_turns():
