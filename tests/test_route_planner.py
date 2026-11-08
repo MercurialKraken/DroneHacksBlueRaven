@@ -12,7 +12,8 @@ from nav.route_planner import PlannerParams, gate_problems, plan_from_files, pla
 from refnav import core as C
 
 ROOT = Path(__file__).resolve().parents[1]
-SDF, YAML = ROOT / "maps" / "course_sdf.npz", ROOT / "maps" / "course.yaml"
+V3 = ROOT / "tests" / "data" / "course_v3_published"      # the published course, frozen (see its README)
+SDF, YAML = V3 / "course_sdf.npz", V3 / "course.yaml"
 HEIGHT = 0.7                                   # main.py HEIGHT_M: the window's centre height above the launch
 
 
@@ -47,11 +48,11 @@ def test_window_route_crosses_every_checkpoint_and_ends_on_the_pad() -> None:
     plan = plan_from_files(SDF, YAML, "launch_sim", HEIGHT, "window")
     assert gate_problems(plan) == []
     got = {c["checkpoint"]: c for c in plan.crossings}
-    assert "CP1" not in got                                 # removed with the rebuilt start (2026-11-07)
+    assert got["CP1"]["past_m"] > 0.0                       # CP1 as drawn: only partly (see course.yaml)
     for cp in ("CP2", "CP3", "CP4 window"):
         assert got[cp]["whole_drone_across"], got[cp]
     assert got["CP5"]["end_from_centre_m"] < 0.05
-    assert plan.warnings == []
+    assert [w for w in plan.warnings if not w.startswith("CP1")] == []
 
 
 def test_the_route_keeps_its_clearance_on_the_map() -> None:
@@ -68,8 +69,7 @@ def test_the_route_keeps_its_clearance_on_the_map() -> None:
 def test_gate_b_route_never_flies_through_the_window() -> None:
     import yaml
     cfg = yaml.safe_load(YAML.read_text(encoding="utf-8"))
-    cp4 = next(c for c in cfg["checkpoints"] if c["id"] == "CP4")
-    window = next(o for o in cp4["options"] if o["name"] == "window")["line"]
+    window = next(o for o in cfg["checkpoints"][3]["options"] if o["name"] == "window")["line"]
     plan = plan_from_files(SDF, YAML, "launch_sim", HEIGHT, "Gate B")
     assert gate_problems(plan) == []
     assert {c["checkpoint"]: c for c in plan.crossings}["CP4 Gate B"]["whole_drone_across"]

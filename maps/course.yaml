@@ -118,7 +118,7 @@ sanity:
   - {name: "first corridor centre",         at: [-2.515, 1.6, 1.0],      min: 0.50, max: 0.55}  # 1.07 m wide
   - {name: "next to the net",               at: [-2.95, 1.6, 1.0],       min: 0.08, max: 0.12}
   - {name: "next to the net (loc)",         at: [-2.95, 1.6, 1.0],       field: localization, min: 0.93}   # no wall near: M1 removed
-  - {name: "CP2 gap centre",                at: [-1.150, 2.286, 1.0],    min: 0.30, max: 0.40}  # ~0.75 m gap
+  - {name: "CP2 gap centre",                at: [-1.150, 2.286, 1.0],    min: 0.34, max: 0.40}  # ~0.75 m gap
   - {name: "CP2 gap at flight height",      at: [-1.150, 2.286, 0.77],   min: 0.30}             # over the cone
   - {name: "old Gate A strip, now open",    at: [0.305, 2.0, 1.0],       min: 0.6}              # M3 removed
   - {name: "tunnel centre",                 at: [2.3115, 0.457, 0.94],   min: 0.68, max: 0.75}  # 1.46 m inner width
@@ -126,8 +126,8 @@ sanity:
   - {name: "gap between A1 and C2b",        at: [-0.408, -0.576, 1.0],   min: 0.45}
   - {name: "window centre",                 at: [-0.471, -2.272, 0.762], min: 0.42, max: 0.47}  # 0.914 m square
   - {name: "M1 gone",                       at: [-1.9305, 1.3, 1.0],     min: 0.3}
-  - {name: "inside start wall A",           at: [-2.0, 2.640, 1.0],      max: 0.0}
-  - {name: "inside start wall B",           at: [-1.385, 1.347, 1.0],    max: 0.0}
+  - {name: "inside start wall A",           at: [-2.0, 2.690, 1.0],      max: 0.0}
+  - {name: "inside start wall B",           at: [-1.342, 1.320, 1.0],    max: 0.0}
   - {name: "inside the CP2 cone",           at: [-1.369, 2.335, 0.15],   max: 0.0}
   - {name: "inside barrier 2",              at: [-0.6, 0.457, 1.0],      max: 0.0}
   - {name: "inside boulder 1",              at: [2.0115, -2.4685, 0.27], max: -0.1}

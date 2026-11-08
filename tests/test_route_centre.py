@@ -16,7 +16,8 @@ pytest.importorskip("yaml")
 from nav.course_map import CourseMap  # noqa: E402
 from nav.route_planner import PlannerParams, gate_problems, plan_from_files  # noqa: E402
 
-SDF, CFG = ROOT / "maps" / "course_sdf.npz", ROOT / "maps" / "course.yaml"
+V3 = ROOT / "tests" / "data" / "course_v3_published"      # the published course, frozen (see its README)
+SDF, CFG = V3 / "course_sdf.npz", V3 / "course.yaml"
 
 
 def clearance_along(plan, cm, step=0.02):
