@@ -259,7 +259,7 @@ def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_hold
 def test_offboard_ending_during_the_descent_stops_the_twists():
     m, sk, sent = flight(pilot_takes_over_at=0.5, takeover_phase="land", limit_s=120.0)
     t_over = next(t for t, ph, _ in sent if ph == "takeover")
-    assert m.phase == "land" and sk.armed and sk.p[2] < -0.1    # the pilot has it, in the air
+    assert m.result.startswith("yielded") and sk.armed and sk.p[2] < -0.1    # the pilot has it, in the air
     assert [t for t, ph, _ in sent if ph == "land" and t > t_over + 4 * DT] == []
 
 

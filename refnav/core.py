@@ -418,6 +418,10 @@ class Mission:
                 self._end(now, out, f"yielded: PX4 left Offboard (nav_state {v.nav_state}): a pilot or a failsafe has it")
                 out.phase = self.phase
                 return out
+        if self.phase == "land" and self.land_auto_seen and v.armed and v.nav_state not in (None, NAV_AUTO_LAND):
+            self._end(now, out, f"yielded: PX4 left the landing (nav_state {v.nav_state}): a pilot or a failsafe has it")
+            out.phase = self.phase
+            return out
         if self.land_request is not None and self.phase in ("wait", "arm") + AIRBORNE:
             why = f"landing requested: {self.land_request}"
             if self.phase == "wait":
