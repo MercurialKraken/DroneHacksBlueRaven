@@ -14,7 +14,8 @@ if str(_repo_root()) not in sys.path:
 from refnav import core as C  # noqa: E402
 from refnav import depth as D  # noqa: E402
 
-KP_XY = KP_Z = 1.0          # 1/s: PX4's MPC_XY_P 0.95 and MPC_Z_P 1.0, the loop a position setpoint gets
+KP_XY = 0.5                 # 1/s: under PX4's MPC_XY_P 0.95, as the twist reaches PX4's velocity loop after a dead time
+KP_Z = 1.0                  # 1/s: PX4's MPC_Z_P 1.0, the loop a position setpoint gets
 KP_YAW = 1.5                # 1/s on the heading error left after the yawspeed feed-forward
 DESCEND_MPS = 0.35          # PX4's land detector needs a commanded descent >= 1.1 x LNDMC_Z_VEL_MAX (0.25)
 GROUND_PRESS_MPS = 0.60     # on the ground GROUND_WAIT_S without PX4 disarming: press down firmer
@@ -25,11 +26,11 @@ ARRIVE_MPS, BRAKE_MAX_S = 0.10, 2.0  # brake to a stop before descending, at mos
 STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
 ODOM_STALE_S = 1.0          # real skybeta-09 odometry arrives with gaps up to 0.39 s under load
 HOLD_S = 0.25               # a shorter silence than STALE holds position (zero twist) instead of landing
-CORR_MAX_MPS = 0.25         # position-loop share of the twist: 0.25 m off at KP_XY 1, past the 0.20 m the reference waits at
+CORR_MAX_MPS = 0.25         # position-loop share of the twist: past the 0.20 m off the path the reference waits at
 XY_MAX_MPS = 0.5            # the 0.3 m/s routes plus their corner lead (<= 0.23 m/s); a jam never gets 1-1.5 m/s
-VEL_LAG_S = 0.55            # PX4's velocity loop, 1 / MPC_XY_VEL_P_ACC (1.8 on the drone; the T4 sim's 0.8 is 1.25 s)
+VEL_LAG_S = 0.55            # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone; the T4 sim fits 0.9 s + 0.6 s dead time
 TRACK_LAND_M = 0.40         # this far from the setpoint in follow: stop and land where it is
-STUCK_S, STUCK_FRAC = 2.0, 0.3  # moved under 30% of what was commanded over 2 s (a jam): stop and land
+STUCK_S, STUCK_M, STUCK_ASKED_M = 3.0, 0.10, 0.45  # moved < 0.10 m in 3 s while commanded >= 0.45 m (a jam): land
 LAND_HOLD_MPS = 0.15        # the descent's pull back over its landing point
 _Q_X180 = (0.0, 1.0, 0.0, 0.0)  # FLU <-> FRD, and ENU-about-the-pad <-> NED-about-the-pad
 
@@ -124,7 +125,7 @@ class Track:
             return None
         asked = sum(c * (t1 - t0) for (t0, _, c), (t1, _, _) in zip(self.hist, self.hist[1:]))
         moved = math.dist(self.hist[0][1], self.hist[-1][1])
-        if asked > 0.2 and moved < STUCK_FRAC * asked:
+        if asked >= STUCK_ASKED_M and moved < STUCK_M:
             return f"stuck: moved {moved:.2f} m in {STUCK_S:g} s while commanded {asked:.2f} m"
         return None
 

@@ -53,7 +53,7 @@ def generate_launch_description():
         DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info'),
         DeclareLaunchArgument('height_m', default_value='0.7', description='flight height above the pad, metres'),
         DeclareLaunchArgument('vel_lag_s', default_value='0.55',
-                              description='1 / MPC_XY_VEL_P_ACC: 0.55 on the drone (1.8), 1.25 on the T4 sim (0.8)'),
+                              description='twist -> velocity lag: 0.55 on the drone (1 / MPC_XY_VEL_P_ACC 1.8), 1.5 on the T4 sim (fitted)'),
         DeclareLaunchArgument('use_sim_time', default_value='false', description="'true' on the T4 simulator"),
         DeclareLaunchArgument('course', default_value=(ROOT / 'courses' / 'ACTIVE').read_text().strip(),
                               description="courses/<course>/: the course the route belongs to"),

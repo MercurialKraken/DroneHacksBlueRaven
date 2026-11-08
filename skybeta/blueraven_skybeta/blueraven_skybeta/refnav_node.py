@@ -28,7 +28,7 @@ class SkybetaRefNav(RefNav):
         self.start_max_m = float(self.declare_parameter("start_max_m", float("inf"), LOOSE).value)
         self.start_max_deg = float(self.declare_parameter("start_max_deg", float("inf"), LOOSE).value)
         self.descent, self.track = S.Descent(), S.Track()
-        # PX4's velocity-loop lag, 1 / MPC_XY_VEL_P_ACC: the drone's 1.8 by default, the T4 sim's 0.8 is 1.25 s
+        # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone by default; 1.5 s fits the T4 sim
         self.vel_lag_s = float(self.declare_parameter("vel_lag_s", S.VEL_LAG_S, LOOSE).value)
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.create_subscription(Odometry, self.declare_parameter(
