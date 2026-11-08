@@ -37,4 +37,7 @@ def generate_launch_description():
         DeclareLaunchArgument('depth_mode', default_value='assisted', description="'assisted' or 'blind'"),
         DeclareLaunchArgument('launch_key', default_value='launch',
                               description="course.yaml entry: 'launch' (the real mark) or 'launch_sim'"),
+        # blueraven.launch.py's own defaults, declared here too so this file can read them for refnav
+        DeclareLaunchArgument('odometry_topic', default_value='/visual_slam/tracking/odometry'),
+        DeclareLaunchArgument('odom_to_ned_yaw_offset_rad', default_value='0.0'),
         interface, refnav])
