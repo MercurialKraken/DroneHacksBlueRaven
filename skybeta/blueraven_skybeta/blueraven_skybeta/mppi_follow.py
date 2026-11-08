@@ -51,8 +51,10 @@ CMD_FIRST_S = 3.0           # follow started this long ago without one command f
 # jumped 2.3 m in a T4 hover facing a wall). MPPI then latches LOST (zero velocity) and refnav lands.
 JUMP_M, JUMP_MPS, JUMP_GAP_S = 0.15, 0.6, 1.0
 # MPPI's caps in flight (the library's 0.6 m/s is far too fast for 0.10 m/s flying):
-V_MAX_MIN, V_MAX_PER_CRUISE = 0.15, 1.5     # GROUND speed it may plan: max(0.15, 1.5 x cruise) = 0.15 at 0.10
-U_MAX_MIN, U_MAX_PER_CRUISE = 0.30, 3.0     # the COMMAND, leaning against the ~0.115 m/s push: 0.30 at 0.10
+# Sim sweep (route 1, real push, 0.10 m/s, both response models): ground 0.15 touched the west net 6/12 (too little
+# authority to claw back an unlearned push); 0.30/0.45 was 12/12 clean, min clearance 0.337 m (0.6/0.6: 0.315).
+V_MAX_MIN, V_MAX_PER_CRUISE = 0.30, 3.0     # GROUND speed it may plan: max(0.30, 3 x cruise) = 0.30 at 0.10
+U_MAX_MIN, U_MAX_PER_CRUISE = 0.45, 4.5     # the COMMAND, incl. leaning against the ~0.115 m/s push: 0.45
 
 
 def yaw_enu(q_xyzw: Any) -> float:

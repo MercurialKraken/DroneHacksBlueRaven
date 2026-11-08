@@ -368,10 +368,10 @@ def test_a_vio_jump_latches_lost_until_the_next_follow_start():
 
 
 def test_mppis_flight_speed_cap_follows_the_cruise():
-    p = M.MppiFollow(0.10, 0.9, 0.6).mppi_p                     # ground 0.15, command 0.30 at 0.10 m/s cruise
-    assert (p.v_max, p.v_lat, p.u_max) == (pytest.approx(0.15), pytest.approx(0.15), pytest.approx(0.30))
+    p = M.MppiFollow(0.10, 0.9, 0.6).mppi_p                     # ground 0.30, command 0.45 at 0.10 m/s cruise
+    assert (p.v_max, p.v_lat, p.u_max) == (pytest.approx(0.30), pytest.approx(0.30), pytest.approx(0.45))
     p = M.MppiFollow(0.15, 0.9, 0.6).mppi_p
-    assert (p.v_max, p.u_max) == (pytest.approx(0.225), pytest.approx(0.45))
+    assert (p.v_max, p.u_max) == (pytest.approx(0.45), pytest.approx(0.675))
 
 
 def test_a_vio_jump_in_flight_lands_where_the_drone_really_is():
