@@ -34,7 +34,10 @@ from build_course_sdf import parse_obj_groups, select_groups  # noqa: E402
 
 
 def planning_mesh(cfg: dict, here: Path) -> trimesh.Trimesh:
-    groups = parse_obj_groups(here / cfg["course"]["mesh"])
+    m = cfg["course"]["mesh"]
+    groups = {}
+    for p in (m if isinstance(m, list) else [m]):                 # the published course + later changes
+        groups.update(parse_obj_groups(here / p))
     spec = cfg["build"]["fields"]["planning"]
     names = select_groups(list(groups), spec.get("include", []), spec.get("exclude", []))
     tris = np.concatenate([groups[n] for n in names])

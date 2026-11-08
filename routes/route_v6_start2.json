@@ -1,0 +1,31 @@
+{
+ "from": "nav.route_planner on maps/course.yaml dronehacks-2026-v3-start2 (rebuilt start from Darion's drawing, approx +-0.1 m), launch_key launch, 0.7 m, CP4 gate_b, keep_centre_m 0.02, digest 6fd534c73ad8. Checkpoint crossings (centre past the line, m): CP2 1.148, CP3 1.338, CP4 Gate B 2.207, CP5 0.011",
+ "frame": "metres from the take-off pose: [forward, left]; launch_key launch",
+ "labels": ["CP2 approach", "CP2", "", "", "", "CP3 approach", "CP3", "", "", "", "", "", "", "", "", "", "CP4 Gate B approach", "CP4 Gate B", "", "", "", "", "CP5"],
+ "route": [
+  [1.236, -1.365],
+  [1.536, -1.865],
+  [1.536, -2.365],
+  [0.836, -4.365],
+  [0.536, -4.665],
+  [-0.914, -4.815],
+  [-1.564, -4.815],
+  [-2.314, -4.065],
+  [-2.564, -3.815],
+  [-2.614, -3.715],
+  [-2.614, -3.315],
+  [-2.514, -3.165],
+  [-2.414, -3.065],
+  [-1.864, -3.015],
+  [-1.714, -3.115],
+  [-1.164, -3.165],
+  [-0.964, -2.965],
+  [-0.964, -2.365],
+  [-1.464, -2.065],
+  [-1.864, -1.965],
+  [-2.114, -1.715],
+  [-2.114, -0.865],
+  [-1.714, -0.465]
+ ],
+ "params": {"height_m": 0.7, "speed_mps": 0.3, "arrive_m": 0.15, "corridor_half_m": 0.35, "stop_m": 0.65, "min_corridor_coverage": 0.4}
+}
