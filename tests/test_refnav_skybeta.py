@@ -92,18 +92,19 @@ class Stack:
 def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at: float | None = None,
            limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow",
            carry: tuple[float, float, float] | None = None, pilot_waits_s: float = 0.0,
-           state_gap: tuple[float, float] | None = None):
+           state_gap: tuple[float, float] | None = None, odom_gap: tuple[float, float] | None = None):
     prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
     launch = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     m = C.Mission(prm, M.builder(cm, launch, prm.height_m + launch["z"], M.DRONE_RADIUS_M + 0.20, 0.3))
     sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps), C.Vehicle(), None, S.Descent()
-    state, t_state, t_arm = None, -math.inf, None
+    state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
     t = DT
     while t < limit_s and m.phase != "done":
-        pad = S.on_odom(v, pad, m.phase, *sk.odom())
-        m.on_health(t, S.healthy(state, t_state, t))
+        if odom_gap is None or not odom_gap[0] <= t < odom_gap[1]:
+            pad, t_odom = S.on_odom(v, pad, m.phase, *sk.odom()), t
+            m.on_health(t, S.healthy(state, t_state, t))
         gap = state_gap is not None and state_gap[0] <= t < state_gap[1]
         if round(t / DT) % 4 == 0 and not gap:
             state, t_state = sk.state(), t
@@ -113,7 +114,9 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.p[:2] += carry[:2]
             sk.yaw_enu += carry[2]
             carry = None
-        tw = descent.twist(t, v, state) if out.phase == "land" else S.twist(out, v, pad, prm.yaw_rate_dps, offset)
+        tw, land = S.command(out, v, pad, descent, state, t_odom, t_state, t, prm.yaw_rate_dps, offset)
+        if land:
+            m.request_land(land)
         if tw is not None:
             sk.twist(t, tw)
             sent.append((t, out.phase, tw))
@@ -189,6 +192,17 @@ def test_offboard_entered_before_the_mission_is_ready_descends_until_px4_disarms
         t += DT
     assert m.result.startswith("landed: armed in Offboard"), m.result
     assert not sk.armed and sent and all(tw[:2] == (0.0, 0.0) and tw[2] < 0 for tw in sent)
+
+
+@pytest.mark.parametrize("gap", ["odom", "state"])
+def test_a_silent_pose_or_state_in_flight_stops_and_lands_at_once(gap):
+    m, sk, sent = flight(**{f"{gap}_gap": (40.0, 1e9)})
+    assert [ph for t, ph, _ in sent if abs(t - 40.0) < DT / 2] == ["follow"]
+    late = 40.0 + (S.ODOM_STALE_S if gap == "odom" else S.STATE_STALE_S) + 0.2      # + one 5 Hz state period
+    assert all(tw == (0.0, 0.0, 0.0, 0.0) for t, ph, tw in sent if ph != "land" and t > late)
+    t_land = next(t for t, ph, _ in sent if ph == "land")
+    assert 40.0 < t_land <= late + DT, t_land
+    assert m.land_reason.startswith("landing requested"), m.land_reason
 
 
 def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_holds():

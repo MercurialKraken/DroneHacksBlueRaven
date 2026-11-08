@@ -20,7 +20,7 @@ class SkybetaRefNav(RefNav):
         # the SAME value the flight interface gets: it rotates poses by it, not twists, so we do
         self.yaw_offset = float(self.declare_parameter("odom_to_ned_yaw_offset_rad", 0.0).value)
         self.state: dict | None = None
-        self.t_state = -1e9
+        self.t_state = self.t_odom = -1e9
         self.pad: S.Pad | None = None
         self.descent = S.Descent()
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
@@ -32,7 +32,7 @@ class SkybetaRefNav(RefNav):
         p, q, v = m.pose.pose.position, m.pose.pose.orientation, m.twist.twist.linear
         self.pad = S.on_odom(self.v, self.pad, self.mission.phase, (p.x, p.y, p.z), (q.x, q.y, q.z, q.w),
                              (v.x, v.y, v.z))
-        now = self._now()
+        now = self.t_odom = self._now()
         self.mission.on_health(now, S.healthy(self.state, self.t_state, now))
 
     def _on_state(self, m: String) -> None:
@@ -44,11 +44,10 @@ class SkybetaRefNav(RefNav):
         S.on_state(self.v, self.state, self.mission.phase)
 
     def _send(self, out: C.Output) -> None:
-        if out.phase == "land":
-            tw = self.descent.twist(self._now(), self.v, self.state)
-        else:
-            tw = None if self.pad is None else S.twist(out, self.v, self.pad, self.mission.p.yaw_rate_dps,
-                                                       self.yaw_offset)
+        tw, land = S.command(out, self.v, self.pad, self.descent, self.state, self.t_odom, self.t_state, self._now(),
+                             self.mission.p.yaw_rate_dps, self.yaw_offset)
+        if land:
+            self.mission.request_land(land)
         if tw is None:
             return
         msg = TwistStamped()
