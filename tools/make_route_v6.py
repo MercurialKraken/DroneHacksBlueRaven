@@ -29,7 +29,9 @@ from nav.route_planner import PlannerParams, gate_problems, plan_route  # noqa: 
 HEIGHT_M, CP4 = 0.7, "Gate B"
 LEAD_IN_M = 0.5                 # straight ahead from the pad before the first turn
 GAP_STANDOFF_M = 0.45           # before/after the gap, along its normal
-STAGE1_EXTRA = 1                # stage 1 lands this many planner corners past the gap's exit point
+STAGE1_EXTRA = 0                # stage 1 lands this many planner corners past the gap's exit point. 0: it lands at
+                                # the exit (whole drone across CP2), staying within ~2.5 m of the start, where an
+                                # error in the start heading moves it least (the next corner is 4.5 m further east)
 
 
 def main() -> int:
