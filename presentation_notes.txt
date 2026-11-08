@@ -35,6 +35,10 @@ THREE PARALLEL SOLUTIONS (decided 2026-11-07 night; the team disagreed, so we tr
   remembered take-off position, then fly the hard-coded trajectory. Her hypothesis: the trajectory is right
   regardless of speed; the error comes from the drift accumulated during take-off (vibrations).
   Chelsea and Darion coordinate on the hard-coded solution.
+- HINSON's view (same night): Darion's wall-follow hard coding is a waste of time; the first real run would have
+  worked had it not been for the take-off drift (the first attempt landed on the 0.40 m guard). So: fix the take-off
+  drift, run the same route again for the initial points, then put everything into Arnav's general solution.
+  (route1-chelsea is exactly that: the same route + a hold that flies the take-off drift back out.)
 
 ===========================================================================================================
 3. SIMULATION vs REALITY - WHAT SURPRISED US (good material: "why a sim pass isn't a real pass")
