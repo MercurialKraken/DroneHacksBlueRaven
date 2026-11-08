@@ -29,8 +29,8 @@ steps:
   # then on round to due south over P3 -> P4, arriving at the tunnel's mouth already facing into it.
   - {leg: [0.456, 2.090], name: P3, yaw_to: -50.0}
   - {fix: wall_c}
+  - {height: 0.85}                        # v6 (Darion): climb to the tube's height at P3, so P3 -> P4 (the tunnel approach) is flown at it
   - {leg: [2.3115, 1.850], name: P4, yaw_to: -90.0}   # north of the tunnel's mouth, nose into the tube
-  - {height: 0.85}                        # the tube's free space is centred ~0.94 m up: only 0.36 m clearance at 0.40
   - {face: [2.400, -1.100]}
   - {leg: [2.400, -1.100], name: P5}      # through the tunnel: CP3 (whole drone past y -0.305)
   # v3 (Darion): no corridor / barrier fix and no slide along the window's wall (old points 7 and 8: cuVSLAM held 9 times
