@@ -30,7 +30,7 @@
   "yaw_rate_dps": 30.0,
   "fillet_m": 0.7,
   "hover_s": 0.0,
-  "push_ff_fwd_mps": 0.056,
+  "push_ff_fwd_mps": 0.12,
   "push_ff_right_mps": 0.1
  }
 }
