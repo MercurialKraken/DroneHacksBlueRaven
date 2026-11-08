@@ -232,6 +232,21 @@ def test_a_silent_pose_or_state_in_flight_stops_and_lands_at_once(gap):
     assert m.land_reason.startswith("landing requested"), m.land_reason
 
 
+def test_the_take_off_pose_is_logged_again_only_when_it_moves():
+    pad = S.Pad(1.0, 2.0, 0.0, 0.3)
+    assert S.moved(pad, None) and not S.moved(S.Pad(1.01, 2.0, 0.0, 0.3 + math.radians(0.5)), pad)
+    assert S.moved(S.Pad(1.03, 2.0, 0.0, 0.3), pad) and S.moved(S.Pad(1.0, 2.0, 0.0, 0.3 + math.radians(2)), pad)
+
+
+def test_a_landing_request_after_the_pilot_armed_in_offboard_descends():
+    prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
+    m = C.Mission(prm)
+    m.phase, m.t_phase, m.t_started = "arm", 0.0, 0.0
+    m.request_land("take-off pose off")
+    m.step(1.0, C.Vehicle(pos=(0, 0, 0), heading=0.0, pos_ok=True, armed=True, nav_state=C.NAV_OFFBOARD))
+    assert m.phase == "land"
+
+
 def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_holds():
     m, sk, sent = flight(detect_mps=0.5)                          # a detector that 0.35 m/s doesn't satisfy
     assert m.result == "complete", (m.result, m.why)

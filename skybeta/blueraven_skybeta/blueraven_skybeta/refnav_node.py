@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
@@ -22,6 +23,10 @@ class SkybetaRefNav(RefNav):
         self.state: dict | None = None
         self.t_state = self.t_odom = -1e9
         self.pad: S.Pad | None = None
+        self.logged_pad: S.Pad | None = None
+        # off by default: odometry starts where the stack started, which is the mark only if it was started there
+        self.start_max_m = float(self.declare_parameter("start_max_m", float("inf"), LOOSE).value)
+        self.start_max_deg = float(self.declare_parameter("start_max_deg", float("inf"), LOOSE).value)
         self.descent = S.Descent()
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.create_subscription(Odometry, self.declare_parameter(
@@ -34,6 +39,17 @@ class SkybetaRefNav(RefNav):
                              (v.x, v.y, v.z))
         now = self.t_odom = self._now()
         self.mission.on_health(now, S.healthy(self.state, self.t_state, now))
+        if self.mission.phase == "arm" and self.pad is not self.logged_pad and S.moved(self.pad, self.logged_pad):
+            self._log_start()
+
+    def _log_start(self) -> None:
+        pad, self.logged_pad = self.pad, self.pad
+        off_m, off_deg = math.hypot(*pad.p0[:2]), math.degrees(pad.yaw0)
+        self.get_logger().info(f"take-off pose: odom ({pad.p0[0]:.3f}, {pad.p0[1]:.3f}, {pad.p0[2]:.3f}) yaw "
+                               f"{off_deg:.1f} deg; the route is flown from here, along this heading")
+        if off_m > self.start_max_m or abs(off_deg) > self.start_max_deg:
+            self.mission.request_land(f"take-off pose {off_m:.2f} m, {off_deg:.1f} deg from where odometry started "
+                                      f"(start_max_m {self.start_max_m:g}, start_max_deg {self.start_max_deg:g})")
 
     def _on_state(self, m: String) -> None:
         try:

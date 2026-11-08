@@ -49,6 +49,12 @@ class Pad:
         return self.vector(vn, ve)
 
 
+def moved(pad: Pad, before: Pad | None, m: float = 0.02, deg: float = 1.0) -> bool:
+    """The pad has moved or turned by more than this since `before` (None: always)."""
+    return (before is None or math.dist(pad.p0[:2], before.p0[:2]) > m
+            or abs(math.degrees(math.remainder(pad.yaw0 - before.yaw0, math.tau))) > deg)
+
+
 def on_odom(v: C.Vehicle, pad: Pad | None, phase: str, p: tuple[float, float, float],
             q_xyzw: tuple[float, float, float, float], v_flu: tuple[float, float, float]) -> Pad | None:
     """One odometry sample (ENU position, FLU -> ENU orientation, FLU body velocity) into the mission's Vehicle.

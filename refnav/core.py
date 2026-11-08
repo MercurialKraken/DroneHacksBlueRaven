@@ -422,6 +422,8 @@ class Mission:
             why = f"landing requested: {self.land_request}"
             if self.phase == "wait":
                 self._end(now, out, f"refused: {why} before arming")
+            elif self.phase == "arm" and p.pilot_arms and v.armed:
+                self._land(now, out, why)
             elif self.phase == "arm":
                 if v.armed:
                     out.commands.append("disarm")          # a normal, checked disarm: on the ground, never forced
