@@ -150,7 +150,9 @@ def test_the_full_route_is_flown_and_landed_whatever_the_frames(offset_deg, star
     assert {"arm", "climb", "follow", "land"} <= set(phases)
     assert max(abs(tw[3]) for _, _, tw in sent) <= math.radians(45.0) + 1e-9
     assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= 1.5
-    assert all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for _, ph, tw in sent if ph == "land")   # detected at 0.35
+    land = [tw for _, ph, tw in sent if ph == "land"]                 # brake to a stop, then straight down at 0.35
+    brake = next(i for i, tw in enumerate(land) if tw != (0.0, 0.0, 0.0, 0.0))
+    assert brake * DT <= S.BRAKE_MAX_S + DT and all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for tw in land[brake:])
 
 
 def _from_polyline(path: F.Path, corners: np.ndarray) -> np.ndarray:
@@ -261,6 +263,12 @@ def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_hold
     land = [(t, tw) for t, ph, tw in sent if ph == "land"]
     pressed = [t for t, tw in land if tw[2] == -S.GROUND_PRESS_MPS]
     assert pressed and land[-1][0] - land[0][0] > S.GROUND_WAIT_S   # sat on the ground, then pressed, then disarm
+
+
+def test_a_descent_that_stalls_above_the_pad_height_presses_down():
+    d, v, st = S.Descent(), C.Vehicle(pos=(0.0, 0.0, -0.15), heading=0.0), {"offboard_active": True, "armed": True}
+    tws = [d.twist(t * DT, v, st) for t in range(int(6.0 / DT))]      # estimate stuck 0.15 m high, not sinking
+    assert tws[0][2] == -S.DESCEND_MPS and tws[-1][2] == -S.GROUND_PRESS_MPS
 
 
 def test_offboard_ending_during_the_descent_stops_the_twists():
