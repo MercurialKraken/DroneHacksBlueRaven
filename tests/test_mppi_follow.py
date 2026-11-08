@@ -297,9 +297,9 @@ def test_mppi_dying_in_flight_holds_still_then_lands_without_contact():
     m, sk, traj, states, w, mf = flight(mppi_dies_after_s=8.0)
     assert "MPPI command silent" in m.land_reason, (m.land_reason, states[-5:])
     t_dead = mf.link.t_start + 8.0
-    after = traj[mf.traj_t >= t_dead]
-    land_i = int(np.argmax(mf.traj_t >= t_dead + M.CMD_LAND_S))
-    assert np.linalg.norm(traj[land_i] - after[0]) < 0.2                    # held still within the link's timeouts
+    after = traj[mf.traj_t >= t_dead]                                        # every airborne sample from the death on
+    assert len(after) >= round(M.CMD_LAND_S / DT) - 1                        # (no silent empty slice)
+    assert np.linalg.norm(after - after[0], axis=1).max() < 0.2              # held still, then landed there
     assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone and not sk.armed
 
 
