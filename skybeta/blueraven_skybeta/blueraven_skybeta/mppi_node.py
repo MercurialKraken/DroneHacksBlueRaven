@@ -40,7 +40,9 @@ class MppiNode(Node):
         super().__init__("mppi_node")
         prm = lambda k, v: self.declare_parameter(k, v).value  # noqa: E731
         with open(prm("route_file", "")) as f:
-            self.route = json.load(f)["route"]
+            doc = json.load(f)
+        self.route = doc["route"]
+        self.fence = doc.get("params", {}).get("fence")      # the arena's nets, from the take-off pose (or None)
         self.args = (float(prm("mppi_v_cruise_mps", 0.10)), float(prm("mppi_tau_s", 0.9)),
                      float(prm("mppi_dead_time_s", 0.6)))
         self.mppi = MppiFollow(*self.args)
@@ -75,9 +77,9 @@ class MppiNode(Node):
             return                                   # refnav repeats it; MPPI starts once per follow
         self.start_id = d["id"]
         x, y, z, yaw = d["pad"]
-        self.mppi.start(self.route, S.Pad(x, y, z, yaw))
+        self.mppi.start(self.route, S.Pad(x, y, z, yaw), fence=self.fence)
         self.pub.publish_trajectory(self.mppi.nav)
-        self.get_logger().info(f"FOLLOW START {self.start_id:.3f}: route from refnav's take-off pose "
+        self.get_logger().info(f"FOLLOW START (fence {self.fence})  {self.start_id:.3f}: route from refnav's take-off pose "
                                f"({x:.3f}, {y:.3f}) yaw {math.degrees(yaw):.1f} deg")
 
     def _on_odom(self, m: Odometry) -> None:

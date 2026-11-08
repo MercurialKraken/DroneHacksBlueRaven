@@ -202,10 +202,11 @@ class MppiFollow:
         self.nav.add_depth(out[0], out[1], float(self.pos[2]), stamp)
         return True
 
-    def start(self, route: Any, pad: Any) -> None:
-        """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it)."""
+    def start(self, route: Any, pad: Any, fence: dict | None = None) -> None:
+        """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it).
+        fence: the route file's params.fence ({"fwd": [..], "left": [..]} from the take-off pose: the arena's nets)."""
         self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
-                            grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p)
+                            grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p, fence=fence)
         self.lost, self._frozen_since, self._repeats = None, None, 0   # a new follow: the odometry guards start afresh
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:

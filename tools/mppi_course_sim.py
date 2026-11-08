@@ -191,7 +191,8 @@ def fly(course_dir: str, route_file: str, err: Errors = PRESETS["old_noise"], se
         sp = speed or 0.45
         vmax, umax = caps if caps is not None else (max(0.15, 1.5 * sp), max(0.30, 3.0 * sp))
         mp = MppiParams(tau=model[0], dead_time_s=model[1], v_max=vmax, v_lat=min(0.5, vmax), u_max=umax)
-    nav = LocalNav(wps, launch, yaw0, nav=LocalNavParams(v_cruise=speed) if speed else None, mppi=mp)
+    nav = LocalNav(wps, launch, yaw0, nav=LocalNavParams(v_cruise=speed) if speed else None, mppi=mp,
+                   fence=route.get("params", {}).get("fence"))
     nav.mppi.debug_samples = 120 if keep_frames else 0
     p = nav.mppi.p
     dt = p.dt
