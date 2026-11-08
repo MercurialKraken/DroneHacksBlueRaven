@@ -20,6 +20,8 @@ DESCEND_MPS = 0.35          # PX4's land detector needs a commanded descent >= 1
 GROUND_PRESS_MPS = 0.60     # on the ground GROUND_WAIT_S without PX4 disarming: press down firmer
 GROUND_WAIT_S = 3.0
 GROUND_BAND_M = 0.06        # "on the ground": within this of the pad's height
+STALL_S, STALL_M = 1.0, 0.03  # or the descent stalled: sank < 3 cm in 1 s (the estimate's height can sit 0.1-0.2 m high)
+ARRIVE_MPS, BRAKE_MAX_S = 0.10, 2.0  # brake to a stop before descending, at most 2 s
 STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
 ODOM_STALE_S = 1.0          # real skybeta-09 odometry arrives with gaps up to 0.39 s under load
 HOLD_S = 0.25               # a shorter silence than STALE holds position (zero twist) instead of landing
@@ -97,6 +99,8 @@ class Descent:
 
     def __init__(self) -> None:
         self.t_ground: float | None = None
+        self.t_start: float | None = None
+        self.zs: list[tuple[float, float]] = []
         self.over = False
 
     def twist(self, now: float, v: C.Vehicle, state: dict[str, Any] | None
@@ -104,7 +108,13 @@ class Descent:
         if self.over or not state or not (state.get("offboard_active") and state.get("armed")):
             self.over = True
             return None
-        on_ground = v.pos is not None and v.pos[2] >= -GROUND_BAND_M
+        self.t_start = now if self.t_start is None else self.t_start
+        if math.hypot(*v.vel) > ARRIVE_MPS and now - self.t_start < BRAKE_MAX_S:
+            return 0.0, 0.0, 0.0, 0.0
+        if v.pos is not None:
+            self.zs = [(t, z) for t, z in self.zs if now - t <= STALL_S] + [(now, v.pos[2])]
+        stalled = bool(self.zs) and now - self.zs[0][0] >= STALL_S * 0.9 and self.zs[-1][1] - self.zs[0][1] < STALL_M
+        on_ground = v.pos is not None and v.pos[2] >= -GROUND_BAND_M or stalled
         self.t_ground = (self.t_ground if self.t_ground is not None else now) if on_ground else None
         press = self.t_ground is not None and now - self.t_ground >= GROUND_WAIT_S
         return 0.0, 0.0, -(GROUND_PRESS_MPS if press else DESCEND_MPS), 0.0
