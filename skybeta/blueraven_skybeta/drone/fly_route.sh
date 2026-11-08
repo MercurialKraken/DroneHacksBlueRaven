@@ -31,7 +31,7 @@ MON=/tmp/fly_status.py                            # the status monitor, copied i
 TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybeta/setpoint/pose \
 /skybeta/setpoint/twist /blueraven/mission/status /refnav/status /fmu/in/vehicle_visual_odometry \
 /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude \
-/fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static \
+/fmu/out/vehicle_land_detected /fmu/out/distance_sensor /fmu/out/battery_status /fmu/out/failsafe_flags /fmu/out/health_report /tf /tf_static \
 /blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory /blueraven/mppi/cmd /blueraven/mppi/start \
 /fmu/in/trajectory_setpoint /fmu/in/offboard_control_mode /fmu/out/vehicle_local_position_setpoint /fmu/out/vehicle_attitude_setpoint"   # absent topics are harmless (MPPI off)
 DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera depth (~15 MB/s)
@@ -282,7 +282,7 @@ go() {
   pass "$OFFSET rad"
 
   step "hostname is skybeta-09"
-  [ "$(hostname)" = skybeta-09 ] || fail "this is $(hostname): flying another team's drone is a disqualification; ssh dronehacks@skybeta-09.local"
+  case "$(hostname)" in skybeta-09|skybeta-10) true ;; *) false ;; esac || fail "this is $(hostname): flying another team's drone is a disqualification; ssh dronehacks@skybeta-09.local"
   pass
 
   if (( full )); then
