@@ -1,4 +1,5 @@
 # The organizers' course files must stay byte-identical to the download: their sha256 is recorded in
 # maps/course/SOURCE.md and in the built map's metadata. No line-ending conversion on any platform.
 maps/course/** -text
+courses/*/course/** -text
 *.npz binary
