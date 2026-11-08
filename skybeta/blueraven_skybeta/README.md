@@ -65,9 +65,11 @@ by default), so nobody arms into the square by accident.
 
 - **NTP off** before the bench or a flight: `sudo timedatectl set-ntp false`. A clock step over 0.5 s
   restarts the whole stack. Turn it back on (`set-ntp true`) when done, before power-off.
-- **Nothing may subscribe to `/oak/*/image_raw/compressed`**: no image bags, no Foxglove camera panels,
-  no `ros2 topic hz` on them. It makes the camera driver JPEG-encode 2 x 30 Hz and delays the vision
-  PX4 flies on past its 200 ms limit (Arnav's load test, 2026-11-07).
+- **Nothing may subscribe to `/oak/*/image_raw` or `/oak/*/image_raw/compressed`**: no image bags, no
+  Foxglove camera panels, no `ros2 topic hz` on them. Delivering those out of the driver (JPEG encoding,
+  or copying the raw colour frames out of its NITROS path) delays the vision PX4 flies on past its 200 ms
+  limit (Arnav's tests, 2026-11-07). **No depth node in flight**, not even on `/oak/*/image_mono`: any
+  out-of-process image reader competes with cuVSLAM's feed (Arnav's repeat test). Nothing reads camera images.
 - **Nobody in front of the camera** during a run.
 - Props off for the first run of any new code.
 
@@ -175,11 +177,15 @@ and takes over at **any** unexpected motion.
 3. Expect: a jump to the interface's 0.3 m floor as Offboard starts, then the climb to `height_m` at 0.3 m/s.
    If PX4 settles more than 8 cm off the height, the node waits up to 5 s, then hovers anyway and says by
    how much (`holding -0.12 m off the target height`); if it climbed less than half way, it lands. Then
-   `HOVER` for `hover_s`; `DESCEND` straight down at 0.2 m/s (no sideways correction: a twist goes through
+   `HOVER` for `hover_s`; `DESCEND` straight down at 0.35 m/s (no sideways correction: a twist goes through
    the unmeasured frame offset, and a correction rotated ~90 deg circles, >90 deg runs away;
    `descend_xy_hold:=true` turns it on once the offset is measured and set); PX4 detects the
-   touchdown and disarms (about 2 s); `DONE`. If it is on the floor and still armed after about 5 s, the
-   pilot disarms it (the node keeps commanding a gentle descent until PX4 reports landed and disarmed).
+   touchdown and disarms (about 2 s); `DONE`. The descent is 0.35 m/s because PX4's land detector only
+   sees a descent at >= 0.275 m/s commanded: at 0.2 m/s the T4 sim sat armed on the ground for 63 s. If the
+   drone is on the floor 3 s without PX4 reporting landed, the node presses down at 0.6 m/s and says so; if
+   it still stays armed, the pilot disarms it.
+   The descent never aborts and never calls `/skybeta/hold`, even if odometry is lost near the floor: the
+   interface's hold returns to the last safe position, which would be the hover point in the air.
 4. **If it drifts more than 0.4 m from the take-off point** while climbing or hovering, the node descends
    straight down on its own (`... (PX4 frame offset?): landing straight down`). That points at the frame
    offset of step 4.2: measure it before the next flight.

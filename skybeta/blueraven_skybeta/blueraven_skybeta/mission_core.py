@@ -77,7 +77,12 @@ class MissionParams:
     height_m: float = 0.70              # flight height above the launch point
     cruise_mps: float = 0.30
     climb_mps: float = 0.30
-    descend_mps: float = 0.20
+    descend_mps: float = 0.35           # PX4's land detector counts it as descending only at commanded vz >=
+                                        # 1.1 x LNDMC_Z_VEL_MAX (0.25 with the defaults: 0.275 m/s). At 0.2 it
+                                        # never reports landed and never disarms (Darion's T4 sim, 2026-11-07)
+    ground_press_mps: float = 0.60      # on the ground this long without 'landed': press down firmer
+    ground_wait_s: float = 3.0
+    ground_band_m: float = 0.06         # "on the ground": odom z within this of the take-off height
     descend_xy_hold: bool = False       # DESCEND: also pull xy back over the landing point with a twist P-term.
                                         # Off by default: a twist is rotated by the UNMEASURED frame offset (the
                                         # interface doesn't correct twists), and a P-loop rotated ~90 deg orbits,
@@ -155,6 +160,8 @@ class SkybetaMission:
         self.t_ramp_done: float | None = None
         self.z_takeoff_start: float | None = None
         self.why_height: str | None = None
+        self.t_on_ground: float | None = None
+        self.descend_reason: str | None = None
         self.land_xy_odom: tuple[float, float] | None = None   # hover: descend over this odom point
         self.hold_xy_on_descent = True      # false after a hold-error: straight down, no xy correction
         self.phase = "INIT"
@@ -391,16 +398,15 @@ class SkybetaMission:
                 out.phase, out.why = self.phase, self.why
                 return out
 
+        if self.phase == "DESCEND":
+            return self._descend(t, out, jump)
+
         # ---- active phases: abort first ------------------------------------------------
         if not fresh:
             return self._end("ABORTED", why, out, hold=True)
         if jump:
             return self._end("ABORTED", jump, out, hold=True)
-        if self.phase == "DESCEND" and st.get("landed") is True and st.get("armed") is False:
-            return self._end("DONE", "landed and disarmed", out, hold=False)
         if st.get("offboard_active") is not True:
-            if self.phase == "DESCEND" and st.get("landed") is True:
-                return self._end("DONE", "landed; Offboard ended", out, hold=False)
             return self._end("ABORTED", "Offboard ended: the pilot or a failsafe has the vehicle", out, hold=True)
 
         x, y, z, yaw = self.odom
@@ -495,15 +501,52 @@ class SkybetaMission:
             return out
 
         if self.phase == "DESCEND":
-            ox = oy = 0.0
-            if not (self.hold_xy_on_descent and p.descend_xy_hold):
-                pass                                                   # straight down, no steering
-            elif self.land_xy_odom is not None:                        # hover: over the take-off point
+            return self._descend(t, out, None)
+        return out
+
+    def _descend(self, t: float, out: Command, jump: str | None) -> Command:
+        """DESCEND: straight down (an xy pull only with descend_xy_hold) until PX4 reports landed and disarmed.
+        It never aborts and never calls /skybeta/hold: the interface would then hold its last safe position,
+        i.e. climb back to the hover height. It needs no odometry, so odometry going stale or jumping near
+        the floor (the cameras lose texture there) doesn't stop it. On the ground without 'landed' for
+        ground_wait_s it presses down harder (PX4's land detector wants a firm downward command)."""
+        p = self.p
+        st = self.state or {}
+        if self.descend_reason is None:
+            self.descend_reason = self.why
+        state_fresh = self.state is not None and t - self.t_state <= p.state_stale_s
+        if state_fresh:
+            if st.get("landed") is True and st.get("armed") is False:
+                return self._end("DONE", "landed and disarmed", out, hold=False)
+            if st.get("offboard_active") is not True:
+                if st.get("landed") is True:
+                    return self._end("DONE", "landed; Offboard ended", out, hold=False)
+                return self._end("ABORTED", "Offboard ended during the descent: the pilot or a failsafe has it",
+                                 out, hold=False)
+        odom_ok = self.odom is not None and t - self.t_odom <= p.odom_stale_s and not jump
+        vz, now = -p.descend_mps, "descending"
+        if odom_ok and self.z_takeoff_start is not None and self.odom[2] - self.z_takeoff_start <= p.ground_band_m:
+            self.t_on_ground = t if self.t_on_ground is None else self.t_on_ground
+            if t - self.t_on_ground >= p.ground_wait_s:
+                vz = -p.ground_press_mps
+                now = (f"on the ground {t - self.t_on_ground:.0f} s and PX4 hasn't reported landed: pressing down "
+                       f"(pilot: disarm if it stays armed)")
+        elif odom_ok:
+            self.t_on_ground = None
+        if not odom_ok:
+            now = "descending straight down without odometry (stale or jumped)"
+        if not state_fresh:
+            now += "; /skybeta/state stale, can't see landed/armed"
+        ox = oy = 0.0
+        if odom_ok and self.hold_xy_on_descent and p.descend_xy_hold:
+            x, y, z, _ = self.odom
+            if self.land_xy_odom is not None:                          # hover: over the take-off point
                 ox, oy = p.kp_xy * (self.land_xy_odom[0] - x), p.kp_xy * (self.land_xy_odom[1] - y)
-            elif self.path is not None:                                # course: over the route's end
+            elif self.path is not None and self.T_map_odom is not None:   # course: over the route's end
+                pm = self._to_map(x, y, z)
                 end = self.path.point_at(self.path.length)
                 ox, oy = self._vec_to_odom(p.kp_xy * (end[0] - pm[0]), p.kp_xy * (end[1] - pm[1]))
-            out.twist = (ox, oy, -p.descend_mps, 0.0)
-            out.phase, out.why = self.phase, self.why
-            return out
+        out.twist = (ox, oy, vz, 0.0)
+        self.why = f"{self.descend_reason} | {now}"
+        out.phase, out.why = self.phase, self.why
         return out

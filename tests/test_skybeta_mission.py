@@ -507,6 +507,58 @@ def test_default_descent_is_straight_down_so_a_frame_offset_cannot_spiral_it():
     assert worst_hold > 2 * worst                   # the xy P-loop through a 100 deg offset runs away
 
 
+class LandDetectorSim(Sim):
+    """PX4's land detector (Darion's T4 finding): on the ground it reports landed, and then auto-disarms, only
+    while the commanded descent is at least 1.1 x LNDMC_Z_VEL_MAX = 0.275 m/s."""
+
+    def apply(self, cmd, t):
+        was_armed = self.armed
+        super().apply(cmd, t)
+        pressing = cmd.twist is not None and cmd.twist[2] <= -0.275
+        if was_armed and self.z <= self.ground + 1e-6 and not pressing:
+            self.landed, self.t_landed = False, None               # no ground contact detected
+            self.armed = self.offboard = True                      # so no auto-disarm either
+
+
+def land_with_detector(**kw):
+    m, sim = hover(height_m=0.5, hover_s=2.0, **kw), LandDetectorSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "DESCEND")
+    _, cmds = run(m, sim, t, t + 40.0)
+    return m, cmds, t
+
+
+def test_the_default_descent_is_firm_enough_for_px4_to_detect_the_landing():
+    m, cmds, t0 = land_with_detector()
+    assert MissionParams().descend_mps >= 0.3
+    assert m.phase == "DONE" and m.why.startswith("landed and disarmed"), m.why
+    t_done = next(tt for tt, c in cmds if c.phase == "DONE")
+    assert t_done - t0 < 0.5 / 0.35 + 4.0                          # touchdown + PX4's 2 s, no long wait
+
+
+def test_a_too_gentle_descent_presses_down_on_the_ground_instead_of_sitting_armed():
+    m, cmds, t0 = land_with_detector(descend_mps=0.2)
+    assert m.phase == "DONE", m.why
+    pressing = [c for _, c in cmds if c.phase == "DESCEND" and c.twist and c.twist[2] <= -0.5]
+    assert pressing and "pressing down" in pressing[0].why
+    t_done = next(tt for tt, c in cmds if c.phase == "DONE")
+    assert t_done - t0 < 0.5 / 0.2 + 3.0 + 4.0                     # not the 63 s the sim sat armed
+
+
+def test_the_descent_never_aborts_or_calls_hold_when_odometry_goes_stale():
+    m, sim = hover(height_m=0.5, hover_s=2.0), LandDetectorSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "DESCEND")
+    _, cmds = run(m, sim, t, t + 30.0, odom=False)                 # the cameras lose the floor's texture
+    assert m.phase == "DONE", m.why
+    assert not any(c.call_hold for _, c in cmds)                   # hold would climb back to the hover point
+    desc = [c for _, c in cmds if c.phase == "DESCEND"]
+    assert all(c.twist is not None and c.twist[2] < 0 for c in desc)
+    assert any("without odometry" in c.why for c in desc)
+
+
 def test_hover_aborts_like_the_course_mission_when_offboard_drops():
     m, sim = hover(), Sim()
     t = to_ready(m, sim)
