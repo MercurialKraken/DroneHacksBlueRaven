@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""refnav's node with its PX4 input and output replaced by the organizers' flight interface
-(refnav_skybeta): odometry and /skybeta/state in, /skybeta/setpoint/twist out, nothing else.
-
-    ros2 launch blueraven_skybeta refnav.launch.py
-"""
+"""refnav's node with its PX4 I/O replaced by the flight interface (refnav_skybeta): odometry and
+/skybeta/state in, /skybeta/setpoint/twist out. Run: ros2 launch blueraven_skybeta refnav.launch.py"""
 from __future__ import annotations
 
 import json
@@ -25,6 +22,7 @@ class SkybetaRefNav(RefNav):
         self.state: dict | None = None
         self.t_state = -1e9
         self.pad: S.Pad | None = None
+        self.descent = S.Descent()
         self.pub_twist = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.create_subscription(Odometry, self.declare_parameter(
             "odometry_topic", "/visual_slam/tracking/odometry").value, self._on_odom, 10)
@@ -46,7 +44,11 @@ class SkybetaRefNav(RefNav):
         S.on_state(self.v, self.state, self.mission.phase)
 
     def _send(self, out: C.Output) -> None:
-        tw = None if self.pad is None else S.twist(out, self.v, self.pad, self.mission.p.yaw_rate_dps, self.yaw_offset)
+        if out.phase == "land":
+            tw = self.descent.twist(self._now(), self.v, self.state)
+        else:
+            tw = None if self.pad is None else S.twist(out, self.v, self.pad, self.mission.p.yaw_rate_dps,
+                                                       self.yaw_offset)
         if tw is None:
             return
         msg = TwistStamped()

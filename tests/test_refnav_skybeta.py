@@ -25,7 +25,8 @@ from refnav import map_route as M  # noqa: E402
 
 DT = 0.05                                     # refnav's 20 Hz tick
 DOC = json.loads((ROOT / "route.json").read_text())
-LAUNCH_PARAMS = {"depth_mode": "blind", "stream_lead_s": 0.0, "arm_wait_s": 120.0}   # refnav.launch.py's
+LAUNCH_PARAMS = {"depth_mode": "blind", "stream_lead_s": 0.0, "arm_wait_s": 120.0,   # refnav.launch.py's
+                 "land_timeout_s": math.inf}
 
 
 def _rz(a: float) -> np.ndarray:
@@ -41,8 +42,9 @@ class Stack:
     """PX4 + the flight interface + VIO. PX4 NED <- odom ENU: position_ned = R_down(offset) enu_to_ned(p),
     as the interface assumes for poses; a twist is only enu_to_ned'd. The vision frame starts at `start`."""
 
-    def __init__(self, offset: float, start_yaw_enu: float) -> None:
+    def __init__(self, offset: float, start_yaw_enu: float, detect_mps: float = 0.275) -> None:
         self.off = offset
+        self.detect_mps = detect_mps                  # PX4's land detector: commanded descent it needs on the ground
         self.p = np.zeros(3)                          # PX4 NED
         self.vel = np.zeros(3)
         self.yaw_enu = start_yaw_enu                  # the drone's yaw in the vision frame
@@ -78,7 +80,7 @@ class Stack:
         self.p += self.vel * DT
         if self.p[2] >= 0.0:                                      # the floor
             self.p[2], self.vel[2] = 0.0, min(self.vel[2], 0.0)
-            pressing = flying and t - self.t_twist < 1.0 and cmd[2] >= 0.275
+            pressing = flying and t - self.t_twist < 1.0 and cmd[2] >= self.detect_mps
             self.t_down = (self.t_down or t) if pressing or not self.armed else None
             self.landed = self.t_down is not None
             if self.armed and self.landed and self.t_down is not None and t - self.t_down >= 2.0:
@@ -88,12 +90,12 @@ class Stack:
 
 
 def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at: float | None = None,
-           limit_s: float = 200.0):
+           limit_s: float = 200.0, detect_mps: float = 0.275, takeover_phase: str = "follow"):
     prm, _ = C.params_from_doc(DOC, LAUNCH_PARAMS)
     launch = load_launch(ROOT / "maps" / "course.yaml", "launch_sim")
     cm = CourseMap.load(ROOT / "maps" / "course_sdf.npz")
     m = C.Mission(prm, M.builder(cm, launch, prm.height_m + launch["z"], M.DRONE_RADIUS_M + 0.20, 0.3))
-    sk, v, pad = Stack(offset, start_yaw_enu), C.Vehicle(), None
+    sk, v, pad, descent = Stack(offset, start_yaw_enu, detect_mps), C.Vehicle(), None, S.Descent()
     state, t_state, t_arm = None, -math.inf, None
     sent: list[tuple[float, str, tuple]] = []
     t = DT
@@ -104,7 +106,7 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             state, t_state = sk.state(), t
             S.on_state(v, state, m.phase)
         out = m.step(t, v)
-        tw = S.twist(out, v, pad, prm.yaw_rate_dps, offset)
+        tw = descent.twist(t, v, state) if out.phase == "land" else S.twist(out, v, pad, prm.yaw_rate_dps, offset)
         if tw is not None:
             sk.twist(t, tw)
             sent.append((t, out.phase, tw))
@@ -112,9 +114,12 @@ def flight(offset: float = 0.0, start_yaw_enu: float = 0.0, pilot_takes_over_at:
             sk.armed, sk.nav, t_arm = True, 1, t                  # the pilot arms in Altitude...
         if t_arm is not None and sk.nav == 1 and t - t_arm >= 0.5 and t - sk.t_twist < 1.0:
             sk.nav = C.NAV_OFFBOARD                               # ...switches to Position: Offboard, once
-        if pilot_takes_over_at is not None and m.phase == "follow" and t - m.t_phase >= pilot_takes_over_at:
+        if pilot_takes_over_at is not None and m.phase == takeover_phase and t - m.t_phase >= pilot_takes_over_at:
             sk.nav, pilot_takes_over_at = 2, None
+            sent.append((t, "takeover", ()))
         sk.step(t)
+        if m.phase == "land" and sk.armed and sk.nav == C.NAV_OFFBOARD:
+            assert sent[-1][0] == t, "an armed tick in Offboard without a twist: the interface would hold"
         t += DT
     return m, sk, sent
 
@@ -137,7 +142,23 @@ def test_the_full_route_is_flown_and_landed_whatever_the_frames(offset_deg, star
     assert {"arm", "climb", "follow", "land"} <= set(phases)
     assert max(abs(tw[3]) for _, _, tw in sent) <= math.radians(45.0) + 1e-9
     assert max(math.hypot(tw[0], tw[1]) for _, ph, tw in sent if ph == "follow") <= 1.5
-    assert all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for _, ph, tw in sent if ph == "land")
+    assert all(tw == (0.0, 0.0, -S.DESCEND_MPS, 0.0) for _, ph, tw in sent if ph == "land")   # detected at 0.35
+
+
+def test_the_descent_presses_down_on_the_ground_until_px4_disarms_and_never_holds():
+    m, sk, sent = flight(detect_mps=0.5)                          # a detector that 0.35 m/s doesn't satisfy
+    assert m.result == "complete", (m.result, m.why)
+    assert not sk.armed and sk.landed
+    land = [(t, tw) for t, ph, tw in sent if ph == "land"]
+    pressed = [t for t, tw in land if tw[2] == -S.GROUND_PRESS_MPS]
+    assert pressed and land[-1][0] - land[0][0] > S.GROUND_WAIT_S   # sat on the ground, then pressed, then disarm
+
+
+def test_offboard_ending_during_the_descent_stops_the_twists():
+    m, sk, sent = flight(pilot_takes_over_at=0.5, takeover_phase="land", limit_s=120.0)
+    t_over = next(t for t, ph, _ in sent if ph == "takeover")
+    assert m.phase == "land" and sk.armed and sk.p[2] < -0.1    # the pilot has it, in the air
+    assert [t for t, ph, _ in sent if ph == "land" and t > t_over + 4 * DT] == []
 
 
 def test_offboard_ending_stops_the_mission_and_its_setpoints_for_good():
@@ -186,7 +207,6 @@ def test_the_twist_is_feed_forward_plus_the_position_loop_and_yaw_rate_is_capped
     # pad at yaw 0: north = odom +x, east = odom -y
     assert (vx, vy, vz) == pytest.approx((0.5, 0.2, -0.1))
     assert wz == pytest.approx(-math.radians(45.0))                # turning right (NED +) is ENU -, capped
-    assert S.twist(C.Output("land", stream=False), v, S.Pad(0, 0, 0, 0), 45.0, 0.0) == (0.0, 0.0, -0.35, 0.0)
 
 
 def test_the_land_phase_is_reported_to_the_mission_as_auto_land():

@@ -1,14 +1,5 @@
-"""refnav's mission through the organizers' flight interface. PURE: no ROS.
-
-refnav.core.Mission runs unchanged in a "pad NED" frame: origin at the drone on the pad, north along its
-nose, down down; that is the frame the course map builder expects (refnav.map_route.MapFrame). The pad
-pose is the odometry's while the mission waits on the ground, frozen once it asks for control.
-Inputs come from /visual_slam/tracking/odometry (ENU, the odom frame) and /skybeta/state; the setpoint
-(position, velocity and yawspeed feed-forward) leaves as one /skybeta/setpoint/twist per tick, which is
-what PX4's own position loop would make of it (velocity = feed-forward + gain x position error). The
-mission's PX4 commands are dropped: the pilot arms, the interface enters Offboard, and "land" is a descent
-at DESCEND_MPS until PX4 lands and disarms. That descent is reported to the mission as AUTO_LAND.
-"""
+"""refnav.core.Mission through the organizers' flight interface, in a pad NED frame (map_route.MapFrame's).
+Odometry and /skybeta/state in, one twist out per tick; its PX4 commands are dropped. PURE: no ROS."""
 from __future__ import annotations
 
 import math
@@ -26,6 +17,9 @@ from refnav import depth as D  # noqa: E402
 KP_XY = KP_Z = 1.0          # 1/s: PX4's MPC_XY_P 0.95 and MPC_Z_P 1.0, the loop a position setpoint gets
 KP_YAW = 1.5                # 1/s on the heading error left after the yawspeed feed-forward
 DESCEND_MPS = 0.35          # PX4's land detector needs a commanded descent >= 1.1 x LNDMC_Z_VEL_MAX (0.25)
+GROUND_PRESS_MPS = 0.60     # on the ground GROUND_WAIT_S without PX4 disarming: press down firmer
+GROUND_WAIT_S = 3.0
+GROUND_BAND_M = 0.06        # "on the ground": within this of the pad's height
 STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
 _Q_X180 = (0.0, 1.0, 0.0, 0.0)  # FLU <-> FRD, and ENU-about-the-pad <-> NED-about-the-pad
 
@@ -38,7 +32,8 @@ def _qmul(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, float, flo
 
 
 class Pad:
-    """The pad NED frame, from the odometry pose (x, y, z, yaw) it is anchored at."""
+    """North along the drone's nose on the pad, origin there, z down: the odometry pose it was anchored at
+    while the mission waited on the ground."""
 
     def __init__(self, x: float, y: float, z: float, yaw: float) -> None:
         self.p0, self.yaw0 = (x, y, z), yaw
@@ -88,11 +83,28 @@ def healthy(state: dict[str, Any] | None, t_state: float, now: float) -> bool:
     return state is not None and now - t_state <= STATE_STALE_S and state.get("px4_link") is True
 
 
+class Descent:
+    """The mission's "land" as Chelsea's hover lands: straight down, pressing firmer on the ground, never a hold.
+    It goes on until PX4 disarms and stops for good once Offboard ends (the pilot or a failsafe has it)."""
+
+    def __init__(self) -> None:
+        self.t_ground: float | None = None
+        self.over = False
+
+    def twist(self, now: float, v: C.Vehicle, state: dict[str, Any] | None
+              ) -> tuple[float, float, float, float] | None:
+        if self.over or not state or not (state.get("offboard_active") and state.get("armed")):
+            self.over = True
+            return None
+        on_ground = v.pos is not None and v.pos[2] >= -GROUND_BAND_M
+        self.t_ground = (self.t_ground if self.t_ground is not None else now) if on_ground else None
+        press = self.t_ground is not None and now - self.t_ground >= GROUND_WAIT_S
+        return 0.0, 0.0, -(GROUND_PRESS_MPS if press else DESCEND_MPS), 0.0
+
+
 def twist(out: C.Output, v: C.Vehicle, pad: Pad, yaw_rate_dps: float, yaw_offset_rad: float
           ) -> tuple[float, float, float, float] | None:
-    """The interface's twist (ENU vx, vy, vz, yaw rate) for this tick's mission output, or None."""
-    if out.phase == "land":
-        return 0.0, 0.0, -DESCEND_MPS, 0.0
+    """The twist (ENU vx, vy, vz, yaw rate) for a streaming mission output: feed-forward plus PX4's position loop."""
     if not out.stream or out.setpoint is None or v.pos is None or v.heading is None:
         return None
     n, e, d, yaw = out.setpoint

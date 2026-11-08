@@ -141,10 +141,8 @@ class RefNav(Node):
 
     def _io(self) -> None:
         """PX4 in and out over uXRCE-DDS, and the estimator health and drift correction topics."""
-        # PX4-bound stamps use the SYSTEM clock in every setting: on the aircraft PX4's DDS client
-        # converts agent (system) time with its timesync; the simulator's PX4 boots with
-        # UXRCE_DDS_SYNCT=0 and clamps a future stamp to its own "now". Simulation time would
-        # be read as seconds-old commands by a real PX4, so it is never used for these.
+        # PX4-bound stamps use the SYSTEM clock: PX4 converts agent time with its timesync (the sim's clamps a future
+        # stamp to its "now"), and a real PX4 would read simulation time as seconds-old commands.
         self.sys_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
 
         from px4_msgs.msg import (DistanceSensor, EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint,
