@@ -25,7 +25,7 @@ STALL_S, STALL_M = 1.0, 0.03  # or the descent stalled: sank < 3 cm in 1 s (the 
 ARRIVE_MPS, BRAKE_MAX_S = 0.10, 2.0  # brake to a stop before descending, at most 2 s
 STATE_STALE_S = 1.0         # /skybeta/state is 5 Hz
 ODOM_STALE_S = 1.0          # real skybeta-09 odometry arrives with gaps up to 0.39 s under load
-HOLD_S = 0.25               # a shorter silence than STALE holds position (zero twist) instead of landing
+HOLD_S = 0.45               # skybeta-09 odometry arrives bunched (gaps to 0.35 s in flight, stamps fine); longer holds still
 CORR_MAX_MPS = 0.25         # position-loop share of the twist: past the 0.20 m off the path the reference waits at
 XY_MAX_MPS = 0.5            # the 0.3 m/s routes plus their corner lead (<= 0.23 m/s); a jam never gets 1-1.5 m/s
 VEL_LAG_S = 0.55            # twist -> velocity lag: 1 / MPC_XY_VEL_P_ACC 1.8 on the drone; the T4 sim fits 0.9 s + 0.6 s dead time

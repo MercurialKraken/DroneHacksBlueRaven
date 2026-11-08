@@ -253,9 +253,9 @@ def test_a_silent_pose_or_state_in_flight_stops_and_lands_at_once(gap):
 
 
 def test_a_short_odometry_gap_in_flight_holds_still_and_the_route_continues():
-    m, sk, sent = flight(odom_gap=(40.0, 40.4))                   # skybeta-09 showed 0.39 s gaps under load
-    assert [tw for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.4] and all(
-        tw == (0.0, 0.0, 0.0, 0.0) for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.4)
+    m, sk, sent = flight(odom_gap=(40.0, 40.7))                   # longer than the 0.35 s delivery bunching seen on skybeta-09
+    assert [tw for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.7] and all(
+        tw == (0.0, 0.0, 0.0, 0.0) for t, ph, tw in sent if 40.0 + S.HOLD_S + DT < t < 40.7)
     assert (m.result, m.land_reason) == ("complete", "route complete")
 
 
