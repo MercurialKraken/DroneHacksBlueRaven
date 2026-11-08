@@ -32,7 +32,9 @@ from nav.frames import load_launch  # noqa: E402
 
 NAME = "route_v7_cp2_simple"
 COPY_TO = ROOT / "courses" / "start-2026-11-07-tape" / "routes"   # hinson/real-drone's per-course layout (same bytes)
-HEIGHT_M, SPEED_MPS = 0.7, 0.3  # Arnav: fixed 0.7 m, <= 0.3 m/s at CP2 (as route v6)
+HEIGHT_M, SPEED_MPS = 0.7, 0.15  # fixed 0.7 m; 0.15 m/s: the T4 run (refnav, 2026-11-07) drifted 0.15 m left on each
+                                  # leg (PX4's velocity response ~11 deg off its setpoint, refnav gain 0.5); that
+                                  # cross-track error scales with speed, so half the speed ~halves it at the CP2 gap
 CROSS_MARGIN_M = 0.20           # the end: the drone's centre this far beyond its radius past CP2's line
 TURN_SHIFT_M = 0.0              # move the turn, so the whole rightward leg, this far forward (+: towards Wall A and
                                 # the cone) or back (-: towards Wall B) from the best-clearance place
