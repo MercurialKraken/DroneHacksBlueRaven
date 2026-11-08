@@ -78,6 +78,10 @@ class MissionParams:
     cruise_mps: float = 0.30
     climb_mps: float = 0.30
     descend_mps: float = 0.20
+    descend_xy_hold: bool = False       # DESCEND: also pull xy back over the landing point with a twist P-term.
+                                        # Off by default: a twist is rotated by the UNMEASURED frame offset (the
+                                        # interface doesn't correct twists), and a P-loop rotated ~90 deg orbits,
+                                        # >90 deg diverges. Turn on only with odom_to_ned_yaw_offset_rad measured
     max_speed_mps: float = 1.5          # the interface caps twists here too
     kp_xy: float = 1.0                  # 1/s: velocity per metre of error to the reference
     kp_z: float = 1.0
@@ -492,7 +496,7 @@ class SkybetaMission:
 
         if self.phase == "DESCEND":
             ox = oy = 0.0
-            if not self.hold_xy_on_descent:
+            if not (self.hold_xy_on_descent and p.descend_xy_hold):
                 pass                                                   # straight down, no steering
             elif self.land_xy_odom is not None:                        # hover: over the take-off point
                 ox, oy = p.kp_xy * (self.land_xy_odom[0] - x), p.kp_xy * (self.land_xy_odom[1] - y)

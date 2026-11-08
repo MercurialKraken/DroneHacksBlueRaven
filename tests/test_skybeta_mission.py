@@ -472,6 +472,41 @@ def test_a_takeoff_that_never_climbs_lands_instead_of_hanging():
     assert m.phase == "DONE", m.why                                       # PX4 disarmed on the ground: done
 
 
+class RotatedTwistSim(Sim):
+    """The interface maps our ENU twist into a PX4 frame rotated by `rot` from odom (the guide's frame offset,
+    unmeasured and uncorrected): every twist lands rotated. Poses are held by PX4 itself (not rotated here)."""
+    rot = math.radians(100.0)
+
+    def apply(self, cmd, t):
+        if cmd.twist is not None:
+            vx, vy, vz, wz = cmd.twist
+            c, s = math.cos(self.rot), math.sin(self.rot)
+            cmd = type(cmd)(**{**vars(cmd), "twist": (c * vx - s * vy, s * vx + c * vy, vz, wz)})
+        super().apply(cmd, t)
+
+
+def descent_drift(**kw):
+    m, sim = hover(height_m=0.7, hover_s=2.0, **kw), RotatedTwistSim()
+    t = to_ready(m, sim)
+    switch_to_offboard(t, sim)
+    t = until(m, sim, t, "DESCEND")
+    sim.x += 0.05                                   # a few cm off the landing point as the descent starts
+    x0, y0 = m.land_xy_odom
+    worst = 0.0
+    while m.phase == "DESCEND":
+        t, _ = run(m, sim, t, t + DT)
+        worst = max(worst, math.hypot(sim.x - x0, sim.y - y0))
+    return m, worst
+
+
+def test_default_descent_is_straight_down_so_a_frame_offset_cannot_spiral_it():
+    m, worst = descent_drift()
+    assert m.phase == "DONE", m.why
+    assert worst < 0.06                             # stays where it was: no xy steering at all
+    _, worst_hold = descent_drift(descend_xy_hold=True)
+    assert worst_hold > 2 * worst                   # the xy P-loop through a 100 deg offset runs away
+
+
 def test_hover_aborts_like_the_course_mission_when_offboard_drops():
     m, sim = hover(), Sim()
     t = to_ready(m, sim)

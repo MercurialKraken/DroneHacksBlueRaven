@@ -175,7 +175,9 @@ and takes over at **any** unexpected motion.
 3. Expect: a jump to the interface's 0.3 m floor as Offboard starts, then the climb to `height_m` at 0.3 m/s.
    If PX4 settles more than 8 cm off the height, the node waits up to 5 s, then hovers anyway and says by
    how much (`holding -0.12 m off the target height`); if it climbed less than half way, it lands. Then
-   `HOVER` for `hover_s`; `DESCEND` at 0.2 m/s; PX4 detects the
+   `HOVER` for `hover_s`; `DESCEND` straight down at 0.2 m/s (no sideways correction: a twist goes through
+   the unmeasured frame offset, and a correction rotated ~90 deg circles, >90 deg runs away;
+   `descend_xy_hold:=true` turns it on once the offset is measured and set); PX4 detects the
    touchdown and disarms (about 2 s); `DONE`. If it is on the floor and still armed after about 5 s, the
    pilot disarms it (the node keeps commanding a gentle descent until PX4 reports landed and disarmed).
 4. **If it drifts more than 0.4 m from the take-off point** while climbing or hovering, the node descends
