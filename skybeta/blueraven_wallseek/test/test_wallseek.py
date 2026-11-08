@@ -120,8 +120,11 @@ def phase_span(sim, phase):
     return ts[0], ts[-1]
 
 
+GAP_END = (1.48, 1.86)                          # pad (n, e): 0.5 m past the CP2 gap centre on the leg from (1.077, 1.10)
+
+
 @pytest.mark.parametrize("plant", ["drone", "t4"])
-def test_full_mission_stops_translates_lands_past_the_end(plant):
+def test_full_mission_stops_translates_and_flies_through_the_gap(plant):
     p = W.Params()
     kw = {}
     if plant == "t4":
@@ -129,27 +132,34 @@ def test_full_mission_stops_translates_lands_past_the_end(plant):
     s = Sim(p, **kw).run()
     assert s.m.phase == "done", s.m.log
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
-    assert seq[:7] == ["ready", "climb", "approach", "settle", "translate", "past", "land"], seq
-    # standoff held along the wall: the centre stays 0.50 +- 0.06 m from Wall A's face while beside it
-    beside = [r for r in s.trace if r[1] == "translate" and r[2][1] + HALF < WALL_E1]
+    assert seq[:7] == ["ready", "climb", "approach", "settle", "translate", "gap", "land"], seq
+    # standoff held along the wall: the centre stays 0.60 +- 0.06 m from Wall A's face while translating
+    beside = [r for r in s.trace if r[1] == "translate"]
     devs = [abs((WALL_N - r[2][0]) - p.standoff_m) for r in beside]
     assert beside and max(devs) < 0.06, max(devs)
-    assert s.min_wall > 0.29 + 0.09, s.min_wall                      # never within 9 cm of contact
-    # landed past the end: the drone's left side is clear of Wall A's end by about past_end
+    assert s.min_wall > 0.29 + 0.15, s.min_wall                      # Wall A (face and its east end): 15 cm spare
+    assert s.min_b > 0.29 + 0.15, s.min_b                            # Wall B's tip: 15 cm spare
     _, last = phase_span(s, "land")
-    assert last[2][1] - 0.29 > WALL_E1 + 0.2, last
+    assert math.dist(last[2][:2], GAP_END) < 0.15, last               # landed at the end point past the gap
     assert abs(last[2][2]) < 0.01                                      # on the ground
+
+
+def test_old_mode_translates_until_the_wall_ends():
+    s = Sim(W.Params(turn_e_m=0.0, standoff_m=0.44)).run()             # the gap leg off: as before
+    seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
+    assert seq[:7] == ["ready", "climb", "approach", "settle", "translate", "past", "land"], seq
+    assert s.trace[-1][2][1] - 0.29 > WALL_E1 + 0.2, s.trace[-1]
 
 
 def test_body_push_like_skybeta09_is_absorbed_by_the_depth_standoff():
     s = Sim(push=(-0.07, -0.07)).run()                                 # back + left (west) ~0.1 m/s
     assert s.m.phase == "done", s.m.log
-    beside = [r for r in s.trace if r[1] == "translate" and r[2][1] + HALF < WALL_E1 and r[0] > 0]
+    beside = [r for r in s.trace if r[1] == "translate" and r[0] > 0]
     assert max(abs((WALL_N - r[2][0]) - W.Params().standoff_m) for r in beside) < 0.10
-    assert s.min_wall > 0.29 + 0.05
-    assert any("past the wall's end" in x for x in s.m.log), s.m.log   # finished by the wall's end, not a timeout
-    assert s.min_b > 0.29 + 0.05, s.min_b                              # Wall B's tip (unseen: behind-right) stays clear
-    assert s.trace[-1][2][1] - 0.29 > WALL_E1 + 0.2, s.trace[-1]      # landed with its left side clear of the end
+    assert any("through the gap" in x for x in s.m.log), s.m.log       # finished the leg, not a timeout
+    assert s.min_wall > 0.29 + 0.12, s.min_wall
+    assert s.min_b > 0.29 + 0.12, s.min_b
+    assert math.dist(s.trace[-1][2][:2], GAP_END) < 0.20, s.trace[-1]
 
 
 def test_never_commands_a_turn_even_with_a_drifted_heading_estimate():
@@ -194,7 +204,7 @@ def test_single_wild_depth_frames_are_ignored():
     s = Sim(outlier_every=17).run()                    # a 0.30 m frame every ~0.6 s, as T4 run 2's 0.346
     assert s.m.phase == "done"
     assert not any("backing off" in (o or "") for o in [s.m.why]), s.m.log
-    assert any("past the wall's end" in x for x in s.m.log), s.m.log
+    assert any("through the gap" in x for x in s.m.log), s.m.log
 
 
 def test_cuvslam_variance_spike_lands_straight_down_before_any_jump():
@@ -212,7 +222,7 @@ def test_high_variance_on_the_ground_and_climb_does_not_ground_the_mission():
     s.var_fn = lambda: 0.05 if (s.pos[2] < 0.3 or s.m.phase in ("ready", "climb")) else 0.004
     s.run()
     assert not any("variance" in x for x in s.m.log), s.m.log
-    assert any("past the wall's end" in x for x in s.m.log), s.m.log
+    assert any("through the gap" in x for x in s.m.log), s.m.log
 
 
 def test_variance_check_waits_for_one_metre_forward():
@@ -225,7 +235,7 @@ def test_variance_check_waits_for_one_metre_forward():
 def test_slide_immediately_variant_skips_the_stop():
     s = Sim(p=W.Params(slide_immediately=True)).run()
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
-    assert "settle" not in seq and seq[:6] == ["ready", "climb", "approach", "translate", "past", "land"], seq
+    assert "settle" not in seq and seq[:6] == ["ready", "climb", "approach", "translate", "gap", "land"], seq
     assert s.min_wall > 0.29 + 0.07, s.min_wall
 
 
@@ -237,7 +247,7 @@ def test_no_wall_lands_before_the_forward_limit():
 
 
 def test_endless_wall_lands_at_the_right_limit():
-    s = Sim(wall=(WALL_N, -1.0, 10.0)).run()
+    s = Sim(W.Params(turn_e_m=0.0), wall=(WALL_N, -1.0, 10.0)).run()   # old mode (no gap leg)
     assert any("did not end within" in x for x in s.m.log), s.m.log
     assert max(r[2][1] for r in s.trace) < W.Params().max_right_m + 0.15
 

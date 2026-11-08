@@ -17,14 +17,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 NAV_OFFBOARD = 14
-AIRBORNE = ("climb", "approach", "settle", "translate", "past")
+AIRBORNE = ("climb", "approach", "settle", "translate", "past", "gap")
 
 
 @dataclass
 class Params:
     height_m: float = 0.40          # flight height above the pad (Darion)
-    standoff_m: float = 0.44        # drone CENTRE to the wall's face while stopped/translating (Darion + Hinson:
-                                    # ~15 cm past the radius to both Wall A and Wall B's tip)
+    standoff_m: float = 0.60        # drone CENTRE to Wall A's face while stopped/translating (Darion: 0.44 kept
+                                    # cuVSLAM too close to a plain wall in every T4 run). Straight on at 0.60 would pass
+                                    # Wall B's tip at 0.28 m (< radius 0.29), hence the gap leg below.
+    # the gap leg (Darion): translate east until turn_e_m (vision estimate), then fly straight through the CP2 gap's
+    # centre, on gap_past_m beyond it, and land. Launch-relative numbers on the tape course (pad: north = forward from
+    # the launch mark, east = right): best turn at 1.10-1.12 m east -> 28.6 deg north of east (the gap normal is 28.8),
+    # 0.50 m from both Wall A's end and Wall B's tip. On the T4 the spawn is 0.2 m further north: gap_n_m 1.039.
+    turn_e_m: float = 1.10          # 0 disables the gap leg (then: translate until the wall ends, as before)
+    gap_n_m: float = 1.239
+    gap_e_m: float = 1.417
+    gap_past_m: float = 0.50
     approach_mps: float = 0.15      # forward speed toward the wall
     translate_mps: float = 0.10     # rightward speed along the wall
     past_end_m: float = 0.35        # carry on this far right after the wall has ended
@@ -152,6 +161,8 @@ class WallSeek:
     var_count: int = 0
     t_slow: dict = field(default_factory=dict)   # per integral: since when the drone has been slow on that axis
     var_armed: bool = False         # the cuVSLAM-variance check is live (after lift-off and var_check_after_m forward)
+    leg: tuple | None = None        # gap leg: (start (n, e), end (n, e), unit (n, e), length)
+    s_ref: float = 0.0
     dt: float = 0.0
     i_n: float = 0.0                # integral share, north (standoff loop and north holds)
     i_e: float = 0.0                # integral share, east (east holds)
@@ -408,7 +419,9 @@ class WallSeek:
             if i.depth_seq != self.last_seq:                     # count FRAMES, not ticks
                 self.last_seq = i.depth_seq
                 self.clear_count = 0 if wall else self.clear_count + 1
-            if e >= p.max_right_m:
+            if p.turn_e_m > 0 and e >= p.turn_e_m:              # Darion: before Wall B's tip, angle through the gap
+                self._start_gap(i, n, e)
+            elif e >= p.max_right_m:
                 self._land(i, f"the wall did not end within {p.max_right_m:.2f} m right")
             elif i.now - self.t_phase > p.translate_timeout_s:
                 self._land(i, f"translate did not finish within {p.translate_timeout_s:.0f} s")
@@ -429,9 +442,44 @@ class WallSeek:
                 return Output(self.phase, self.why,
                               (self._hold(self.n_hold, n, vn_m, "i_n"), self._east_ve(e, ve_m), self._vz(i), self._wz(i)))
 
+        if self.phase == "gap":
+            (tn, te), (gn, ge), (un, ue), total = self.leg
+            s_now = (n - tn) * un + (e - te) * ue                 # progress along the leg
+            if s_now >= total - 0.03:
+                self._land(i, f"through the gap: {math.hypot(n - gn, e - ge):.2f} m from the end point")
+            elif e >= p.max_right_m + 0.3:
+                self._land(i, f"east {e:.2f} m: past the limit on the gap leg")
+            elif self.ahead_f is not None and self.ahead_f < p.contact_m and i.now - i.t_depth <= p.depth_hold_s:
+                self._land(i, f"surface {self.ahead_f:.2f} m ahead on the gap leg")
+            elif i.now - self.t_phase > p.translate_timeout_s:
+                self._land(i, f"gap leg did not finish within {p.translate_timeout_s:.0f} s")
+            else:
+                v = p.translate_mps
+                self.s_ref = min(self.s_ref + v * self.dt, s_now + 0.20, total)
+                rn, re = tn + self.s_ref * un, te + self.s_ref * ue      # moving reference along the straight leg
+                ff = v if self.s_ref < total else 0.0
+                cap = 2 * p.translate_mps
+                vn = _clamp(ff * un + p.k_xy * ((rn - n) - p.lag_s * (vn_m - ff * un)) + self._integrate("i_n", rn - n, vn_m - ff * un),
+                            -cap, cap)
+                ve = _clamp(ff * ue + p.k_xy * ((re - e) - p.lag_s * (ve_m - ff * ue)) + self._integrate("i_e", re - e, ve_m - ff * ue),
+                            -cap, cap)
+                return Output(self.phase, self.why, (vn, ve, self._vz(i), self._wz(i)))
+
         if self.phase == "land":
             return self._descend(i, armed, offboard)
         return Output(self.phase, self.why)
+
+    def _start_gap(self, i: Inputs, n: float, e: float) -> None:
+        """A straight leg from here through the CP2 gap's centre, on past it by gap_past_m (nose still north)."""
+        p = self.p
+        dn, de = p.gap_n_m - n, p.gap_e_m - e
+        d = math.hypot(dn, de)
+        un, ue = dn / d, de / d
+        end = (p.gap_n_m + p.gap_past_m * un, p.gap_e_m + p.gap_past_m * ue)
+        self.leg = ((n, e), end, (un, ue), d + p.gap_past_m)
+        self.s_ref = 0.0
+        self._set("gap", i.now, f"at east {e:.2f} m: straight through the gap, {math.degrees(math.atan2(un, ue)):.0f} deg "
+                                f"north of east, to N {end[0]:.2f} E {end[1]:.2f}")
 
     # ------------------------------------------------------------------ landing (refnav_skybeta.Descent)
     def _descend(self, i: Inputs, armed: Any, offboard: Any) -> Output:
