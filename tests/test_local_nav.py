@@ -1,0 +1,188 @@
+"""Map-free navigation: the live depth grid (nav/local_grid.py) and waypoint lines + MPPI (nav/local_nav.py),
+closed loop against a simulated forward depth camera in small 2.5D worlds (tests/sim_world.py)."""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pytest
+
+from nav.local_grid import LocalGrid, LocalGridParams
+from nav.local_nav import LocalNav, LocalNavParams, waypoint_path
+from sim_world import Drone, World
+
+WALL = 1.73          # walls are 68 in tall
+
+
+def cell_value(g: LocalGrid, x: float, y: float) -> float:
+    i, j, ok = g.cells(np.array([[x, y]]))
+    assert ok[0]
+    return float(g.L[i[0], j[0]])
+
+
+# ---------------------------------------------------------------------------------------------- grid
+def test_a_wall_ahead_is_occupied_and_the_space_before_it_free():
+    w = World((-1, 6), (-2, 2), boxes=[(3.0, 3.2, -2, 2, WALL)])
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    for _ in range(3):
+        g.integrate(w.depth_points(cam, 0.0), cam, 0.7)
+    assert cell_value(g, 3.0, 0.0) >= g.p.l_occ
+    assert cell_value(g, 1.5, 0.0) < 0.0
+    d = g.grid2d()
+    from nav.mppi import Mppi
+    m = Mppi(d, np.array([[0.0, 0.0], [1.0, 0.0]]), np.array([0.3, 0.3]))
+    assert float(m.clearance(np.array([[2.0, 0.0]]))[0]) == pytest.approx(1.0, abs=0.06)
+
+
+def test_floor_is_not_an_obstacle_but_a_boulder_is():
+    w = World((-1, 6), (-5, 5), boxes=[(1.5, 1.95, -0.2, 0.25, 0.40)])   # an 18 in boulder, 0.4 m tall
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    for _ in range(3):
+        g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
+    occ = g.occupied()
+    i, j, _ = g.cells(np.array([[1.5, 0.0]]))
+    assert occ[i[0] - 1:i[0] + 2, j[0] - 2:j[0] + 3].any()                 # the boulder's face
+    i, j, _ = g.cells(np.array([[1.0, 0.8]]))
+    assert not occ[i[0], j[0]]                                            # floor beside it: not an obstacle
+    assert occ.sum() < 200                                                # nothing else got marked
+
+
+def test_low_returns_far_away_are_ignored():
+    w = World((-1, 8), (-5, 5), boxes=[(3.5, 3.95, -0.2, 0.25, 0.40)])   # boulder 3.5 m out: beyond low_range_m
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
+    assert not g.occupied().any()
+
+
+def test_a_tunnel_ceiling_is_not_a_wall():
+    w = World((-1, 6), (-2, 2), boxes=[(2.0, 5.0, -2, 2, 0.0)])
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    ceiling = np.c_[np.linspace(1.0, 3.0, 50), np.zeros(50), np.full(50, 1.2)]   # 0.5 m above the drone
+    g.integrate(ceiling, cam, 0.7)
+    assert not g.occupied().any()
+
+
+def test_walls_out_of_view_are_remembered_and_phantoms_get_cleared():
+    w = World((-1, 6), (-5, 5), boxes=[(3.6, 3.8, -5, 5, WALL)])
+    g = LocalGrid()
+    cam = np.array([0.0, 0.0, 0.7])
+    phantom = np.array([[2.5, 0.0, 0.7]])                                   # beyond the never-cleared zone
+    g.integrate(phantom, cam, 0.7)
+    g.integrate(phantom, cam, 0.7)
+    assert cell_value(g, 2.5, 0.0) >= g.p.l_occ
+    for _ in range(6):                                                    # the camera looks past it to the wall
+        g.integrate(w.depth_points(cam, 0.0), cam, 0.7)
+    assert cell_value(g, 2.5, 0.0) < g.p.l_occ
+    assert cell_value(g, 3.6, 0.0) >= g.p.l_occ
+    for _ in range(5):                                                    # now looking the other way
+        g.integrate(w.depth_points(cam, math.pi), cam, 0.7)
+    assert cell_value(g, 3.6, 0.0) >= g.p.l_occ                           # still remembered
+
+
+def test_a_boulder_under_the_camera_is_not_erased_by_rays_passing_over_it():
+    w = World((-1, 6), (-5, 5), boxes=[(1.0, 1.3, -0.15, 0.15, 0.30), (4.0, 4.2, -5, 5, WALL)])
+    g = LocalGrid()
+    for x in (0.0, 0.2):                                                  # far enough to see it: marked
+        cam = np.array([x, 0.0, 0.7])
+        for _ in range(2):
+            g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
+    assert g.occupied()[g.cells(np.array([[1.0, 0.0]]))[0][0] - 1:g.cells(np.array([[1.0, 0.0]]))[0][0] + 2].any()
+    cam = np.array([0.6, 0.0, 0.7])                                       # now too close: only the wall is seen
+    for _ in range(8):
+        g.integrate(w.depth_points(cam, 0.0, n_v=31), cam, 0.7)
+    i, j, _ = g.cells(np.array([[1.0, 0.0]]))
+    assert g.occupied()[i[0] - 1:i[0] + 2, j[0] - 3:j[0] + 4].any()
+
+
+def test_the_window_follows_the_drone_and_keeps_world_positions():
+    g = LocalGrid(LocalGridParams(recentre_m=1.0))
+    cam = np.array([0.0, 0.0, 0.7])
+    g.integrate(np.array([[2.0, 1.0, 0.7]] * 3), cam, 0.7)
+    g.integrate(np.array([[2.0, 1.0, 0.7]] * 3), cam, 0.7)
+    before = cell_value(g, 2.0, 1.0)
+    g.follow((3.3, -1.2))
+    assert np.max(np.abs(g.centre - (3.3, -1.2))) <= g.p.cell
+    assert cell_value(g, 2.0, 1.0) == pytest.approx(before)
+
+
+# ---------------------------------------------------------------------------------------------- path
+def test_waypoint_path_slows_at_corners_and_stops_at_the_end():
+    p = LocalNavParams()
+    P, v = waypoint_path((0, 0), [(3, 0), (3, -3)], p)
+    s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
+    assert s[-1] == pytest.approx(6.0, abs=1e-6)
+    assert v[np.argmin(np.abs(s - 1.5))] == pytest.approx(p.v_cruise)
+    assert v[np.argmin(np.abs(s - 3.0))] <= p.v_corner + 1e-9
+    assert v[-1] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------------------------- closed loop
+def fly(world: World, waypoints, start=(0.0, 0.0), yaw0=0.0, seconds=60.0, depth_every=1):
+    nav = LocalNav(waypoints, start, yaw0)
+    drone = Drone(np.array(start, float), yaw0)
+    dt = nav.mppi.p.dt
+    traj, states = [drone.x.copy()], []
+    for k in range(int(seconds / dt)):
+        if k % depth_every == 0:
+            cam = drone.cam()
+            nav.add_depth(world.depth_points(cam, drone.yaw), cam, drone.z, k * dt)
+        cmd = nav.step(drone.x, drone.v, k * dt)
+        states.append(cmd.state)
+        if cmd.state == "ARRIVED":
+            break
+        drone.step((cmd.vx, cmd.vy), cmd.yaw, dt)
+        traj.append(drone.x.copy())
+    return np.array(traj), states, nav
+
+
+def cp1_world() -> World:
+    """Straight 4 m, a wall ahead, turn right, 4 m on (corridors 1.2 m wide)."""
+    return World((-1.0, 5.5), (-5.5, 1.5), boxes=[
+        (-0.7, -0.5, -0.8, 0.8, WALL),       # behind the start
+        (-0.7, 4.8, 0.6, 0.8, WALL),         # left wall, then the wall ahead's top corner
+        (-0.7, 3.4, -0.8, -0.6, WALL),       # right wall of the first corridor
+        (4.6, 4.8, -4.7, 0.8, WALL),         # the wall ahead, continuing as the second corridor's left wall
+        (3.2, 3.4, -4.7, -0.6, WALL),        # second corridor's right wall
+        (3.2, 4.8, -4.9, -4.7, WALL),        # its end
+    ])
+
+
+def test_cp1_straight_wall_ahead_turn_right_with_rough_waypoints():
+    w = cp1_world()
+    traj, states, nav = fly(w, [(4.3, 0.25), (3.8, -3.6)])               # both ~0.3 m off the corridor centres
+    assert states[-1] == "ARRIVED", states[-5:]
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone
+    assert "BLOCKED" not in states
+
+
+def test_a_slanted_wall_crossing_the_line_is_slid_along():
+    w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1, 1, WALL), (-0.7, 6.5, 0.6, 0.8, WALL),
+                                               (6.3, 6.5, -1.0, 0.8, WALL)],
+              polys=[(np.array([[-0.5, -1.0], [6.3, -1.0], [6.3, -0.30], [-0.5, -0.80]]), WALL)])
+    traj, states, nav = fly(w, [(5.6, 0.0)])                              # 1.4 m wide narrowing to 0.9 m
+    assert states[-1] == "ARRIVED", states[-5:]
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone
+
+
+def test_a_boulder_on_the_line_is_flown_round_not_over():
+    w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 6.5, 1.0, 1.2, WALL),
+                                               (-0.7, 6.5, -1.2, -1.0, WALL), (6.3, 6.5, -1.2, 1.2, WALL),
+                                               (2.8, 3.25, -0.22, 0.23, 0.40)])
+    traj, states, nav = fly(w, [(5.6, 0.0)])
+    assert states[-1] == "ARRIVED", states[-5:]
+    boulder = np.hypot(np.maximum(np.abs(traj[:, 0] - 3.025) - 0.225, 0), np.maximum(np.abs(traj[:, 1] - 0.005) - 0.225, 0))
+    assert boulder.min() > nav.mppi.p.r_drone
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone
+
+
+def test_a_moved_wall_jutting_across_the_line():
+    w = World((-1.0, 7.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 6.5, 1.0, 1.2, WALL),
+                                               (-0.7, 6.5, -1.2, -1.0, WALL), (6.3, 6.5, -1.2, 1.2, WALL),
+                                               (2.9, 3.1, -1.0, 0.10, WALL)])       # juts 0.1 m past the line
+    traj, states, nav = fly(w, [(5.6, 0.0)])
+    assert states[-1] == "ARRIVED", states[-5:]
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone
