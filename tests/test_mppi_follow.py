@@ -119,15 +119,17 @@ def test_nav_must_be_refnav_or_mppi():
 
 
 # ---------------------------------------------------------------------------------------------- flights
-def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None):
+def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: float = 200.0, world=None,
+           plant: tuple[float, float] = (0.3, 0.0)):
     """The stage-1 flight from the sim spawn: odometry starts at the spawn facing x (map = spawn + Rz(launch yaw) odom),
     so truth is odometry. Depth at 15 Hz, stamped at capture and delivered 70 ms later, as on the drone."""
     w0, start, yaw_map, _, _ = tape_course()
     w = world or w0
     off = math.radians(offset_deg)
     prm, _ = C.params_from_doc(STAGE1, {**LAUNCH_PARAMS, "nav": "mppi"})
-    m, sk, v, pad, descent = C.Mission(prm), Stack(off, 0.0), C.Vehicle(), None, S.Descent()
-    mf = M.MppiFollow(0.15, 0.3)                                           # the Stack's velocity lag
+    m, sk, v, pad, descent, track = C.Mission(prm), Stack(off, 0.0, tau=plant[0], delay=plant[1]), C.Vehicle(), None, S.Descent(), S.Track()
+    lag = plant[0] + plant[1]                                               # vel_lag_s: the Stack's lag + dead time
+    mf = M.MppiFollow(0.15, lag)
     state, t_state, t_odom, t_arm = None, -math.inf, -math.inf, None
     R_map = _rz(yaw_map)
     traj, states, sent, pending = [], [], [], []
@@ -157,7 +159,7 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
             if m.ext:
                 states.append(m.ext["state"])
         out = m.step(t, v)
-        tw, land = S.command(out, v, pad, descent, state, t_odom, t_state, t, prm.yaw_rate_dps, off)
+        tw, land = S.command(out, v, pad, descent, track, state, t_odom, t_state, t, prm.yaw_rate_dps, off, lag)
         if land:
             m.request_land(land)
         if tw is not None:
@@ -172,9 +174,9 @@ def flight(offset_deg: float = 0.0, depth_until: float = math.inf, limit_s: floa
     return m, sk, np.array(traj), states, w, mf
 
 
-@pytest.mark.parametrize("offset_deg", [0.0, -90.0])
-def test_stage1_is_flown_through_the_1m_cp2_gap_and_landed(offset_deg):
-    m, sk, traj, states, w, mf = flight(offset_deg)
+@pytest.mark.parametrize("offset_deg, plant", [(0.0, (0.3, 0.0)), (-90.0, (0.3, 0.0)), (-90.0, (0.9, 0.6))])
+def test_stage1_is_flown_through_the_1m_cp2_gap_and_landed(offset_deg, plant):
+    m, sk, traj, states, w, mf = flight(offset_deg, plant=plant)                # (0.9, 0.6): the T4 sim's fitted lag
     assert m.result == "complete", (m.result, m.why, states[-5:])
     assert not sk.armed and sk.landed
     assert w.clearance(traj, min_height=0.35).min() > mf.mppi_p.r_drone      # the cone is flown over
