@@ -15,46 +15,60 @@ Check each step's expected output and stop at the first surprise.
 
 ## Hover day: command sheet
 
-Three shells on the drone. **A** = the stack's `competitor` tmux window (our node runs there), **B** and **C**
-= `host/run.sh shell` (monitoring, recording). `<sha>` = the reviewed commit. Sections 1-5 explain each step.
+Connect over a **USB-C data cable into the Jetson's port**: `ssh dronehacks@skybeta-09.local` from PowerShell
+(password from Arnav, in person). If the laptop's USB adapter sits on 169.254.x.x: in an admin PowerShell,
+`New-NetIPAddress -InterfaceAlias '<UsbNcm adapter from Get-NetAdapter>' -IPAddress 192.168.55.100 -PrefixLength 24`,
+then `ssh dronehacks@192.168.55.1`. **First command every time: `hostname`; it must print `skybeta-09`**
+(logging in to another team's drone is a disqualification).
+
+Four SSH windows. **HOST** = the drone host. **NODE**, **WATCH**, **RECORD** = `~/skybeta/host/run.sh shell`
+each (a `root@` prompt; paste container commands only there). Don't restart the stack. `<sha>` = the
+reviewed commit. Sections 1-5 explain each step.
 
 ```bash
 # --- laptop: package the reviewed commit, copy it over (or use a USB stick) ---
 git archive --format=tar.gz -o blueraven-<sha>.tar.gz <sha>
-scp blueraven-<sha>.tar.gz <user>@<drone>:~/
+scp blueraven-<sha>.tar.gz dronehacks@skybeta-09.local:~/
 
-# --- drone host ---
+# --- HOST ---
+hostname                                                         # skybeta-09, or log out
 sudo timedatectl set-ntp false                                   # rule 0
+ls ~/team_ws/src                                                 # expect nothing else that would build
 mkdir -p ~/team_ws/src/blueraven && tar -xzf ~/blueraven-<sha>.tar.gz -C ~/team_ws/src/blueraven
 echo <sha> > ~/team_ws/src/blueraven/VERSION_FLOWN
-ls ~/team_ws/src                                                 # expect only blueraven
+# stop the organizers' example (it flies a 5 m square on arm + Position); two flight interfaces must never run
+docker exec -it skybeta-stack tmux attach -t skybeta            # Ctrl-b w -> competitor, Ctrl-C, then Ctrl-b d
 
-# --- A: stop the organizers' example, build ours (two flight interfaces must never run) ---
-docker exec -it skybeta-stack tmux attach -t skybeta            # select the `competitor` window, Ctrl-C it
+# --- NODE: build ours ---
 cd /root/team_ws && team_build.sh --packages-select blueraven_skybeta && source install/setup.bash
 
-# --- B: health, then the frame offset (props OFF, drone on the ground, turn it by hand) ---
+# --- WATCH: health, then the frame offset (props OFF, drone on the ground, turn it by hand) ---
 source /root/team_ws/install/setup.bash
 ros2 topic echo /skybeta/state --once                           # px4_link: true, local_enu not null
 timeout 5 ros2 topic hz /visual_slam/tracking/odometry          # ~30 Hz
 ros2 run blueraven_skybeta yaw_offset_probe --ros-args -p seconds:=40.0   # prints RESULT: offset, spread
 
-# --- C: record (no images), before arming; Ctrl-C after it has disarmed ---
+# --- RECORD: record (no images), before arming; Ctrl-C after it has disarmed ---
 ros2 bag record -s mcap -o /root/team_ws/bags/hover_NN \
   /visual_slam/tracking/odometry /visual_slam/status /skybeta/state \
   /skybeta/setpoint/pose /skybeta/setpoint/twist /blueraven/mission/status \
   /fmu/in/vehicle_visual_odometry /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 \
   /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude /tf /tf_static
 
-# --- A: our node (drone still on the launch mark). Add odom_to_ned_yaw_offset_rad:=<rad> only if agreed ---
+# --- NODE: our node (drone still on the launch mark). Add odom_to_ned_yaw_offset_rad:=<rad> only if agreed ---
 ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
 
-# --- B: watch it ---
+# --- WATCH: watch it ---
 ros2 topic echo /blueraven/mission/status                       # INIT -> WAIT_OFFBOARD -> ...
 
-# --- after: Ctrl-C the node (A) and the recording (C) ---
+# --- after: Ctrl-C the node (NODE) and the recording (RECORD); then on HOST ---
 sudo timedatectl set-ntp true                                    # before power-off
+# --- laptop: fetch the bags ---
+scp -r dronehacks@skybeta-09.local:~/team_ws/bags/hover_NN .
 ```
+
+**Battery swap = a reboot:** redo `hostname`, NTP off, and stop the competitor example again (the build in
+`~/team_ws` survives).
 
 **Before walking away from the drone:** after a stack restart the `competitor` window runs whatever
 `COMPETITOR_PKG` names in `/etc/skybeta/drone.env`, by default the organizers' example, which **takes off
@@ -89,24 +103,19 @@ mkdir -p ~/team_ws/src/blueraven && tar -xzf ~/blueraven.tar.gz -C ~/team_ws/src
 echo <reviewed-sha> > ~/team_ws/src/blueraven/VERSION_FLOWN
 ```
 
-Then point the stack at it, in `/etc/skybeta/drone.env`:
-
-```
-COMPETITOR_PKG=blueraven_skybeta
-COMPETITOR_LAUNCH=blueraven.launch.py
-```
-
-and restart the stack **with the drone still on the launch mark**: `docker rm -f skybeta-stack` (back in
-about 10 s). The default launch is a 5 s hover at 0.70 m. To change it for a session, run by hand instead
-(next block), or edit the defaults in `launch/blueraven.launch.py` and note it on the log sheet.
-
-By hand: attach (`docker exec -it skybeta-stack tmux attach -t skybeta`), select the `competitor`
-window, Ctrl-C it (two flight interfaces must never run together), then in that window:
+**Run it by hand** (the way to test; Arnav's rule: don't restart the stack). Attach
+(`docker exec -it skybeta-stack tmux attach -t skybeta`), select the `competitor` window (Ctrl-b w), Ctrl-C it
+(two flight interfaces must never run together), detach (Ctrl-b d). Then, in your own
+`~/skybeta/host/run.sh shell`:
 
 ```bash
 cd /root/team_ws && team_build.sh --packages-select blueraven_skybeta && source install/setup.bash
 ros2 launch blueraven_skybeta blueraven.launch.py mission:=hover height_m:=0.5 hover_s:=30.0
 ```
+
+For scored runs (later, the team decides): point the stack at our package in `/etc/skybeta/drone.env`
+(`COMPETITOR_PKG=blueraven_skybeta`, `COMPETITOR_LAUNCH=blueraven.launch.py`); it takes effect at the next
+stack start, so set it before a power-up, never by restarting a running stack.
 
 Our node takes `30` or `30.0`; write **decimals for the flight interface's own arguments**
 (`odom_to_ned_yaw_offset_rad:=0.0`, `max_speed_mps:=1.5`): it types them from their defaults and refuses
