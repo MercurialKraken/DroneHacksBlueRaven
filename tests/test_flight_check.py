@@ -495,3 +495,58 @@ def test_jitter_and_slow_wander_are_not_an_orbit():
         p[:, :2] += np.cumsum(rng.normal(0, 0.001, (t.size, 2)), axis=0)
         o = F.orbit(t, p, np.array([0.0, 0.0, 0.7]))
         assert not o["orbiting"] and o["period_s"] is None and o["direction"] is None
+
+
+def _db3(path, channels):
+    """channels: [(topic, type, [(log_time_s, bytes), ...])] -> a rosbag2 sqlite3 file."""
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE topics(id INTEGER PRIMARY KEY, name TEXT, type TEXT,"
+        " serialization_format TEXT, offered_qos_profiles TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE messages(id INTEGER PRIMARY KEY, topic_id INTEGER, timestamp INTEGER,"
+        " data BLOB)"
+    )
+    for i, (topic, typ, msgs) in enumerate(channels, start=1):
+        con.execute("INSERT INTO topics VALUES (?,?,?,?,?)", (i, topic, typ, "cdr", ""))
+        con.executemany(
+            "INSERT INTO messages(topic_id, timestamp, data) VALUES (?,?,?)",
+            [(i, int(t * 1e9), d) for t, d in msgs],
+        )
+    con.commit()
+    con.close()
+
+
+def test_db3_bag_folder_reads_like_mcap(tmp_path):
+    t = np.arange(0, 4, 1 / 30)
+    p = np.c_[0.2 * t, np.zeros_like(t), np.full_like(t, 0.5)]
+    p[60:, 0] += 10.0
+    bag = tmp_path / "hover_x"
+    bag.mkdir()
+    (bag / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
+    _db3(
+        bag / "hover_x_0.db3",
+        [
+            (
+                A.DEFAULTS["odom"],
+                "nav_msgs/msg/Odometry",
+                [(100 + a, odom(100 + a - 0.06, b)) for a, b in zip(t, p)],
+            ),
+            (A.DEFAULTS["state"], "std_msgs/msg/String", [(100.0, string("ARMED"))]),
+        ],
+    )
+    rep = A.analyze(A.load(bag), dict(A.DEFAULTS), F.Thresholds())
+    assert [e["kind"] for e in rep["vio"]["events"]] == ["jump"]
+    assert rep["latency"][A.DEFAULTS["odom"]]["median_ms"] == pytest.approx(60, abs=1)
+    assert rep["state_changes"][0]["state"] == "ARMED"
+
+
+def test_compressed_bag_gets_a_hint(tmp_path):
+    bag = tmp_path / "b"
+    bag.mkdir()
+    (bag / "b_0.db3.zstd").write_bytes(b"x")
+    with pytest.raises(SystemExit, match="decompress"):
+        A.load(bag)

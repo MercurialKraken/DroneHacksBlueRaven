@@ -21,6 +21,11 @@ rules.
 - [ ] VIO alive and still: on the ground, odometry ~30 Hz and not moving
       (`timeout 10s ros2 topic hz /visual_slam/tracking/odometry`).
 - [ ] Recording started (next section). No recording, no flight.
+- [ ] **Right before arming, count the processes**: exactly ONE `/flight_interface`, ONE
+      `/blueraven_mission` (or the team's mission node), ONE `/oak`, and NO `/competitor_example`.
+      First real hover (2026-11-07): an interrupted SSH command kept running on the drone, so
+      two interfaces and two missions were up; the count caught it. After any stack restart the
+      organizers' square mission comes back: count again.
 
 ## Record (inside the skybeta container)
 
@@ -66,7 +71,7 @@ Each step is worth doing only once the previous one passed.
 | 0 | **No flight:** drone on the ground, props off, 2 min recording while people walk around outside the net | Does VIO jump from movement behind the netting? | No jump events |
 | 1 | Hover on VIO, 30 s at about 0.7 m | Does it hold still on camera-only tracking? | No jumps; horizontal drift p95 < 0.15 m |
 | 2 | 2 m out and back along a tape measure | How much does VIO over- or under-read distance? | Back within 0.10 m of start; out-leg within 5 % of tape |
-| 3 | Hover, then twist descent to the floor at **at least 0.3 m/s** (the hover mission uses 0.35, then a firmer press) | Does PX4 detect touchdown and disarm itself (`COM_DISARM_LAND` = 2 s)? CP5 depends on it | Disarms by itself within about 3 s of touchdown |
+| 3 | Hover, then twist descent to the floor at **at least 0.3 m/s** (the hover mission uses 0.35, then a firmer press) | Does PX4 detect touchdown and disarm itself (`COM_DISARM_LAND` = 2 s)? CP5 depends on it | Disarms by itself, about 9 s after touchdown (sim: touchdown → landed 6.7 s, → disarm 8.7 s; the 0.6 m/s press after 3 s on the ground is needed). Props spinning on the pad for those seconds is expected, not a reason to panic |
 | 4 | One straight leg at 0.3 m/s | Does twist mode fly the commanded speed? | Speed error median < 0.05 m/s; no jumps |
 | 5 | One corner at 0.3 m/s | How much does the drone overshoot or cut a corner? | Tracking error p95 well inside the narrowest clearance (about 0.28 m spare) |
 | 6 | Full course at 0.3 m/s | Can it finish? | All checkpoints; no jumps |

@@ -19,7 +19,8 @@ python3 tools/flight_check/analyze_flight.py walk3 --out walk3 \
 Every time in the report is also shown as wall clock (`--tz`, default America/Los_Angeles),
 taken from the recording computer's clock: with NTP off it can be a few seconds off.
 
-It reads one `.mcap` file or a ros2 bag folder and writes `flight_03_report.txt`,
+It reads one `.mcap` or `.db3` file (rosbag2's MCAP or default sqlite3 storage) or a ros2 bag
+folder and writes `flight_03_report.txt`,
 `flight_03_report.json` and `flight_03.png` (if matplotlib is installed). It reports:
 
 | Section | What it means |
@@ -39,7 +40,7 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 
 ## How it was checked
 
-- `python3 -m pytest -q tests/test_flight_check.py`: 26 tests with hand-encoded CDR messages in a
+- `python3 -m pytest -q tests/test_flight_check.py`: 28 tests with hand-encoded CDR messages in a
   minimal MCAP file (decoders, dropouts, jumps, freezes, tracking maths, missing topics,
   read-only source check).
 - Cross-checked once against an **independent** writer (the `mcap` + `mcap-ros2-support` packages,
@@ -55,6 +56,9 @@ option. For **sim** runs flown by refnav, use `tools/analyze_bag.py` instead.
 - The hold/orbit numbers were checked on two independent-writer hovers with 5 mm sensor noise: a
   0.1 m clockwise orbit every 8 s (reported 0.10 m, 7.97 s, cw) and a still hover (reported not
   orbiting). In 600 random jitter/wander hovers no false orbit, in 300 noisy orbits none missed.
+- `.db3` reading checked against a bag written by the independent `rosbags` library (Jazzy
+  types, sqlite3 storage): an 8 cm counter-clockwise orbit every 6 s and 58 ms data age came
+  back exactly.
 - Not yet run on a real recording.
 
 Needs only numpy (matplotlib optional; zstandard/lz4 for compressed bags, laptop only). It uses

@@ -6,7 +6,7 @@
       -> flight_03_report.json  the same, for comparing flights
       -> flight_03.png          top-down path + tracking error + speed (if matplotlib is present)
 
-Accepts one .mcap file or a ros2 bag folder (all .mcap files inside are read). Offline and
+Accepts one .mcap or .db3 file, or a ros2 bag folder (all .mcap/.db3 files inside are read). Offline and
 read-only: no ROS, no node, no publisher. Uses tools/mcap_read.py (zstd/lz4 chunks need the
 optional zstandard/lz4 packages, laptop only).
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,19 +41,40 @@ DEFAULTS = {
 }
 
 
+def _messages(f: Path):
+    """One bag file -> (topic, type, log time ns, CDR bytes). Reads MCAP (rosbag2 '-s mcap') and
+    rosbag2's default sqlite3 storage (.db3), the latter opened read-only."""
+    if f.suffix == ".db3":
+        con = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+        try:
+            types = {i: (n, t) for i, n, t in con.execute("SELECT id, name, type FROM topics")}
+            for tid, ts, data in con.execute("SELECT topic_id, timestamp, data FROM messages"):
+                name, typ = types[tid]
+                yield name, typ, ts, bytes(data)
+        finally:
+            con.close()
+        return
+    schemas, chans, msgs = read(str(f))
+    for cid, lt, data in msgs:
+        topic, sid = chans[cid]
+        yield topic, schemas.get(sid, ("?", ""))[0], lt, data
+
+
 def load(path: Path) -> dict[str, dict]:
     """-> {topic: {"schema": name, "t": [log s], "msgs": [decoded or None]}}, time-ordered."""
     if not path.exists():
         raise SystemExit(f"not found: {path} (copy the bag folder there first)")
-    files = sorted(path.glob("*.mcap")) if path.is_dir() else [path]
+    if path.is_dir():
+        files = sorted(path.glob("*.mcap")) + sorted(path.glob("*.db3"))
+    else:
+        files = [path]
     if not files:
-        raise SystemExit(f"no .mcap file in {path}")
+        zst = sorted(path.glob("*.zstd")) if path.is_dir() else []
+        hint = " (compressed .zstd files: decompress them first)" if zst else ""
+        raise SystemExit(f"no .mcap or .db3 file in {path}{hint}")
     out: dict[str, dict] = {}
     for f in files:
-        schemas, chans, msgs = read(str(f))
-        for cid, lt, data in msgs:
-            topic, sid = chans[cid]
-            schema = schemas.get(sid, ("?", ""))[0]
+        for topic, schema, lt, data in _messages(f):
             e = out.setdefault(topic, {"schema": schema, "t": [], "raw": []})
             e["t"].append(lt / 1e9)
             e["raw"].append(data)
