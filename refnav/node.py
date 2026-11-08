@@ -106,42 +106,19 @@ class RefNav(Node):
         self.depth_topic: str = self.declare_parameter("depth_topic", "/camera/depth/image_raw").value
         info = self.declare_parameter("depth_info_topic", "").value
         self.info_topic: str = info or self.depth_topic.rsplit("/", 1)[0] + "/camera_info"
-        self.health_topic: str = self.declare_parameter("health_topic", "/estimator/healthy").value
         self.base_frame: str = self.declare_parameter("base_frame", "base_link").value
         self.exit_when_done: bool = bool(self.declare_parameter("exit_when_done", True).value)
         control = self.declare_parameter("control_topic", "").value
         self.run_id: str = self.declare_parameter("run_id", "").value
-        # PX4-bound stamps use the SYSTEM clock in every setting: on the aircraft PX4's DDS client
-        # converts agent (system) time with its timesync; the simulator's PX4 boots with
-        # UXRCE_DDS_SYNCT=0 and clamps a future stamp to its own "now". Simulation time would
-        # be read as seconds-old commands by a real PX4, so it is never used for these.
-        self.sys_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
 
         from tf2_ros import Buffer, TransformListener
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        from px4_msgs.msg import (DistanceSensor, EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint,
-                                  VehicleAttitude, VehicleCommand, VehicleLocalPosition, VehicleStatus)
-        self._OCM, self._TSP, self._CMD = OffboardControlMode, TrajectorySetpoint, VehicleCommand
-        self.pub_ocm = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", PX4_QOS)
-        self.pub_sp = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", PX4_QOS)
-        self.pub_cmd = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", PX4_QOS)
         status_topic = self.declare_parameter("status_topic", "/refnav/status").value
         self.pub_status = self.create_publisher(String, status_topic, 10)
-
         self.v: C.Vehicle = C.Vehicle()
-        self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1", self._on_lpos, PX4_QOS)
-        self.create_subscription(VehicleAttitude, "/fmu/out/vehicle_attitude", self._on_att, PX4_QOS)
-        self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self._on_status, PX4_QOS)
-        self.create_subscription(DistanceSensor, "/fmu/out/distance_sensor", self._on_range, PX4_QOS)
-        self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
-        self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
-        self.create_subscription(Bool, self.health_topic, self._on_health, 10)
-        correction = self.declare_parameter("correction_topic", "/blueraven/odom_correction").value
-        if correction:
-            from geometry_msgs.msg import PoseStamped
-            self.create_subscription(PoseStamped, correction, self._on_correction, 10)
+        self._io()
         if prm.depth_mode == "assisted":
             self.create_subscription(CameraInfo, self.info_topic, self._on_info, qos_profile_sensor_data)
             self.create_subscription(Image, self.depth_topic, self._on_depth, qos_profile_sensor_data)
@@ -159,8 +136,35 @@ class RefNav(Node):
         self.create_timer(0.05, self._tick)            # node clock: pauses with a paused simulator
         self.create_timer(0.5, self._publish_status)
         self.get_logger().info(f"route {len(prm.route)} points; depth {prm.depth_mode} "
-                               f"{self.depth_topic if prm.depth_mode == 'assisted' else ''}; health {self.health_topic}; "
+                               f"{self.depth_topic if prm.depth_mode == 'assisted' else ''}; "
                                f"sim time {self.get_parameter('use_sim_time').value}")
+
+    def _io(self) -> None:
+        """PX4 in and out over uXRCE-DDS, and the estimator health and drift correction topics."""
+        # PX4-bound stamps use the SYSTEM clock in every setting: on the aircraft PX4's DDS client
+        # converts agent (system) time with its timesync; the simulator's PX4 boots with
+        # UXRCE_DDS_SYNCT=0 and clamps a future stamp to its own "now". Simulation time would
+        # be read as seconds-old commands by a real PX4, so it is never used for these.
+        self.sys_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
+
+        from px4_msgs.msg import (DistanceSensor, EstimatorStatusFlags, OffboardControlMode, TrajectorySetpoint,
+                                  VehicleAttitude, VehicleCommand, VehicleLocalPosition, VehicleStatus)
+        self._OCM, self._TSP, self._CMD = OffboardControlMode, TrajectorySetpoint, VehicleCommand
+        self.pub_ocm = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", PX4_QOS)
+        self.pub_sp = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", PX4_QOS)
+        self.pub_cmd = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", PX4_QOS)
+        self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position_v1", self._on_lpos, PX4_QOS)
+        self.create_subscription(VehicleAttitude, "/fmu/out/vehicle_attitude", self._on_att, PX4_QOS)
+        self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self._on_status, PX4_QOS)
+        self.create_subscription(DistanceSensor, "/fmu/out/distance_sensor", self._on_range, PX4_QOS)
+        self._yaw_align: tuple[bool, float | None] = (False, None)  # (cs_yaw_align, receipt time)
+        self.create_subscription(EstimatorStatusFlags, "/fmu/out/estimator_status_flags", self._on_est_flags, PX4_QOS)
+        self.create_subscription(Bool, self.declare_parameter("health_topic", "/estimator/healthy").value,
+                                 self._on_health, 10)
+        correction = self.declare_parameter("correction_topic", "/blueraven/odom_correction").value
+        if correction:
+            from geometry_msgs.msg import PoseStamped
+            self.create_subscription(PoseStamped, correction, self._on_correction, 10)
 
     # ------------------------------------------------------------------ inputs
     def _now(self) -> float:
@@ -292,6 +296,12 @@ class RefNav(Node):
                 self._wait_log_t = now
         if out.events:
             self._publish_status()
+        self._send(out)
+        if out.phase == "done" and self.done_at is None:
+            self.done_at = now
+            self.get_logger().info(f"mission done: {self.mission.result}")
+
+    def _send(self, out: C.Output) -> None:
         if out.stream and out.setpoint is not None:
             o = self._OCM()
             o.timestamp = self._sys_us()
@@ -316,9 +326,6 @@ class RefNav(Node):
                 self._command(CMD_ARM, 0.0)                 # param2 0: PX4 refuses it in the air
             elif c == "disarm_force":
                 self._command(CMD_ARM, 0.0, 21196.0)        # only ever sent once the rangefinder shows touchdown
-        if out.phase == "done" and self.done_at is None:
-            self.done_at = now
-            self.get_logger().info(f"mission done: {self.mission.result}")
 
     def _publish_status(self) -> None:
         st = self.mission.status(self._now())
@@ -328,11 +335,11 @@ class RefNav(Node):
             raise SystemExit(0 if self.mission.result == "complete" else 1)
 
 
-def main(argv: Sequence[str] | None = None) -> NoReturn:
+def main(argv: Sequence[str] | None = None, node_type: type[RefNav] = RefNav) -> NoReturn:
     """argv: a full command line (argv[0] then --ros-args ...), default sys.argv - so a program can run
     the node with its own settings (examples/takeoff_land, runtime/program.refnav_args)."""
     rclpy.init(args=list(argv) if argv is not None else sys.argv)
-    node = RefNav()
+    node = node_type()
     code = 1
     try:
         rclpy.spin(node)

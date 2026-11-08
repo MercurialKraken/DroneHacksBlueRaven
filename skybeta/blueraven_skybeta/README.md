@@ -202,6 +202,14 @@ and takes over at **any** unexpected motion.
 Pass (sw-claude's checklist step 1): no VIO jumps; horizontal drift p95 under 0.15 m; lands and disarms
 by itself.
 
+## 6. The route: refnav
+
+`ros2 launch blueraven_skybeta refnav.launch.py` (add `depth_mode:=blind` to fly without depth) starts the
+same flight interface and refnav flying `route.json` start to finish, then descending until PX4 lands and
+disarms. Put the drone on the launch mark facing the launch heading; refnav plans from where it sits. Arm
+only after its log says `wait -> arm`. It sends twists only (`/skybeta/setpoint/twist`, refnav's velocity
+feed-forward plus a position loop, yaw rate at most 45 deg/s); Offboard ending stops it for good.
+
 ## Parameters
 
 | Name | Default | |
