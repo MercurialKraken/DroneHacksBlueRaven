@@ -44,6 +44,7 @@ class Params:
     # (~60% along the leg) the drone is at ~0.67 m (T4 v3 run at 0.4 m: its centre dipped to 0.33 m there).
     leg_climb_to_m: float = 0.0     # gradual climb during the gap leg: OFF (Darion: climb at P1 instead)
     p1_climb_to_m: float = 0.50     # Darion: at P1, climb straight up to this before turning (clears the CP2 cone)
+    land_at_p2: bool = True         # Darion: the route ends at P2 (past the CP2 gap) and lands there; False: on to P4
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn
     pause_s: float = 1.5            # stop at each waypoint before turning
@@ -589,7 +590,7 @@ class WallSeek:
         else:                                                # nominal P1: Wall A's face is 0.438 m north of the gap centre
             n1 = p.gap_n_m + 0.438 - p.standoff_m
             p2, p4 = self._route_points(n1, 0.0)
-            pts = [(n1, 0.0), p2, p4]
+            pts = [(n1, 0.0), p2] + ([] if p.land_at_p2 else [p4])
         look = None
         if self.phase in ("leg", "gap") and self.leg is not None:
             (tn, te), _, (un, ue), _ = self.leg
@@ -621,7 +622,9 @@ class WallSeek:
         self.route_pts = [(n, e), p2, p4]
         self.heading = 0.0                                   # pad heading, deg clockwise from north (nose on the pad)
         self.plan = ([("rise", self.p.p1_climb_to_m)] if self.p.p1_climb_to_m > 0 else []) + \
-            [("face", p2), ("leg", p2), ("pause", None), ("face", p4), ("leg", p4)]
+            [("face", p2), ("leg", p2)] + ([] if self.p.land_at_p2 else [("pause", None), ("face", p4), ("leg", p4)])
+        if self.p.land_at_p2:
+            self.route_pts = [(n, e), p2]
         self.log.append(f"{i.now:.2f} route: P1 ({n:.2f}, {e:.2f}) -> P2 ({p2[0]:.2f}, {p2[1]:.2f}) -> "
                         f"P4 ({p4[0]:.2f}, {p4[1]:.2f}) [pad north, east]")
         self._next_step(i, n, e)

@@ -182,7 +182,7 @@ def _turn_angles(s):
 
 @pytest.mark.parametrize("plant", ["drone", "t4", "drone+push"])
 def test_route_v3_face_the_gap_straight_through_then_p4(plant):
-    p = W.Params(route_mode=True)
+    p = W.Params(route_mode=True, land_at_p2=False)
     kw = {}
     if plant == "t4":
         p.lag_s, kw = 1.5, {"tau": 0.9, "dead": 0.6}
@@ -204,7 +204,7 @@ def test_route_v3_face_the_gap_straight_through_then_p4(plant):
 
 
 def test_climbs_to_050_in_place_at_p1_not_at_take_off():
-    s = Sim(W.Params(route_mode=True)).run(160)
+    s = Sim(W.Params(route_mode=True, land_at_p2=False)).run(160)
     first_leg = next(k for k, r in enumerate(s.trace) if r[1] == "rise")
     climb_top = max(r[2][2] for r in s.trace[:first_leg])             # take-off, approach, stop: ~0.40
     assert climb_top < 0.47, climb_top                                  # take-off and P1 stay at ~0.40
@@ -217,7 +217,7 @@ def test_climbs_to_050_in_place_at_p1_not_at_take_off():
 def test_noisy_vision_velocity_at_the_stop_still_ends_the_stop_and_turns():
     # T4 runs 5-6: cuVSLAM's velocity read 0.1-0.7 m/s at the stop while the drone held within 2 cm: never settled
     rnd = random.Random(3)
-    s = Sim(W.Params(route_mode=True))
+    s = Sim(W.Params(route_mode=True, land_at_p2=False))
     s.est_fault = lambda t, p, v: (p, (v[0] + rnd.uniform(-0.3, 0.3), v[1] + rnd.uniform(-0.3, 0.3))) \
         if s.m.phase in ("approach", "settle") else None
     s.run(160)
@@ -227,13 +227,24 @@ def test_noisy_vision_velocity_at_the_stop_still_ends_the_stop_and_turns():
 
 
 def test_dashboard_view_shows_the_planned_then_the_actual_route():
-    m = W.WallSeek(W.Params(route_mode=True))
+    m = W.WallSeek(W.Params(route_mode=True, land_at_p2=False))
     v = m.dashboard_view()
     assert v["targets"] == [[0.877, 0.0], [1.35, 1.853], [1.35, 2.8]], v
-    s = Sim(W.Params(route_mode=True)).run(160)
+    s = Sim(W.Params(route_mode=True, land_at_p2=False)).run(160)
     v = s.m.dashboard_view()
     assert len(v["targets"]) == 3 and abs(v["targets"][2][1] - 2.8) < 1e-6 and v["path"][0] == [0.0, 0.0]
     assert abs(v["targets"][0][0] - (WALL_N - 0.80)) < 0.08         # P1 = where depth stopped it
+
+
+def test_default_route_lands_at_p2_past_the_gap():
+    s = Sim(W.Params(route_mode=True)).run(160)
+    seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
+    assert seq[:8] == ["ready", "climb", "approach", "settle", "rise", "turn", "leg", "land"], seq
+    assert any("route complete" in x for x in s.m.log) and s.m.phase == "done", s.m.log
+    p2 = s.m.route_pts[1]
+    assert math.dist(s.trace[-1][2][:2], p2) < 0.15, (s.trace[-1], p2)
+    assert s.min_wall > 0.29 + 0.15 and s.min_b > 0.29 + 0.15, (s.min_wall, s.min_b)
+    assert len(s.m.dashboard_view()["targets"]) == 2
 
 
 def test_old_mode_translates_until_the_wall_ends():

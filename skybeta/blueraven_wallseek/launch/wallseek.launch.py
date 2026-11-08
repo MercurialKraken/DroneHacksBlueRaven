@@ -41,7 +41,9 @@ def generate_launch_description():
     f = lambda n: PythonExpression(['float(', LaunchConfiguration(n), ')'])     # noqa: E731  (:=0 would be an int)
     declared = ([DeclareLaunchArgument(n, default_value=d, description=h) for n, d, h in INTERFACE_ARGS]
                 + [DeclareLaunchArgument(n, default_value=d) for n, d in MISSION_ARGS]
-                + [DeclareLaunchArgument('slide_immediately', default_value='false',
+                + [DeclareLaunchArgument('land_at_p2', default_value='true',
+                                         description='the route ends and lands at P2, just past the CP2 gap'),
+                   DeclareLaunchArgument('slide_immediately', default_value='false',
                                          description='variant: no hover stop at the wall, slide right at once'),
                    DeclareLaunchArgument('use_sim_time', default_value='false'),
                    DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
@@ -59,6 +61,7 @@ def generate_launch_description():
                     | {'odom_to_ned_yaw_offset_rad': f('odom_to_ned_yaw_offset_rad'),
                        'slide_immediately': PythonExpression(["'", LaunchConfiguration('slide_immediately'),
                                                               "'.lower() == 'true'"]),
+                       'land_at_p2': PythonExpression(["'", LaunchConfiguration('land_at_p2'), "'.lower() == 'true'"]),
                        'odometry_topic': LaunchConfiguration('odometry_topic'),
                        'depth_topic': LaunchConfiguration('depth_topic'),
                        'depth_info_topic': LaunchConfiguration('depth_info_topic'),
