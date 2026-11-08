@@ -116,7 +116,7 @@ class MissionParams:
     settle_s: float = 2.0               # the drone must sit still this long before the take-off frame is fixed
     settle_tol_m: float = 0.02
     settle_tol_deg: float = 1.0
-    drone_radius: float = 0.28
+    drone_radius: float = 0.29                # measured (a 23 in circle, 2026-11-07)
     margin: float = 0.10
     route_max_radius_m: float = 0.0     # mission "route": largest corner arc; 0 = stop and turn at every
                                         # corner (no map to size an arc against the real walls)

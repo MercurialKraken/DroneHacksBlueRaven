@@ -7,7 +7,7 @@ SmoothPath, so a planner change shows up identically in either follower.
     path.length, path.s, path.xyz, path.psi, path.k, path.clearance       # sampled every ds
     s = path.closest_s(position, s_lo=s_prev - 0.2, s_hi=s_prev + 0.6)  # windowed projection
     path.point_at(s), path.heading_at(s), path.curvature_at(s)
-    checkpoint_crossings(path, course_yaml["checkpoints"], drone_radius=0.28)
+    checkpoint_crossings(path, course_yaml["checkpoints"], drone_radius=0.29)
 
 Construction:
   * Each interior corner becomes a circular arc (a fillet) tangent to both legs. Its radius is the
@@ -253,7 +253,7 @@ def smooth_path(points: Any, sdf: Any = None, need: float = 0.38, max_radius: fl
     return path
 
 
-def build_path(corners: Any, course_map: Any = None, drone_radius: float = 0.28, margin: float = 0.10,
+def build_path(corners: Any, course_map: Any = None, drone_radius: float = 0.29, margin: float = 0.10,
                z: float = 1.0, max_radius: float = 1.0, ds: float = 0.02,
                radius_overrides: dict[int, float] | None = None) -> SmoothPath:
     """The route guide's entry point. corners: (N, 2) x, y at height z, or (N, 3) with their own
