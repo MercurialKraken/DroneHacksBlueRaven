@@ -173,13 +173,25 @@ class Mppi:
         keep = np.r_[True, seg > 1e-9]                               # drop repeated points
         if keep.sum() < 2:
             raise ValueError("path_xy has fewer than 2 distinct points")
-        P, self.vref = P[keep], vref[keep]
+        self._keep = keep
+        P = P[keep]
         self.px, self.py = P[:, 0], P[:, 1]
         self.ps = np.r_[0.0, np.cumsum(np.hypot(np.diff(self.px), np.diff(self.py)))]
         self.length = float(self.ps[-1])
+        self._set_profile(vref[keep])
+        self.s_now: float | None = None
+
+    def _set_profile(self, vref: np.ndarray) -> None:
+        self.vref = vref
         v_mid = np.maximum(0.5 * (self.vref[1:] + self.vref[:-1]), self.p.v_floor)
         self.pt = np.r_[0.0, np.cumsum(np.diff(self.ps) / v_mid)]   # time to each path point along the profile
-        self.s_now: float | None = None
+
+    def set_speed_profile(self, v_ref: Any) -> None:
+        """New speeds for the SAME path (one per point given to set_path); progress is kept."""
+        v = np.asarray(v_ref, dtype=float)
+        if v.shape != self._keep.shape:
+            raise ValueError("v_ref must have one speed per point of the path given to set_path")
+        self._set_profile(v[self._keep])
 
     # ------------------------------------------------------------------ map and depth
     def set_grid(self, grid: Grid2D) -> None:

@@ -243,3 +243,49 @@ def test_new_start_through_the_cp2_gap_over_the_cone(noisy):
     assert k > 0
     t = float(np.dot(traj[k] - p, q - p) / np.dot(q - p, q - p))
     assert 0.0 < t < 1.0
+
+
+# ---------------------------------------------------------------------------------------------- supervisor
+def corridor_world() -> World:
+    return World((-1.0, 8.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 7.5, 0.6, 0.8, WALL),
+                                                  (-0.7, 7.5, -0.8, -0.6, WALL), (7.3, 7.5, -1.2, 1.2, WALL)])
+
+
+def test_waits_for_depth_before_moving():
+    nav = LocalNav([(5.0, 0.0)], (0.0, 0.0), 0.0)
+    c = nav.step((0.0, 0.0), (0.0, 0.0), 0.0)
+    assert c.state == "WAIT" and (c.vx, c.vy) == (0.0, 0.0)
+    w, cam = corridor_world(), np.array([0.1, 0.0, 0.7])
+    for k in range(nav.p.min_depth_frames):
+        nav.add_depth(w.depth_points(cam, 0.0), cam, 0.7, 0.1 * k)
+    assert nav.step((0.0, 0.0), (0.0, 0.0), 0.5).state == "GO"
+
+
+def test_slows_on_the_remembered_grid_when_depth_stops():
+    w = corridor_world()
+    nav = LocalNav([(6.5, 0.0)], (0.0, 0.0), 0.0)
+    d = Drone(np.array([0.0, 0.0]), 0.0)
+    states, speeds = [], []
+    for k in range(500):                                                  # 0.2 m/s after 4 s: ~30 s to the end
+        t = 0.1 * k
+        if t < 4.0:                                                       # depth stops after 4 s (a dark tunnel)
+            cam = d.cam()
+            nav.add_depth(w.depth_points(cam, d.yaw), cam, d.z, t)
+        c = nav.step(d.x, d.v, t)
+        states.append(c.state)
+        if c.state == "ARRIVED":
+            break
+        d.step((c.vx, c.vy), c.yaw, 0.1)
+        speeds.append(float(np.hypot(*d.v)))
+    assert "SLOW" in states and states[-1] == "ARRIVED"
+    assert max(speeds[60:]) <= nav.p.v_no_depth + 0.05                     # 2 s after depth stopped
+    assert w.clearance(np.array([d.x])).min() > nav.mppi.p.r_drone
+
+
+def test_a_dead_end_stops_short_and_reports_it():
+    w = World((-1.0, 8.0), (-1.5, 1.5), boxes=[(-0.7, -0.5, -1.2, 1.2, WALL), (-0.7, 7.5, 0.6, 0.8, WALL),
+                                               (-0.7, 7.5, -0.8, -0.6, WALL), (3.0, 3.2, -0.8, 0.8, WALL)])
+    traj, states, nav = fly(w, [(5.5, 0.0)], seconds=30.0)
+    assert states[-1] in ("STUCK", "BLOCKED") or "STUCK" in states
+    assert w.clearance(traj).min() > nav.mppi.p.r_drone
+    assert traj[:, 0].max() < 3.0 - nav.mppi.p.r_drone
