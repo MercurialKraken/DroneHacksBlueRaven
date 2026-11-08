@@ -32,7 +32,13 @@ MON=/tmp/fly_status.py                            # the status monitor, copied i
 TOPICS="/visual_slam/tracking/odometry /visual_slam/status /skybeta/state /skybeta/setpoint/pose \
 /skybeta/setpoint/twist /blueraven/mission/status /refnav/status /fmu/in/vehicle_visual_odometry \
 /fmu/out/vehicle_local_position /fmu/out/vehicle_status_v1 /fmu/out/estimator_status_flags /fmu/out/vehicle_attitude \
-/fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static"   # no camera images: an outside image reader starved cuVSLAM
+/fmu/out/vehicle_land_detected /fmu/out/distance_sensor /tf /tf_static \
+/blueraven/mppi/plan /blueraven/mppi/status /blueraven/mppi/trajectory"   # absent topics are harmless (MPPI off)
+DEPTH_BAG=${DEPTH_BAG:-1}                         # 1: also record on-camera depth (Arnav's MPPI replay); ~15 MB/s at
+                                                  # 640x400 16UC1 30 Hz. An outside depth reader cost ~1 ms EV age
+                                                  # (Hinson); the per-second status shows odometry Hz if it starves
+(( DEPTH_BAG )) && TOPICS="$TOPICS /oak/stereo/image_raw /oak/stereo/camera_info"
+MIN_FREE_GB=${MIN_FREE_GB:-5}                     # free space the bag disk must have (depth fills ~1 GB a minute)
 FI_PROC="lib/skybeta_flight_interface/flight_interface"
 MISSION_PROC='lib/blueraven_skybeta/(mission|refnav_mission)( |$)'
 EXAMPLE_PROC='ros2 launch competitor_example|/lib/competitor_example/'
@@ -190,6 +196,9 @@ check() {
     sudo timedatectl set-ntp false || die "couldn't turn NTP off: sudo timedatectl set-ntp false"
   fi
   docker ps --format '{{.Names}}' | grep -qx "$C" || die "the $C container isn't running"
+  local free; free=$(docker exec "$C" bash -c "mkdir -p $BAGS && df -Pk $BAGS | awk 'NR==2 {print int(\$4 / 1048576)}'")
+  (( ${free:-0} >= MIN_FREE_GB )) || die "only ${free:-?} GB free for bags in $BAGS (need $MIN_FREE_GB; DEPTH_BAG=$DEPTH_BAG): delete old bags or DEPTH_BAG=0"
+  say "bag disk: $free GB free (depth in the bag: $DEPTH_BAG)"
   local img; img=$(docker inspect -f '{{.Config.Image}}' "$C")
   say "image: $img"
   [[ $img == *"$EXPECT_IMAGE"* ]] || die "the stack runs $img, expected $EXPECT_IMAGE (EXPECT_IMAGE=$img to accept it)"
