@@ -31,7 +31,7 @@ launch_sim:                                     # where the SIMULATOR spawns the
 limits:
   wall_top_z: 1.727                             # 68 in. Some part of the frame must stay below it (rule 7.7)
   height_band: [0.6, 1.4]                       # nominal flight heights for the planner
-  drone_radius: 0.28                            # rotor arm plus prop
+  drone_radius: 0.29                            # rotor arm plus prop (skybeta-09 measured: 23 in circle)
   clearance_margin: 0.10                        # on top of drone_radius: the planner's minimum clearance is 0.38 m
 
 # Checkpoints in course order. A `line` is a floor segment [[x, y], [x, y]] the WHOLE drone must cross

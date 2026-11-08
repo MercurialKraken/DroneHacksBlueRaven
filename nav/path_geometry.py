@@ -252,7 +252,7 @@ def smooth_path(points: Any, sdf: Any = None, need: float = 0.38, max_radius: fl
     return path
 
 
-def build_path(corners: Any, course_map: Any = None, drone_radius: float = 0.28, margin: float = 0.10,
+def build_path(corners: Any, course_map: Any = None, drone_radius: float = 0.29, margin: float = 0.10,
                z: float = 1.0, max_radius: float = 1.0, ds: float = 0.02,
                radius_overrides: dict[int, float] | None = None) -> SmoothPath:
     """The route guide's entry point. corners: (N, 2) x, y at height z, or (N, 3) with their own
