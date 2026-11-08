@@ -177,6 +177,7 @@ class WallSeek:
     leg: tuple | None = None        # current straight leg: (start (n, e), end (n, e), unit (n, e), length)
     s_ref: float = 0.0
     plan: list = field(default_factory=list)   # route mode: remaining steps
+    route_pts: list | None = None   # route mode: the actual P1..P4 once P1 is fixed
     turn: tuple | None = None       # (sign, degrees, hold point)
     turned: float = 0.0             # degrees commanded so far in this turn
     last_wz: float = 0.0            # deg/s commanded last tick
@@ -527,6 +528,28 @@ class WallSeek:
             return self._descend(i, armed, offboard)
         return Output(self.phase, self.why)
 
+    def dashboard_view(self) -> dict:
+        """What the T4 dashboard draws (it reads refnav's /refnav/status: 'targets' and 'path' as pad [north, east],
+        'look' = the point being steered to). Before P1 is fixed by depth: the PLANNED route (P1 at its nominal 0.48 m
+        south-west of P2's 45 deg leg); after: the actual one."""
+        p = self.p
+        if self.route_pts is not None:
+            pts = self.route_pts
+        else:
+            n1 = p.p3_n_m - 0.48
+            pts = [(n1, 0.0), (n1, p.p3_e_m - (p.p3_n_m - n1)), (p.p3_n_m, p.p3_e_m), (p.p3_n_m, p.p4_e_m)]
+        look = None
+        if self.phase in ("leg", "gap") and self.leg is not None:
+            (tn, te), _, (un, ue), _ = self.leg
+            look = [round(tn + self.s_ref * un, 3), round(te + self.s_ref * ue, 3)]
+        elif self.phase == "turn" and self.turn is not None:
+            look = [round(c, 3) for c in self.turn[2]]
+        elif self.phase == "pause" and self.hold_pt is not None:
+            look = [round(c, 3) for c in self.hold_pt]
+        return {"phase": self.phase, "why": self.why, "program": "wallseek",
+                "targets": [[round(n, 3), round(e, 3)] for n, e in pts],
+                "path": [[0.0, 0.0]] + [[round(n, 3), round(e, 3)] for n, e in pts], "look": look}
+
     # ------------------------------------------------------------------ route mode (Darion): straight legs, 90/45 turns
     def _route_start(self, i: Inputs, n: float, e: float) -> None:
         """Stopped at P1 (the depth standoff). P2 is due east of P1, placed so the 45 deg leg lands exactly on P3;
@@ -535,6 +558,7 @@ class WallSeek:
         p3 = (p.p3_n_m, p.p3_e_m)
         p2 = (n, p3[1] - (p3[0] - n))                        # 45 deg leg from P2 to P3
         p4 = (p3[0], p.p4_e_m)
+        self.route_pts = [(n, e), p2, p3, p4]
         self.plan = [("turn", -90.0), ("leg", p2), ("pause", None), ("turn", +45.0), ("leg", p3), ("pause", None),
                      ("turn", -45.0), ("leg", p4)]
         self.log.append(f"{i.now:.2f} route: P1 ({n:.2f}, {e:.2f}) -> P2 ({p2[0]:.2f}, {p2[1]:.2f}) -> "

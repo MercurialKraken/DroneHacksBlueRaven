@@ -203,6 +203,16 @@ def test_route_straight_legs_and_90_45_turns(plant):
     assert leg2
 
 
+def test_dashboard_view_shows_the_planned_then_the_actual_route():
+    m = W.WallSeek(W.Params(route_mode=True))
+    v = m.dashboard_view()
+    assert v["targets"] == [[1.077, 0.0], [1.077, 1.255], [1.557, 1.735], [1.557, 2.8]], v
+    s = Sim(W.Params(route_mode=True)).run(160)
+    v = s.m.dashboard_view()
+    assert len(v["targets"]) == 4 and abs(v["targets"][3][1] - 2.8) < 1e-6 and v["path"][0] == [0.0, 0.0]
+    assert abs(v["targets"][0][0] - (WALL_N - 0.60)) < 0.08         # P1 = where depth stopped it
+
+
 def test_old_mode_translates_until_the_wall_ends():
     s = Sim(W.Params(route_mode=False, turn_e_m=0.0, standoff_m=0.44)).run()             # the gap leg off: as before
     seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]

@@ -40,6 +40,10 @@ class WallSeekNode(Node):
         self.last_log = None
         self.pub = self.create_publisher(TwistStamped, "/skybeta/setpoint/twist", 10)
         self.pub_status = self.create_publisher(String, "/blueraven/wallseek/status", 10)
+        # the T4 dashboard draws /refnav/status 'targets'/'path'/'look' (Darion: always show the setpoints). refnav
+        # never runs alongside this program, so the topic is free; off with publish_dashboard:=false
+        self.pub_dash = (self.create_publisher(String, "/refnav/status", 5)
+                         if self.declare_parameter("publish_dashboard", True).value else None)
         self.create_subscription(Odometry, self.declare_parameter("odometry_topic", "/visual_slam/tracking/odometry").value,
                                  self._on_odom, 10)
         self.create_subscription(String, "/skybeta/state", self._on_state, 10)
@@ -129,6 +133,8 @@ class WallSeekNode(Node):
                   "depth_age": round(now - self.t_depth, 3), "odom_age": round(now - self.t_odom, 3),
                   "twist_pad": out.twist}
             self.pub_status.publish(String(data=json.dumps(st)))
+            if self.pub_dash is not None:
+                self.pub_dash.publish(String(data=json.dumps(self.mission.dashboard_view())))
 
 
 def main() -> None:
