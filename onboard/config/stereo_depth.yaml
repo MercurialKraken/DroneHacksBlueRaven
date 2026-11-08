@@ -2,8 +2,12 @@
 # the organizers' OAK driver publishes raw 1024x640 bgr8 pairs at 30 Hz and no depth.
 /**:
   ros__parameters:
-    left_topic: /oak/left/image_raw
-    right_topic: /oak/right/image_raw
+    # MONO, never image_raw or */compressed. arnav-claude, skybeta-09, PX4 live, 2026-11-07: subscribing to the
+    # raw bgr8 pair (2 MB each at 30 Hz) forces the driver to convert and copy it out of its NITROS path, which
+    # starves cuVSLAM. EV age at PX4 went 58 -> 173/313 ms (p50/p90), EV fusion 79% pos / 67% yaw, and the mag
+    # heading took over. image_mono (mono8, same 1024x640, same frame_id and calibration): 58/69 ms, EV fusion 100%.
+    left_topic: /oak/left/image_mono
+    right_topic: /oak/right/image_mono
     left_info_topic: /oak/left/camera_info
     right_info_topic: /oak/right/camera_info
     depth_topic: /camera/depth/image_raw          # what refnav, map_align and live_map subscribe to

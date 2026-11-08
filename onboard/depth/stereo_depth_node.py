@@ -2,7 +2,8 @@
 
     python3 -m onboard.depth.stereo_depth_node --ros-args --params-file onboard/config/stereo_depth.yaml
 
-In   left/right images (mono8 / bgr8 / rgb8, raw or rectified) + their CameraInfo, same stamps (the OAK
+In   left/right images (mono8 / bgr8 / rgb8, raw or rectified). On the drone: /oak/*/image_mono ONLY; subscribing to
+     image_raw (or */compressed) starves cuVSLAM (see onboard/config/stereo_depth.yaml) + their CameraInfo, same stamps (the OAK
      triggers both cameras together; sync_tol_s allows a small offset).
 Out  depth_topic       sensor_msgs/Image 16UC1 mm (or 32FC1 m), stamped with the LEFT image's stamp
      depth_info_topic  sensor_msgs/CameraInfo: the rectified pinhole K at the output size, D = 0
@@ -80,8 +81,8 @@ class StereoDepthNode(Node):
         self.last_error = ""
 
         sd = qos_profile_sensor_data
-        self.create_subscription(Image, p("left_topic", "/oak/left/image_raw"), lambda m: self._img("l", m), sd)
-        self.create_subscription(Image, p("right_topic", "/oak/right/image_raw"), lambda m: self._img("r", m), sd)
+        self.create_subscription(Image, p("left_topic", "/oak/left/image_mono"), lambda m: self._img("l", m), sd)
+        self.create_subscription(Image, p("right_topic", "/oak/right/image_mono"), lambda m: self._img("r", m), sd)
         self.create_subscription(CameraInfo, p("left_info_topic", "/oak/left/camera_info"), lambda m: self._info("l", m), sd)
         self.create_subscription(CameraInfo, p("right_info_topic", "/oak/right/camera_info"), lambda m: self._info("r", m), sd)
         self.pub = self.create_publisher(Image, p("depth_topic", "/camera/depth/image_raw"), 2)
