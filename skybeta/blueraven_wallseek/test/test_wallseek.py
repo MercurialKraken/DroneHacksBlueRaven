@@ -26,8 +26,13 @@ def seg_dist(p, a, b):
 
 class Sim:
     def __init__(self, p=None, tau=0.55, dead=0.25, push=(0.0, 0.0), wall=(WALL_N, WALL_E0, WALL_E1), far=3.5,
-                 depth_ok=lambda t: True, nav_override=None, arm_t=2.0, seed=1, est_fault=None):
+                 depth_ok=lambda t: True, nav_override=None, arm_t=2.0, seed=1, est_fault=None,
+                 liftoff_kick=(-0.15, 1.5), outlier_every=0, var_fn=None):
         self.est_fault = est_fault          # t, true pos, true vel -> (reported pos, reported vel) or None
+        self.liftoff_kick = liftoff_kick    # the backward kick off the floor every T4 run shows: (m/s north, seconds)
+        self.outlier_every = outlier_every  # every Nth depth frame reads 0.30 m (a wild frame)
+        self.var_fn = var_fn                # () -> cuVSLAM pose variance to report
+        self.t_lift = None
         self.wz = []
         self.m = W.WallSeek(p or W.Params())
         self.tau, self.dead, self.push, self.wall, self.far = tau, dead, push, wall, far
@@ -62,6 +67,8 @@ class Sim:
             nav, self.offboard = self.nav_override[1], False
         if round(t / 0.0333) != round((t - self.dt) / 0.0333) and self.depth_ok(t):    # ~30 Hz depth
             self.ahead, self.t_depth, self.depth_seq = self.corridor(), t, self.depth_seq + 1
+            if self.outlier_every and self.depth_seq % self.outlier_every == 0:
+                self.ahead = 0.30
         state = {"armed": self.armed, "offboard_active": self.offboard, "nav_state": nav, "px4_link": True}
         rp, rv = tuple(self.pos), (self.vel[0], self.vel[1])
         if self.est_fault:
@@ -69,7 +76,8 @@ class Sim:
             if f:
                 rp, rv = f
         i = W.Inputs(now=t, pos=rp, vel=rv, yaw_err=0.2, t_odom=t, state=state,      # a drifted heading estimate
-                     t_state=t, ahead_m=self.ahead, t_depth=self.t_depth, depth_seq=self.depth_seq)
+                     t_state=t, ahead_m=self.ahead, t_depth=self.t_depth, depth_seq=self.depth_seq,
+                     vio_var=self.var_fn() if self.var_fn else 0.002)
         out = self.m.step(i)
         cmd = (0.0, 0.0, 0.0)
         if out.twist is not None and self.offboard:
@@ -81,8 +89,11 @@ class Sim:
             self.queue.pop(0)
         c = self.queue[0][1] if self.queue[0][0] <= t - self.dead else (0.0, 0.0, 0.0)
         airborne = self.pos[2] > 0.005 or c[2] > 0
+        if self.t_lift is None and self.pos[2] > 0.01:
+            self.t_lift = t
+        kick = self.liftoff_kick[0] if self.t_lift is not None and t - self.t_lift < self.liftoff_kick[1] else 0.0
         for k in range(3):
-            target = c[k] + (self.push[k] if k < 2 and airborne else 0.0)
+            target = c[k] + (self.push[k] if k < 2 and airborne else 0.0) + (kick if k == 0 else 0.0)
             self.vel[k] += (target - self.vel[k]) * min(1.0, self.dt / self.tau)
             self.pos[k] += self.vel[k] * self.dt
         if self.pos[2] < 0:
@@ -168,6 +179,38 @@ def test_a_position_jump_lands_straight_down_without_chasing_it():
     drift = math.dist(land[0][2][:2], land[-1][2][:2])
     assert drift < 0.15, drift                                         # came down where it was, not toward the jump
     assert s.min_wall > 0.29 + 0.05
+
+
+def test_takeoff_kick_returns_over_the_launch_point_before_the_approach():
+    s = Sim().run()
+    worst = min(r[2][0] for r in s.trace if r[1] == "climb")
+    start = next(r for r in s.trace if r[1] == "approach")
+    assert abs(start[2][0]) < 0.06 and abs(start[2][1]) < 0.06, start      # back over the launch point
+    s0 = Sim(p=W.Params(takeoff_kick_mps=0.0)).run()                        # without the forward kick: drifts further
+    assert worst > min(r[2][0] for r in s0.trace if r[1] == "climb") + 0.02, worst
+
+
+def test_single_wild_depth_frames_are_ignored():
+    s = Sim(outlier_every=17).run()                    # a 0.30 m frame every ~0.6 s, as T4 run 2's 0.346
+    assert s.m.phase == "done"
+    assert not any("backing off" in (o or "") for o in [s.m.why]), s.m.log
+    assert any("past the wall's end" in x for x in s.m.log), s.m.log
+
+
+def test_cuvslam_variance_spike_lands_straight_down_before_any_jump():
+    s = Sim()
+    s.var_fn = lambda: 0.07 if s.m.phase == "settle" else 0.002   # T4 run 2: 1e-3 -> 7e-2, 0.8 s before the jump
+    s.run()
+    assert any("variance" in x for x in s.m.log), s.m.log
+    land = [r for r in s.trace if r[1] == "land"]
+    assert math.dist(land[0][2][:2], land[-1][2][:2]) < 0.10
+
+
+def test_slide_immediately_variant_skips_the_stop():
+    s = Sim(p=W.Params(slide_immediately=True)).run()
+    seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log]
+    assert "settle" not in seq and seq[:6] == ["ready", "climb", "approach", "translate", "past", "land"], seq
+    assert s.min_wall > 0.29 + 0.07, s.min_wall
 
 
 def test_no_wall_lands_before_the_forward_limit():

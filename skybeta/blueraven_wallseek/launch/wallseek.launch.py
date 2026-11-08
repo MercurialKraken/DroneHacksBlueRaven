@@ -27,6 +27,7 @@ MISSION_ARGS = [
     ('height_m', '0.40'), ('standoff_m', '0.44'), ('approach_mps', '0.15'), ('translate_mps', '0.10'),
     ('past_end_m', '0.35'), ('max_forward_m', '1.30'), ('max_right_m', '2.0'), ('lag_s', '0.55'),
     ('camera_forward_m', '0.1053'), ('camera_left_m', '0.0376'), ('camera_up_m', '0.0304'),
+    ('takeoff_kick_mps', '0.06'),
 ]
 
 
@@ -34,7 +35,9 @@ def generate_launch_description():
     f = lambda n: PythonExpression(['float(', LaunchConfiguration(n), ')'])     # noqa: E731  (:=0 would be an int)
     declared = ([DeclareLaunchArgument(n, default_value=d, description=h) for n, d, h in INTERFACE_ARGS]
                 + [DeclareLaunchArgument(n, default_value=d) for n, d in MISSION_ARGS]
-                + [DeclareLaunchArgument('use_sim_time', default_value='false'),
+                + [DeclareLaunchArgument('slide_immediately', default_value='false',
+                                         description='variant: no hover stop at the wall, slide right at once'),
+                   DeclareLaunchArgument('use_sim_time', default_value='false'),
                    DeclareLaunchArgument('depth_topic', default_value='/oak/stereo/image_raw'),
                    DeclareLaunchArgument('depth_info_topic', default_value='/oak/stereo/camera_info')])
     flight_interface = Node(
@@ -48,6 +51,8 @@ def generate_launch_description():
         package='blueraven_wallseek', executable='wallseek', name='wallseek', output='screen', emulate_tty=True,
         parameters=[{n: f(n) for n, _ in MISSION_ARGS}
                     | {'odom_to_ned_yaw_offset_rad': f('odom_to_ned_yaw_offset_rad'),
+                       'slide_immediately': PythonExpression(["'", LaunchConfiguration('slide_immediately'),
+                                                              "'.lower() == 'true'"]),
                        'odometry_topic': LaunchConfiguration('odometry_topic'),
                        'depth_topic': LaunchConfiguration('depth_topic'),
                        'depth_info_topic': LaunchConfiguration('depth_info_topic'),

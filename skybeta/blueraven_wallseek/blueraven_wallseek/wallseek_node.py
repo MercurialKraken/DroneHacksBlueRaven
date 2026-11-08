@@ -47,6 +47,12 @@ class WallSeekNode(Node):
                                  self._on_depth, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, self.declare_parameter("depth_info_topic", "/oak/stereo/camera_info").value,
                                  self._on_info, qos_profile_sensor_data)
+        self.vio_var, self.vo_state, self.t_vo = None, None, -1e9
+        try:    # skybeta-09 publishes cuVSLAM's tracker state (vo_state 2 = FAILED); the T4 sim doesn't
+            from isaac_ros_visual_slam_interfaces.msg import VisualSlamStatus
+            self.create_subscription(VisualSlamStatus, "/visual_slam/status", self._on_vslam_status, 10)
+        except ImportError:
+            self.get_logger().info("no isaac_ros_visual_slam_interfaces: landing on cuVSLAM's variance + jumps only")
         self.create_timer(0.05, self._tick)
         self.n_tick = 0
         self.get_logger().info(f"wallseek: height {p.height_m} m, standoff {p.standoff_m} m, max forward "
@@ -66,7 +72,12 @@ class WallSeekNode(Node):
         c, s = math.cos(yaw), math.sin(yaw)                               # body FLU velocity -> ENU -> pad
         self.vel = self.pad.vector(c * v.x - s * v.y, s * v.x + c * v.y)
         self.yaw = math.remainder(self.pad.yaw0 - yaw, math.tau)
+        cov = m.pose.covariance
+        self.vio_var = max(cov[0], cov[7]) if math.isfinite(cov[0]) and math.isfinite(cov[7]) else None
         self.t_odom = self._now()
+
+    def _on_vslam_status(self, m) -> None:
+        self.vo_state, self.t_vo = int(m.vo_state), self._now()
 
     def _on_state(self, m: String) -> None:
         try:
@@ -94,7 +105,8 @@ class WallSeekNode(Node):
         now = self._now()
         i = W.Inputs(now=now, pos=self.pos, vel=self.vel, yaw_err=self.yaw, t_odom=self.t_odom, state=self.state,
                      t_state=self.t_state, ahead_m=self.ahead.range_m if self.ahead else None, t_depth=self.t_depth,
-                     depth_seq=self.depth_seq)
+                     depth_seq=self.depth_seq, vio_var=self.vio_var,
+                     vo_failed=self.vo_state == 2 and now - self.t_vo < 0.5)
         out = self.mission.step(i)
         while self.mission.log:
             self.get_logger().info(self.mission.log.pop(0))
@@ -108,8 +120,11 @@ class WallSeekNode(Node):
         self.n_tick += 1
         if self.n_tick % 4 == 0:                                         # 5 Hz status for the bag / a watcher
             a = self.ahead
+            f = self.mission.ahead_f
             st = {"phase": out.phase, "why": out.why, "pos": self.pos, "vel": self.vel,
                   "ahead_m": None if a is None or not math.isfinite(a.range_m) else round(a.range_m, 3),
+                  "ahead_filtered_m": None if f is None or not math.isfinite(f) else round(f, 3),
+                  "vio_var": self.vio_var, "vo_state": self.vo_state,
                   "ahead_points": a.points if a else None, "depth_valid": round(a.valid_frac, 2) if a else None,
                   "depth_age": round(now - self.t_depth, 3), "odom_age": round(now - self.t_odom, 3),
                   "twist_pad": out.twist}

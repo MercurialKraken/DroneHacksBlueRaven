@@ -42,7 +42,9 @@ class Params:
     # holds it as a standing error (0.1 / 0.5 = 0.2 m), so the standoff would never settle. The integral learns it.
     ki: float = 0.15                # 1/s^2 ... per metre of error per second
     i_max_mps: float = 0.12         # the integral's share is capped
-    i_zone_m: float = 0.10          # ... and it only learns within this of the target
+    i_zone_m: float = 0.10          # ... and it only learns within this of the target ...
+    i_stuck_mps: float = 0.03       # ... or when stuck off it (slower than this ...
+    i_stuck_s: float = 1.5          # ... for this long)
     approach_timeout_s: float = 40.0
     translate_timeout_s: float = 45.0
     k_z: float = 1.0                # 1/s (refnav's KP_Z)
@@ -71,6 +73,18 @@ class Params:
     brake_mps: float = 0.10
     brake_max_s: float = 2.0
     land_hold_mps: float = 0.15
+    # take-off: every flight drifts back ~0.2 m in the first ~1.5 s off the floor (T4 truth, both wall-seek runs;
+    # skybeta-09 160449: 0.34 m back). A SMALL forward feed-forward for the first second cancels part of it; any
+    # overshoot forward is harmless (the depth standoff decides where the drone stops)
+    takeoff_kick_mps: float = 0.06
+    takeoff_kick_s: float = 1.2
+    liftoff_m: float = 0.03         # 'lifted off' = this far above the pad
+    home_tol_m: float = 0.05        # start the approach only back over the launch point (both axes within this) ...
+    home_wait_s: float = 6.0        # ... or after this long at height anyway
+    depth_median_n: int = 5         # depth: median of the last N frames (one wild frame can't move it)
+    vio_var_m2: float = 0.02        # cuVSLAM's own pose variance (x or y) above this (~14 cm sigma; normal ~2e-3) ...
+    vio_var_count: int = 2          # ... on this many samples in a row: land straight down (T4 run 2 gave 0.8 s warning)
+    slide_immediately: bool = False # variant: no hover stop at the wall, start translating as soon as it is at the standoff
 
 
 @dataclass
@@ -85,6 +99,8 @@ class Inputs:
     ahead_m: float | None                       # depth corridor range from the drone's centre (inf: nothing)
     t_depth: float                              # receive time of that depth frame
     depth_seq: int = 0                          # increments per depth frame (counts frames, not ticks)
+    vio_var: float | None = None                # max(pose covariance xx, yy) of that odometry sample, m^2
+    vo_failed: bool = False                     # cuVSLAM reports vo_state FAILED (real drone's /visual_slam/status)
 
 
 @dataclass
@@ -125,6 +141,13 @@ class WallSeek:
     prev_pos: tuple[float, float, float] | None = None
     t_prev_odom: float = -1e9
     blind: bool = False             # landing without the position estimate (it jumped)
+    dbuf: list[float] = field(default_factory=list)   # last depth ranges (inf as 10.0) for the median
+    dseq: int = -1
+    ahead_f: float | None = None    # the filtered range the mission uses
+    t_liftoff: float | None = None
+    t_var: float = -1e9
+    var_count: int = 0
+    t_slow: dict = field(default_factory=dict)   # per integral: since when the drone has been slow on that axis
     dt: float = 0.0
     i_n: float = 0.0                # integral share, north (standoff loop and north holds)
     i_e: float = 0.0                # integral share, east (east holds)
@@ -156,16 +179,28 @@ class WallSeek:
         cap = math.radians(self.p.yaw_rate_dps)
         return _clamp(self.p.kp_yaw * (i.yaw_err or 0.0), -cap, cap)
 
+    def _filter_depth(self, i: Inputs) -> None:
+        """Median of the last depth_median_n frames: a single wild frame (T4 run 2: 0.346 m against a true 0.407)
+        can't move it; a real change shows in every frame and passes within ~3 frames (0.1 s)."""
+        if i.depth_seq == self.dseq or i.ahead_m is None:
+            return
+        self.dseq = i.depth_seq
+        v = i.ahead_m if math.isfinite(i.ahead_m) else 10.0
+        self.dbuf = (self.dbuf + [v])[-max(1, self.p.depth_median_n):]
+        m = sorted(self.dbuf)[len(self.dbuf) // 2]
+        self.ahead_f = math.inf if m >= 10.0 else m
+
     def _track_range(self, i: Inputs) -> None:
-        """Closing speed toward the wall from the depth range itself (not the vision velocity, which went wrong
-        beside the wall): the range's slope over ~range_rate_window_s of frames, + = moving toward it."""
+        """Closing speed toward the wall from the (filtered) depth range itself (not the vision velocity, which went
+        wrong beside the wall): the range's slope over ~range_rate_window_s of frames, + = moving toward it."""
         if i.depth_seq == self.rr_seq:
             return
         self.rr_seq = i.depth_seq
-        if i.ahead_m is None or not math.isfinite(i.ahead_m) or i.ahead_m >= self.p.clear_m:
+        r_f = self.ahead_f
+        if r_f is None or not math.isfinite(r_f) or r_f >= self.p.clear_m:
             self.rr, self.vn_depth = [], 0.0
             return
-        self.rr = [(t, r) for t, r in self.rr if i.t_depth - t <= self.p.range_rate_window_s] + [(i.t_depth, i.ahead_m)]
+        self.rr = [(t, r) for t, r in self.rr if i.t_depth - t <= self.p.range_rate_window_s] + [(i.t_depth, r_f)]
         span = self.rr[-1][0] - self.rr[0][0]
         if span < 0.6 * self.p.range_rate_window_s or len(self.rr) < 4:
             self.vn_depth = 0.0
@@ -192,11 +227,17 @@ class WallSeek:
     def _vz(self, i: Inputs) -> float:
         return _clamp(self.p.k_z * (self.p.height_m - i.pos[2]), -self.p.climb_mps, self.p.climb_mps)
 
-    def _integrate(self, name: str, err: float) -> float:
-        """Learns a steady push only near the target (|err| < i_zone_m): far errors are the approach itself, and
-        integrating them would wind up and overshoot into the wall."""
+    def _integrate(self, name: str, err: float, speed: float = 0.0) -> float:
+        """Learns a steady push near the target (|err| < i_zone_m), or anywhere the drone is STUCK off it (moving
+        slower than i_stuck_mps: a push holding it there). Not while it is still closing a big error: integrating
+        the approach itself would wind up and overshoot into the wall."""
         cap = self.p.i_max_mps
-        if abs(err) >= self.p.i_zone_m:
+        if self.t_liftoff is None or self.t_last - self.t_liftoff < self.p.takeoff_kick_s + 1.0:
+            return getattr(self, name)       # the lift-off kick is a transient, not a steady push: don't learn it
+        slow = abs(speed) < self.p.i_stuck_mps
+        self.t_slow[name] = (self.t_slow.get(name) or self.t_last) if slow else None
+        stuck = slow and self.t_last - self.t_slow[name] >= self.p.i_stuck_s   # braking near the target is brief
+        if abs(err) >= self.p.i_zone_m and not stuck:
             return getattr(self, name)
         v = _clamp(getattr(self, name) + self.p.ki * err * self.dt, -cap, cap)
         setattr(self, name, v)
@@ -205,7 +246,7 @@ class WallSeek:
     def _hold(self, target: float, now_pos: float, vel: float, axis: str = "i_e") -> float:
         err = target - now_pos
         cap = self.p.xy_hold_cap_mps
-        return _clamp(self.p.k_xy * (err - self.p.lag_s * vel) + self._integrate(axis, err), -cap, cap)
+        return _clamp(self.p.k_xy * (err - self.p.lag_s * vel) + self._integrate(axis, err, vel), -cap, cap)
 
     def _east_ve(self, e: float, ve_meas: float) -> float:
         """Translate rightward at translate_mps against any push: a reference east position advancing at
@@ -220,7 +261,8 @@ class WallSeek:
         """Standoff loop on the depth range, with the velocity lag predicted out (vn_meas = the closing speed from
         DEPTH, self.vn_depth), plus the learned push."""
         err = rng - self.p.standoff_m
-        return _clamp(self.p.k_wall * (err - self.p.lag_s * vn_meas) + self._integrate("i_n", err), lo, hi)
+        lag = self.p.lag_s + (self.p.depth_median_n // 2) / 30.0      # + the median's own delay (~2 frames at 30 Hz)
+        return _clamp(self.p.k_wall * (err - lag * vn_meas) + self._integrate("i_n", err, vn_meas), lo, hi)
 
     # ------------------------------------------------------------------ step
     def step(self, i: Inputs) -> Output:
@@ -230,7 +272,12 @@ class WallSeek:
         self.dt = 0.0 if self.t_last is None else _clamp(i.now - self.t_last, 0.0, 0.25)
         self.t_last = i.now
         jump = self._jumped(i)
+        self._filter_depth(i)
         self._track_range(i)
+        if i.t_odom != self.t_var:                    # cuVSLAM's own uncertainty, counted per odometry sample
+            self.t_var = i.t_odom
+            bad = i.vio_var is not None and i.vio_var > p.vio_var_m2
+            self.var_count = self.var_count + 1 if bad else 0
         st = i.state or {}
         armed, offboard, nav = st.get("armed"), st.get("offboard_active"), st.get("nav_state")
         if self.phase in ("done", "yielded"):
@@ -271,7 +318,12 @@ class WallSeek:
 
         # ---- airborne supervision
         if self.phase in AIRBORNE:
-            if jump:
+            if i.vo_failed or self.var_count >= p.vio_var_count:
+                self.blind = True
+                self._land(i, ("cuVSLAM reports tracking FAILED" if i.vo_failed else
+                               f"cuVSLAM's own variance {i.vio_var:.3g} m^2 > {p.vio_var_m2:g} for {self.var_count} samples")
+                           + ": landing straight down before the estimate jumps")
+            elif jump:
                 self.blind = True
                 self._land(i, jump + ": landing straight down, not chasing the estimate")
             elif not fresh_state:
@@ -286,25 +338,32 @@ class WallSeek:
                 self._land(i, f"depth silent for {d_age:.2f} s")
             elif d_age > p.depth_hold_s:
                 return Output(self.phase, f"holding: depth {d_age:.2f} s old", (0.0, 0.0, 0.0, self._wz(i)))
-            elif i.ahead_m is not None and i.ahead_m < p.contact_m:
+            elif self.ahead_f is not None and self.ahead_f < p.contact_m:
                 vn = -p.xy_hold_cap_mps
-                return Output(self.phase, f"backing off: surface {i.ahead_m:.2f} m ahead", (vn, 0.0, self._vz(i), self._wz(i)))
+                return Output(self.phase, f"backing off: surface {self.ahead_f:.2f} m ahead",
+                              (vn, 0.0, self._vz(i), self._wz(i)))
 
         n, e, u = i.pos if i.pos else (0.0, 0.0, 0.0)
         vn_m, ve_m = i.vel if i.vel else (0.0, 0.0)
-        rng = i.ahead_m if i.ahead_m is not None else math.inf
+        rng = self.ahead_f if self.ahead_f is not None else math.inf
         wall = rng < p.clear_m
 
         if self.phase == "climb":
+            if self.t_liftoff is None and u > p.liftoff_m:
+                self.t_liftoff = i.now
+            kick = p.takeoff_kick_mps if self.t_liftoff is not None and i.now - self.t_liftoff < p.takeoff_kick_s else 0.0
             if abs(u - p.height_m) < p.climb_tol_m:
                 self.t_at_height = self.t_at_height if self.t_at_height is not None else i.now
-                if i.now - self.t_at_height >= p.climb_hold_s:
-                    self._set("approach", i.now, f"at {u:.2f} m: forward until a wall is {p.standoff_m:.2f} m ahead")
+                held = i.now - self.t_at_height
+                home = abs(n) < p.home_tol_m and abs(e) < p.home_tol_m
+                if held >= p.climb_hold_s and (home or held >= p.home_wait_s):
+                    self._set("approach", i.now, f"at {u:.2f} m, {math.hypot(n, e):.2f} m from the launch point: "
+                                                 f"forward until a wall is {p.standoff_m:.2f} m ahead")
             else:
                 self.t_at_height = None
             if self.phase == "climb":
-                return Output(self.phase, self.why,
-                              (self._hold(0.0, n, vn_m, "i_n"), self._hold(0.0, e, ve_m), self._vz(i), self._wz(i)))
+                return Output(self.phase, self.why, (self._hold(0.0, n, vn_m, "i_n") + kick, self._hold(0.0, e, ve_m),
+                                                     self._vz(i), self._wz(i)))
 
         if self.phase == "approach":
             if not wall and n >= p.max_forward_m - 0.02:
@@ -314,7 +373,10 @@ class WallSeek:
             else:
                 if wall:
                     vn = self._wall_vn(rng, self.vn_depth, -p.xy_hold_cap_mps, p.approach_mps)
-                    if abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps:
+                    if p.slide_immediately and abs(rng - p.standoff_m) < p.settle_tol_m:
+                        self.clear_count, self.last_seq = 0, i.depth_seq
+                        self._set("translate", i.now, f"wall {rng:.2f} m ahead: sliding right at once (no stop)")
+                    elif abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps:
                         self.t_in_tol = None
                         self._set("settle", i.now, f"wall {rng:.2f} m ahead: hover stop {p.settle_s:.0f} s")
                 else:   # nothing ahead yet: go, braking on the estimate before the forward limit
@@ -354,8 +416,8 @@ class WallSeek:
         if self.phase == "past":
             if e >= self.e_clear + p.past_end_m or e >= p.max_right_m:
                 self._land(i, f"{e - self.e_clear:.2f} m past the wall's end")
-            elif i.ahead_m is not None and i.ahead_m < p.standoff_m and i.now - i.t_depth <= p.depth_hold_s:
-                self._land(i, f"something {i.ahead_m:.2f} m ahead after the wall ended")
+            elif self.ahead_f is not None and self.ahead_f < p.standoff_m and i.now - i.t_depth <= p.depth_hold_s:
+                self._land(i, f"something {self.ahead_f:.2f} m ahead after the wall ended")
             else:
                 return Output(self.phase, self.why,
                               (self._hold(self.n_hold, n, vn_m, "i_n"), self._east_ve(e, ve_m), self._vz(i), self._wz(i)))
