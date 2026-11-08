@@ -54,7 +54,8 @@ class Params:
     clear_frames: int = 5           # consecutive depth frames
     settle_s: float = 2.0           # the complete hover stop before translating
     settle_tol_m: float = 0.05      # within this of the standoff ...
-    settle_mps: float = 0.05        # ... and slower than this
+    settle_mps: float = 0.05        # ... and closing on the wall slower than this (from depth)
+    settle_max_s: float = 6.0       # ... or after this long within 2 x settle_tol_m anyway
     max_forward_m: float = 1.30     # no wall by this far forward: hover and land (real launch: Wall A ~1.68 m ahead)
     max_right_m: float = 2.0        # the wall never ends within this: hover and land
     contact_m: float = 0.36         # a surface this close (centre; drone radius 0.29): back off at once
@@ -178,6 +179,9 @@ class WallSeek:
     s_ref: float = 0.0
     plan: list = field(default_factory=list)   # route mode: remaining steps
     route_pts: list | None = None   # route mode: the actual P1..P4 once P1 is fixed
+    ph: list = field(default_factory=list)       # (t, north, east) for the position-slope velocity
+    t_vel: float = -1e9
+    vel_est: tuple = (0.0, 0.0)
     turn: tuple | None = None       # (sign, degrees, hold point)
     turned: float = 0.0             # degrees commanded so far in this turn
     last_wz: float = 0.0            # deg/s commanded last tick
@@ -246,6 +250,21 @@ class WallSeek:
         den = sum((t - mt) ** 2 for t, _ in self.rr)
         self.vn_depth = -sum((t - mt) * (r - mr) for t, r in self.rr) / den if den > 0 else 0.0
 
+    def _track_vel(self, i: Inputs) -> None:
+        """Velocity (pad north, east) as the least-squares slope of the last ~0.3 s of odometry positions."""
+        if i.pos is None or i.t_odom == self.t_vel:
+            return
+        self.t_vel = i.t_odom
+        self.ph = [q for q in self.ph if i.t_odom - q[0] <= 0.3] + [(i.t_odom, i.pos[0], i.pos[1])]
+        m = len(self.ph)
+        if m < 3 or self.ph[-1][0] - self.ph[0][0] < 0.12:
+            return
+        mt = sum(q[0] for q in self.ph) / m
+        den = sum((q[0] - mt) ** 2 for q in self.ph)
+        if den <= 0:
+            return
+        self.vel_est = tuple(sum((q[0] - mt) * q[k] for q in self.ph) / den for k in (1, 2))
+
     def _jumped(self, i: Inputs) -> str | None:
         """The vision position stepped (cuVSLAM diverging beside the wall jumped metres per sample): why, or None."""
         if i.pos is None or i.t_odom == self.t_prev_odom:
@@ -255,7 +274,8 @@ class WallSeek:
             return None
         step = math.dist(prev, i.pos)
         dt = i.t_odom - t_prev
-        if step > self.p.jump_m or (dt > 0 and step / dt > self.p.jump_mps and step > 0.05):
+        # a fast step counts only above 10 cm: T4 run 6 landed on a 7 cm one (1.75 m/s over 0.04 s) beside the wall
+        if step > self.p.jump_m or (dt > 0 and step / dt > self.p.jump_mps and step > 0.10):
             return f"position estimate jumped {step:.2f} m in {dt:.2f} s"
         return None
 
@@ -307,6 +327,7 @@ class WallSeek:
         self.dt = 0.0 if self.t_last is None else _clamp(i.now - self.t_last, 0.0, 0.25)
         self.t_last = i.now
         jump = self._jumped(i)
+        self._track_vel(i)
         self._filter_depth(i)
         self._track_range(i)
         if (not self.var_armed and self.t_liftoff is not None and i.pos is not None
@@ -382,7 +403,9 @@ class WallSeek:
                               (vn, 0.0, self._vz(i), self._wz(i)))
 
         n, e, u = i.pos if i.pos else (0.0, 0.0, 0.0)
-        vn_m, ve_m = i.vel if i.vel else (0.0, 0.0)
+        # velocity from the POSITION's own slope (0.3 s), not cuVSLAM's twist field: beside the wall the twist read
+        # 0.1-0.7 m/s while the position held within 2 cm (T4 runs 5-6), and the legs steer by position anyway
+        vn_m, ve_m = self.vel_est
         rng = self.ahead_f if self.ahead_f is not None else math.inf
         wall = rng < p.clear_m
 
@@ -414,7 +437,7 @@ class WallSeek:
                     if p.slide_immediately and abs(rng - p.standoff_m) < p.settle_tol_m:
                         self.clear_count, self.last_seq = 0, i.depth_seq
                         self._set("translate", i.now, f"wall {rng:.2f} m ahead: sliding right at once (no stop)")
-                    elif abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps:
+                    elif abs(rng - p.standoff_m) < p.settle_tol_m and abs(self.vn_depth) < p.settle_mps:
                         self.t_in_tol = None
                         self._set("settle", i.now, f"wall {rng:.2f} m ahead: hover stop {p.settle_s:.0f} s")
                 else:   # nothing ahead yet: go, braking on the estimate before the forward limit
@@ -426,9 +449,12 @@ class WallSeek:
             if not wall:
                 self._set("approach", i.now, "lost the wall while settling")
                 return Output(self.phase, self.why, (0.0, self._hold(0.0, e, ve_m), self._vz(i), self._wz(i)))
-            ok = abs(rng - p.standoff_m) < p.settle_tol_m and math.hypot(vn_m, ve_m) < p.settle_mps
+            # 'still' from DEPTH (the wall distance steady), not cuVSLAM's velocity: beside the wall that read 0.1-0.7 m/s
+            # while the drone held within 2 cm (T4 runs 5-6), so the stop never ended. Cap: settle_max_s near the target.
+            ok = abs(rng - p.standoff_m) < p.settle_tol_m and abs(self.vn_depth) < p.settle_mps
             self.t_in_tol = (self.t_in_tol if self.t_in_tol is not None else i.now) if ok else None
-            if self.t_in_tol is not None and i.now - self.t_in_tol >= p.settle_s:
+            capped = i.now - self.t_phase >= p.settle_max_s and abs(rng - p.standoff_m) < 2 * p.settle_tol_m
+            if (self.t_in_tol is not None and i.now - self.t_in_tol >= p.settle_s) or capped:
                 if p.route_mode:
                     self._route_start(i, n, e)
                 else:
@@ -627,7 +653,7 @@ class WallSeek:
         if i.pos is None or i.now - i.t_odom > p.odom_hold_s:
             return Output(self.phase, self.why, (0.0, 0.0, -p.descend_mps, 0.0))   # blind: straight down
         n, e, u = i.pos
-        vn_m, ve_m = i.vel or (0.0, 0.0)
+        vn_m, ve_m = self.vel_est
         vn = ve = 0.0
         if self.land_target is not None and self.t_ground is None:     # + the push learned in flight (i_n, i_e)
             vn, ve = _cap2(p.k_xy * (self.land_target[0] - n) + self.i_n, p.k_xy * (self.land_target[1] - e) + self.i_e,

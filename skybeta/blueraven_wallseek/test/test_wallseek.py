@@ -203,6 +203,18 @@ def test_route_straight_legs_and_90_45_turns(plant):
     assert leg2
 
 
+def test_noisy_vision_velocity_at_the_stop_still_ends_the_stop_and_turns():
+    # T4 runs 5-6: cuVSLAM's velocity read 0.1-0.7 m/s at the stop while the drone held within 2 cm: never settled
+    rnd = random.Random(3)
+    s = Sim(W.Params(route_mode=True))
+    s.est_fault = lambda t, p, v: (p, (v[0] + rnd.uniform(-0.3, 0.3), v[1] + rnd.uniform(-0.3, 0.3))) \
+        if s.m.phase in ("approach", "settle") else None
+    s.run(160)
+    seq = [x.split(" -> ")[1].split(":")[0] for x in s.m.log if " -> " in x and ":" in x.split(" -> ")[1]]
+    assert "turn" in seq, seq
+    assert s.m.phase == "done" and any("route complete" in x for x in s.m.log), s.m.log
+
+
 def test_dashboard_view_shows_the_planned_then_the_actual_route():
     m = W.WallSeek(W.Params(route_mode=True))
     v = m.dashboard_view()
