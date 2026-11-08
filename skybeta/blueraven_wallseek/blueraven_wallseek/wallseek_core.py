@@ -38,6 +38,11 @@ class Params:
     route_mode: bool = True         # v3 (Darion): P1 at standoff 0.80 -> face P2 -> straight through the gap -> P4
     p2_past_m: float = 0.45         # P2: this far past the CP2 gap centre, on the line from P1 (whole drone across)
     p4_e_m: float = 2.80            # P4: due east of P2, about halfway to the tunnel
+    # Darion: climb DURING the P1 -> P2 leg (not at take-off), in proportion to the leg's progress, to the tunnel's
+    # height, then hold it. The tube's free space is centred ~0.95 m above the floor (course SDF: 0.71 m clearance
+    # at z 0.9-1.0, only 0.36 m at 0.4), and height is from the pad (centre ~0.07 m higher). Over the 0.30 m CP2 cone
+    # (~60% along the leg) the drone is at ~0.67 m (T4 v3 run at 0.4 m: its centre dipped to 0.33 m there).
+    leg_climb_to_m: float = 0.85    # 0 disables (stay at height_m)
     turn_rate_dps: float = 15.0     # slow in-place turns (a 45 deg/s in-place yaw diverged cuVSLAM on the T4)
     turn_dwell_s: float = 1.0       # still, after each turn
     pause_s: float = 1.5            # stop at each waypoint before turning
@@ -180,6 +185,8 @@ class WallSeek:
     plan: list = field(default_factory=list)   # route mode: remaining steps
     route_pts: list | None = None   # route mode: the actual P1, P2, P4 once P1 is fixed
     heading: float = 0.0            # route mode: commanded pad heading, deg clockwise from north
+    h_target: float | None = None   # current height target (None: height_m)
+    leg_index: int = 0              # route mode: 1 = P1 -> P2 (through the gap), 2 = P2 -> P4
     ph: list = field(default_factory=list)       # (t, north, east) for the position-slope velocity
     t_vel: float = -1e9
     vel_est: tuple = (0.0, 0.0)
@@ -281,7 +288,8 @@ class WallSeek:
         return None
 
     def _vz(self, i: Inputs) -> float:
-        return _clamp(self.p.k_z * (self.p.height_m - i.pos[2]), -self.p.climb_mps, self.p.climb_mps)
+        target = self.h_target if self.h_target is not None else self.p.height_m
+        return _clamp(self.p.k_z * (target - i.pos[2]), -self.p.climb_mps, self.p.climb_mps)
 
     def _integrate(self, name: str, err: float, speed: float = 0.0) -> float:
         """Learns a steady push near the target (|err| < i_zone_m), or anywhere the drone is STUCK off it (moving
@@ -526,6 +534,9 @@ class WallSeek:
             elif i.now - self.t_phase > p.translate_timeout_s:
                 self._land(i, f"leg did not finish within {p.translate_timeout_s:.0f} s")
             else:
+                if self.leg_index == 1 and p.leg_climb_to_m > 0:    # the leg through the gap: climb with progress
+                    frac = _clamp(s_now / max(total, 1e-6), 0.0, 1.0)
+                    self.h_target = p.height_m + (p.leg_climb_to_m - p.height_m) * frac
                 return Output(self.phase, self.why, (*self._leg_cmd(n, e, vn_m, ve_m, p.leg_mps), self._vz(i), 0.0))
 
         if self.phase == "gap":
@@ -628,6 +639,9 @@ class WallSeek:
             d = math.hypot(dn, de)
             u = (dn / d, de / d) if d > 1e-6 else (1.0, 0.0)
             self.leg, self.s_ref = ((n, e), arg, u, d), 0.0
+            self.leg_index += 1
+            if self.leg_index > 1 and self.p.leg_climb_to_m > 0:
+                self.h_target = self.p.leg_climb_to_m        # after the gap leg: hold the tunnel height
             self._set("leg", i.now, f"straight {d:.2f} m to ({arg[0]:.2f}, {arg[1]:.2f}), heading "
                                     f"{math.degrees(math.atan2(u[0], u[1])):.0f} deg north of east")
 
@@ -666,7 +680,8 @@ class WallSeek:
             self._set("done", i.now, "landed: PX4 disarmed or Offboard ended" if armed is False else "Offboard ended")
             return Output(self.phase, self.why)
         if self.blind:          # the estimate jumped: straight down on time alone, pressing once surely down
-            press = i.now - self.t_land > p.height_m / p.descend_mps + p.ground_wait_s
+            h = self.h_target if self.h_target is not None else p.height_m
+            press = i.now - self.t_land > h / p.descend_mps + p.ground_wait_s
             return Output(self.phase, self.why, (0.0, 0.0, -(p.press_mps if press else p.descend_mps), 0.0))
         if i.pos is None or i.now - i.t_odom > p.odom_hold_s:
             return Output(self.phase, self.why, (0.0, 0.0, -p.descend_mps, 0.0))   # blind: straight down
