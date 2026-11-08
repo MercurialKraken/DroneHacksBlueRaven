@@ -499,7 +499,7 @@ def crossed(sim, check):
 
 def test_route_file_loads_and_rejects_bad_walls():
     r = load_full_route()
-    assert r["launch"] == (-2.515, 1.466, 90.0) and len(r["steps"]) > 20
+    assert r["launch"] == (-2.515, 1.466, 90.0) and len(r["steps"]) > 10
     with pytest.raises(ValueError):
         W.load_route({"launch": {"x": 0, "y": 0}, "walls": {}, "steps": [{"fix": "nowhere"}]})
     with pytest.raises(ValueError):
@@ -524,10 +524,9 @@ def test_full_course_flies_every_checkpoint_and_lands_on_the_pad(plant):
     x, y = true_map(s)
     assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"CP5: landed at ({x:.2f}, {y:.2f})"
     assert s.min_clear > 0.31, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}"
-    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 3, s.m.fixes
+    assert sum(1 for f in s.m.fixes if f[3] is not None) >= 2, s.m.fixes          # Wall A, Wall C
 
 
-@pytest.mark.xfail(reason="known: with 12 cm N / 10 cm W of drift the contact guard stops it on the chicane leg (open)", strict=False)
 def test_full_course_depth_fixes_cancel_a_drifting_estimate():
     """The vision estimate drifts steadily (12 cm north, 10 cm west by 150 s, as cuVSLAM can): without the fixes the
     window (0.17 m to spare each side) would be missed; with them the drone still threads it and lands on the pad."""
@@ -539,7 +538,7 @@ def test_full_course_depth_fixes_cancel_a_drifting_estimate():
     log = "\n".join(s.m.log)
     assert "route complete" in log, log
     applied = [f for f in s.m.fixes if f[3] is not None]
-    assert len(applied) >= 3, s.m.fixes
+    assert len(applied) >= 2, s.m.fixes
     assert s.min_clear > 0.30, f"closest to a wall {s.min_clear:.2f} m at pad {s.min_clear_at}\n{log}"
     x, y = true_map(s)
     assert math.hypot(x - PAD_MAP[0], y - PAD_MAP[1]) < 0.762 - 0.29, f"landed at ({x:.2f}, {y:.2f})\n{log}"

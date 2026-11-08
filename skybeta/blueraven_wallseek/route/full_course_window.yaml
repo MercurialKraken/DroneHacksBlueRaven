@@ -33,19 +33,13 @@ steps:
   - {height: 0.85}                        # the tube's free space is centred ~0.94 m up: only 0.36 m clearance at 0.40
   - {face: [2.400, -1.100]}
   - {leg: [2.400, -1.100], name: P5}      # through the tunnel: CP3 (whole drone past y -0.305)
-  - {face: [0.183, -1.900]}
-  - {leg: [0.183, -1.900], name: P6}      # round the chicane wall's tip, at 0.85 (0.5 m boulders nearby)
-  - {face: [0.844, -0.100]}               # up the chicane corridor: the barrier ~2.3 m ahead
-  - {fix: barrier}                        # fix north (the window's along-wall axis is 94% north)
-  - {height: 0.72}                        # window: sill 0.305, top 1.219; 0.20 m over the chicane boulder beside W0
-  - {face: [0.934, -1.774]}
-  - {leg: [0.934, -1.774], name: W1}
-  - {face: [-0.146, -1.380]}              # the window's wall, 0.95 m north of the window's centre: face it square on
-  - {approach: c2a, standoff: 0.80, max_m: 0.50, name: S6}
-  - {fix: c2a}                            # fix across the wall
-  - {face: [0.427, -2.600]}
-  - {leg: [0.427, -2.600], name: W0}      # slide along the wall to square in front of the window
-  - {face: [-0.4715, -2.2725]}            # the window's centre
+  # v3 (Darion): no corridor / barrier fix and no slide along the window's wall (old points 7 and 8: cuVSLAM held 9 times
+  # on the T4 in those big in-place chicane turns, and both chicane depth fixes disagreed by 0.5-1.1 m). Straight from
+  # the tunnel's exit to a point square in front of the window, the nose sweeping round DURING the leg (no in-place
+  # turn), then straight through. (Straight from the old P6 would cross the window 0.15 m from its north jamb.)
+  - {leg: [0.427, -2.600], name: P6, yaw_to: 160.0}   # 0.96 m in front of the window on its axis; 0.32 m over the boulder
+  - {height: 0.72}                        # window: sill 0.305, top 1.219; 0.20 m over the chicane boulder beside P6
+  - {face_yaw: 160.0}                     # square to the window (a top-up if the leg's sweep fell short)
   - {clear: 1.30}                         # go / no-go: depth must see THROUGH the window (nothing within 1.30 m)
   - {leg: [-0.988, -2.084], name: W2}     # through the window: CP4 (+5), whole drone 0.26 m past its line
   - {face: [-2.042, -0.792]}
