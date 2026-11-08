@@ -235,11 +235,16 @@ class MppiFollow:
         self.nav.add_depth(out[0], out[1], float(self.pos[2]), stamp)
         return True
 
-    def start(self, route: Any, pad: Any, fence: dict | None = None) -> None:
+    def start(self, route: Any, pad: Any, fence: dict | None = None, below_drone_m: float | None = None) -> None:
         """At follow start, from the take-off pose (base_link on the ground: obstacles start at least 0.12 m above it).
-        fence: the route file's params.fence ({"fwd": [..], "left": [..]} from the take-off pose: the arena's nets)."""
+        fence: the route file's params.fence ({"fwd": [..], "left": [..]} from the take-off pose: the arena's nets).
+        below_drone_m: the route file's params.below_drone_m: depth this far under the drone is the lowest that counts
+        as an obstacle (LocalGridParams default 0.35). route_mppi_full at 1.2 m: 0.15, so the real window sill
+        (0.914-1.0 m) is out of the band and MPPI can take the window (tests/window_sim.py)."""
         self.nav = LocalNav(route_to_odom(route, pad.p0[:2], pad.yaw0), pad.p0[:2], pad.yaw0, nav=self.nav_p,
-                            grid=LocalGridParams(floor_z=pad.p0[2]), mppi=self.mppi_p, fence=fence)
+                            grid=LocalGridParams(floor_z=pad.p0[2], **({} if below_drone_m is None
+                                                                        else {"below_drone_m": float(below_drone_m)})),
+                            mppi=self.mppi_p, fence=fence)
         self.lost, self._frozen_since, self._repeats = None, None, 0   # a new follow: the odometry guards start afresh
 
     def tick(self, now: float, pad: Any) -> dict[str, Any] | None:

@@ -104,6 +104,7 @@
   "push_ff_right_mps": 0.0,
   "push_ff_follow": false,
   "climb_tol_m": 0.05,
+  "below_drone_m": 0.15,
   "fence": {
    "fwd": [
     -4.514,

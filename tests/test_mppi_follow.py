@@ -452,6 +452,21 @@ def test_depth_arriving_ahead_of_odometry_is_placed_not_dropped():
         assert _depth_timing("queue", depth_lat=lat, odom_lat=0.035) >= 8.0, lat
 
 
+def test_route_below_drone_m_reaches_mppis_grid_and_the_default_stays():
+    """route_mppi_full sets params.below_drone_m 0.15 (HEIGHT 1.2: the real 0.914-1.0 m window sill leaves the band,
+    tests/window_sim.py 4/4 through); every other route keeps LocalGridParams' 0.35."""
+    import json as _j
+    doc = _j.loads((TAPE / "routes" / "route_mppi_full.json").read_text())
+    assert doc["params"]["below_drone_m"] == 0.15
+    mf = M.MppiFollow(0.25, 0.9, 0.6)
+    mf.on_odom(0.0, (0.0, 0.0, 1.2), (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0))
+    mf.start(doc["route"], S.Pad(0.0, 0.0, 0.0, 0.0), fence=doc["params"]["fence"],
+             below_drone_m=doc["params"]["below_drone_m"])
+    assert mf.nav.grid.p.below_drone_m == 0.15
+    mf.start(doc["route"], S.Pad(0.0, 0.0, 0.0, 0.0))
+    assert mf.nav.grid.p.below_drone_m == 0.35
+
+
 def test_depth_queue_keeps_too_new_frames_and_drops_older_ones():
     q = M.DepthQueue(keep=4)
     assert q.pop(None) is None and q.pop(1.0) is None
